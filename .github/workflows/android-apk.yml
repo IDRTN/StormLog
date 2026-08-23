@@ -69,7 +69,6 @@ jobs:
         with:
           distribution: temurin
           java-version: "${{ env.JAVA_VERSION }}"
-          cache: gradle
 
       - name: Configure Android SDK
         uses: android-actions/setup-android@v3
