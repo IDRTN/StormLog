@@ -240,13 +240,29 @@ jobs:
         working-directory: android
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
 
-      - name: Verify application source was unchanged
+      - name: Verify source with expected CNG changes
         run: |
-          git diff --exit-code -- app src assets app.json package.json package-lock.json tsconfig.json eas.json
+          git diff --exit-code -- app src assets app.json package-lock.json tsconfig.json eas.json
+
           git ls-files -z -- app src assets app.json package.json package-lock.json tsconfig.json eas.json \
             | xargs -0 sha256sum > /tmp/stormlog-source-after.sha256
-          cmp /tmp/stormlog-source-before.sha256 /tmp/stormlog-source-after.sha256
+
+          EXPECTED_PACKAGE_JSON="$(mktemp)"
+          git show HEAD:package.json \
+            | sed -e 's/"android": "expo start --android"/"android": "expo run:android"/' \
+                   -e 's/"ios": "expo start --ios"/"ios": "expo run:ios"/' \
+            > "${EXPECTED_PACKAGE_JSON}"
+          cmp "${EXPECTED_PACKAGE_JSON}" package.json
+          rm "${EXPECTED_PACKAGE_JSON}"
+
+          grep -vE '^[0-9a-f]{64}  package\.json$' /tmp/stormlog-source-before.sha256 \
+            > /tmp/stormlog-source-before-without-cng-package.sha256
+          grep -vE '^[0-9a-f]{64}  package\.json$' /tmp/stormlog-source-after.sha256 \
+            > /tmp/stormlog-source-after-without-cng-package.sha256
+          cmp /tmp/stormlog-source-before-without-cng-package.sha256 /tmp/stormlog-source-after-without-cng-package.sha256
+
           echo "PASS: application source and configuration hashes are unchanged"
+          echo "PASS: package.json contains only the two deterministic Expo CNG script changes"
 
       - name: Validate installable APK
         run: |
