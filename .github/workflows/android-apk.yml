@@ -110,7 +110,7 @@ jobs:
       - name: Verify dependency versions
         run: |
           EXPO_INSTALLED="$(node -p "require('./node_modules/expo/package.json').version")"
-          REACT_NATIVE_INSTALLED="$(node -p "require('./react-native/package.json').version")"
+          REACT_NATIVE_INSTALLED="$(node -p "require('./node_modules/react-native/package.json').version")"
           echo "Installed Expo SDK: ${EXPO_INSTALLED}"
           echo "Installed React Native: ${REACT_NATIVE_INSTALLED}"
 
