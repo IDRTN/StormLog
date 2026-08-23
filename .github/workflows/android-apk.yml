@@ -155,7 +155,7 @@ jobs:
           fi
 
           test -f "android/app/build.gradle"
-          grep -Fq 'namespace "com.stormlog.app"' android/app/build.gradle
+          grep -Fq "namespace 'com.stormlog.app'" android/app/build.gradle
 
       - name: Build unsigned-testable debug APK
         working-directory: android
