@@ -79,7 +79,7 @@ jobs:
           yes | sdkmanager --licenses > /dev/null
           sdkmanager \
             "platform-tools" \
-            "platforms;${ANDROID_API_LEVEL}" \
+            "platforms;android-${ANDROID_API_LEVEL}" \
             "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" \
             "ndk;${ANDROID_NDK_VERSION}" \
             "cmake;${CMAKE_VERSION}"
