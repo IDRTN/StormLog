@@ -85,6 +85,85 @@ jobs:
             "cmake;${CMAKE_VERSION}"
           sdkmanager --list_installed
 
+      - name: Remove disposable runner content
+        run: |
+          set -euo pipefail
+
+          echo "=== Disk audit before cleanup ==="
+          df -h /
+          for directory in \
+            /usr/share/dotnet \
+            /usr/share/swift \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost \
+            "${ANDROID_HOME}/emulator" \
+            "${ANDROID_HOME}/system-images"
+          do
+            if [ -e "${directory}" ]; then
+              du -sh "${directory}"
+            else
+              echo "not present: ${directory}"
+            fi
+          done
+
+          remove_path() {
+            local path="$1"
+            if [ -e "${path}" ]; then
+              echo "Removing disposable path: ${path} ($(du -sh "${path}" | cut -f1))"
+              sudo rm -rf --one-file-system "${path}"
+            fi
+          }
+
+          remove_children_except() {
+            local parent="$1"
+            local preserved_name="$2"
+
+            if [ ! -d "${parent}" ]; then
+              return
+            fi
+
+            local removable_bytes
+            removable_bytes="$(find "${parent}" -mindepth 1 -maxdepth 1 -type d ! -name "${preserved_name}" -print0 \
+              | xargs -0 -r du -sb --total \
+              | awk '$NF == "total" {print $1}')"
+
+            if [ -n "${removable_bytes}" ] && [ "${removable_bytes}" -gt 0 ]; then
+              printf 'Removing %s entries other than %s (%d bytes)\n' \
+                "${parent}" "${preserved_name}" "${removable_bytes}"
+              find "${parent}" -mindepth 1 -maxdepth 1 -type d ! -name "${preserved_name}" -exec rm -rf -- {} +
+            fi
+          }
+
+          remove_path /usr/share/dotnet
+          remove_path /usr/share/swift
+          remove_path /opt/ghc
+          remove_path /usr/local/.ghcup
+          remove_path /opt/hostedtoolcache/CodeQL
+          remove_path /usr/local/share/boost
+          remove_path "${ANDROID_HOME}/emulator"
+          remove_path "${ANDROID_HOME}/system-images"
+
+          remove_children_except "${ANDROID_HOME}/platforms" "android-${ANDROID_API_LEVEL}"
+          remove_children_except "${ANDROID_HOME}/build-tools" "${ANDROID_BUILD_TOOLS_VERSION}"
+          remove_children_except "${ANDROID_HOME}/ndk" "${ANDROID_NDK_VERSION}"
+          remove_children_except "${ANDROID_HOME}/cmake" "${CMAKE_VERSION}"
+
+          docker system prune -af --volumes >/dev/null
+          sudo apt-get clean
+
+          test -d "${ANDROID_HOME}/cmdline-tools"
+          test -d "${ANDROID_HOME}/platform-tools"
+          test -d "${ANDROID_HOME}/licenses"
+          test -d "${ANDROID_HOME}/platforms/android-${ANDROID_API_LEVEL}"
+          test -d "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}"
+          test -d "${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
+          test -d "${ANDROID_HOME}/cmake/${CMAKE_VERSION}"
+
+          echo "=== Disk space after cleanup ==="
+          df -h /
+
       - name: Print instrument build manifest
         run: |
           JAVA_ACTUAL="$(java -version 2>&1 | head -n 1)"
