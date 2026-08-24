@@ -11,10 +11,17 @@ on:
         options:
           - release
           - debug
+  push:
+    branches:
+      - master
 
 concurrency:
   group: stormlog-android-apk-${{ github.ref }}
   cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
 
 env:
   NODE_VERSION: "22.16.0"
@@ -37,6 +44,7 @@ jobs:
 
     steps:
       - name: Check out current baseline
+        id: checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -75,21 +83,25 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up Node.js
+        id: setup-node
         uses: actions/setup-node@v4
         with:
           node-version: "${{ env.NODE_VERSION }}"
           cache: npm
 
       - name: Set up JDK
+        id: setup-java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "${{ env.JAVA_VERSION }}"
 
       - name: Configure Android SDK
+        id: setup-android-sdk
         uses: android-actions/setup-android@v3
 
       - name: Install deterministic Android components
+        id: install-android-components
         run: |
           echo "Android home: ${ANDROID_HOME}"
           yes | sdkmanager --licenses > /dev/null
@@ -102,6 +114,7 @@ jobs:
           sdkmanager --list_installed
 
       - name: Remove disposable runner content
+        id: cleanup-runner
         run: |
           set -euo pipefail
 
@@ -181,6 +194,7 @@ jobs:
           df -h /
 
       - name: Print instrument build manifest
+        id: build-manifest
         run: |
           JAVA_ACTUAL="$(java -version 2>&1 | head -n 1)"
           printf '%s\n' "=== StormLog controlled build manifest ==="
@@ -203,11 +217,13 @@ jobs:
           printf '%s\n' "==========================================="
 
       - name: Install exact locked dependencies
+        id: install-dependencies
         env:
           NPM_CONFIG_LEGACY_PEER_DEPS: "true"
         run: npm ci
 
       - name: Verify dependency versions
+        id: verify-dependencies
         run: |
           EXPO_INSTALLED="$(node -p "require('./node_modules/expo/package.json').version")"
           REACT_NATIVE_INSTALLED="$(node -p "require('./node_modules/react-native/package.json').version")"
@@ -218,15 +234,18 @@ jobs:
           test "${REACT_NATIVE_INSTALLED}" = "${REACT_NATIVE_VERSION}"
 
       - name: Run TypeScript validation
+        id: typecheck
         run: npm run typecheck
 
       - name: Snapshot application source hashes
+        id: snapshot-source
         run: |
           git ls-files -z -- app src assets app.json package.json package-lock.json tsconfig.json eas.json \
             | xargs -0 sha256sum > /tmp/stormlog-source-before.sha256
           sha256sum /tmp/stormlog-source-before.sha256
 
       - name: Generate Android native project
+        id: expo-prebuild
         env:
           CI: "1"
           EXPO_NO_TELEMETRY: "1"
@@ -234,6 +253,7 @@ jobs:
         run: npx expo prebuild --platform android --clean --no-install
 
       - name: Validate generated Android configuration
+        id: validate-native-config
         run: |
           GRADLE_FILE="android/build.gradle"
           test -f "${GRADLE_FILE}"
@@ -258,6 +278,7 @@ jobs:
           grep -Fq "namespace 'com.stormlog.app'" android/app/build.gradle
 
       - name: Enable embedded JS bundle for standalone debug APK
+        id: enable-debug-bundle
         if: steps.identity.outputs.build_type == 'debug'
         run: |
           set -euo pipefail
@@ -286,6 +307,7 @@ jobs:
           echo "Configured the debug variant to embed the JavaScript bundle."
 
       - name: Configure release signing from GitHub secrets
+        id: configure-release-signing
         if: steps.identity.outputs.build_type == 'release'
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -358,11 +380,13 @@ jobs:
           echo "Release signing configuration installed from GitHub secrets."
 
       - name: Build unsigned-testable debug APK
+        id: build-debug-apk
         if: steps.identity.outputs.build_type == 'debug'
         working-directory: android
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
 
       - name: Build signed standalone release APK
+        id: build-release-apk
         if: steps.identity.outputs.build_type == 'release'
         working-directory: android
         env:
@@ -374,6 +398,7 @@ jobs:
         run: ./gradlew :app:assembleRelease --no-daemon --stacktrace "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
 
       - name: Verify source with expected CNG changes
+        id: verify-source-integrity
         run: |
           git diff --exit-code -- app src assets app.json package-lock.json tsconfig.json eas.json
 
@@ -398,6 +423,7 @@ jobs:
           echo "PASS: package.json contains only the two deterministic Expo CNG script changes"
 
       - name: Validate installable APK
+        id: validate-apk
         run: |
           BUILD_TYPE="${{ steps.identity.outputs.build_type }}"
           APK_SOURCE="android/app/build/outputs/apk/${BUILD_TYPE}/app-${BUILD_TYPE}.apk"
@@ -446,6 +472,12 @@ jobs:
           APK_SIZE="$(stat -c %s stormlog-current.apk)"
 
           {
+            echo "apk_path=${APK_SOURCE}"
+            echo "apk_size=${APK_SIZE}"
+            echo "apk_sha256=${APK_SHA256}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
             echo "APK size bytes: ${APK_SIZE}"
             echo "APK SHA-256: ${APK_SHA256}"
             echo "Package: ${ANDROID_PACKAGE_NAME}"
@@ -474,6 +506,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload traceable APK artifact
+        id: upload-artifact
         uses: actions/upload-artifact@v4
         with:
           name: StormLog-APK-${{ github.run_number }}-${{ github.sha }}
@@ -482,7 +515,133 @@ jobs:
           retention-days: 30
 
       - name: Remove temporary signing material
+        id: remove-signing-material
         if: always()
         run: |
           rm -f "${RUNNER_TEMP}/stormlog-release.keystore" \
                 "${RUNNER_TEMP}/stormlog-release-signing.gradle"
+
+      - name: Report controlled build result
+        id: report-result
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          REQUESTED_BUILD_TYPE: ${{ inputs.build_type || 'debug' }}
+          COMMIT_SHA: ${{ github.sha }}
+          STEPS_JSON: ${{ toJSON(steps) }}
+          ARTIFACT_NAME: StormLog-APK-${{ github.run_number }}-${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          failed_step_id="$(printf '%s' "${STEPS_JSON}" \
+            | jq -r '[to_entries[] | select(.key != "report-result" and .value.outcome == "failure")][0].key // empty')"
+
+          step_display_name() {
+            case "$1" in
+              checkout) echo "Check out current baseline" ;;
+              identity) echo "Record build identity" ;;
+              setup-node) echo "Set up Node.js" ;;
+              setup-java) echo "Set up JDK" ;;
+              setup-android-sdk) echo "Configure Android SDK" ;;
+              install-android-components) echo "Install deterministic Android components" ;;
+              cleanup-runner) echo "Remove disposable runner content" ;;
+              build-manifest) echo "Print instrument build manifest" ;;
+              install-dependencies) echo "Install exact locked dependencies" ;;
+              verify-dependencies) echo "Verify dependency versions" ;;
+              typecheck) echo "Run TypeScript validation" ;;
+              snapshot-source) echo "Snapshot application source hashes" ;;
+              expo-prebuild) echo "Generate Android native project" ;;
+              validate-native-config) echo "Validate generated Android configuration" ;;
+              enable-debug-bundle) echo "Enable embedded JS bundle for standalone debug APK" ;;
+              configure-release-signing) echo "Configure release signing from GitHub secrets" ;;
+              build-debug-apk) echo "Build unsigned-testable debug APK" ;;
+              build-release-apk) echo "Build signed standalone release APK" ;;
+              verify-source-integrity) echo "Verify source with expected CNG changes" ;;
+              validate-apk) echo "Validate installable APK" ;;
+              upload-artifact) echo "Upload traceable APK artifact" ;;
+              remove-signing-material) echo "Remove temporary signing material" ;;
+              report-result) echo "Report controlled build result" ;;
+              *) echo "${1:-unknown}" ;;
+            esac
+          }
+
+          if [[ "${JOB_STATUS}" == "success" ]]; then
+            apk_path="${{ steps.validate-apk.outputs.apk_path }}"
+            apk_size="${{ steps.validate-apk.outputs.apk_size }}"
+            apk_sha256="${{ steps.validate-apk.outputs.apk_sha256 }}"
+            test -n "${apk_path}" && test -n "${apk_size}" && test -n "${apk_sha256}"
+
+            {
+              echo "## BUILD PASSED"
+              echo ""
+              echo "| Field | Value |"
+              echo "|---|---|"
+              echo "| Build type | ${REQUESTED_BUILD_TYPE} |"
+              echo "| Commit SHA | \`${COMMIT_SHA}\` |"
+              echo "| Generated APK path | \`${apk_path}\` |"
+              echo "| Uploaded file | \`stormlog-current.apk\` |"
+              echo "| Artifact name | \`${ARTIFACT_NAME}\` |"
+              echo "| Package name | \`${ANDROID_PACKAGE_NAME}\` |"
+              echo "| Version | \`${APP_VERSION} (${EXPECTED_VERSION_CODE})\` |"
+              echo "| APK size | \`${apk_size} bytes\` |"
+              echo "| APK SHA-256 | \`${apk_sha256}\` |"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [[ -n "${failed_step_id}" ]]; then
+            failed_step="$(step_display_name "${failed_step_id}")"
+            failed_step_outcome="$(printf '%s' "${STEPS_JSON}" \
+              | jq -r --arg id "${failed_step_id}" '.[$id].outcome // "unknown"')"
+          else
+            failed_step="Not exposed by the GitHub Actions steps context"
+            failed_step_outcome="unknown"
+          fi
+
+          failed_job_id="$(gh api \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?filter=latest" \
+            --jq '.jobs[] | select(.name == "Build controlled Android APK") | .id' 2>/dev/null \
+            | head -n 1 || true)"
+          failed_log=""
+          if [[ -n "${failed_job_id}" ]]; then
+            failed_log="$(gh run view "${GITHUB_RUN_ID}" --job "${failed_job_id}" --log-failed 2>/dev/null || true)"
+          fi
+
+          exit_code="$(printf '%s\n' "${failed_log}" \
+            | grep -Eo 'exit code [0-9]+' \
+            | tail -n 1 \
+            | awk '{print $3}' || true)"
+          [[ -n "${exit_code}" ]] || exit_code="not available"
+
+          relevant_error="$(printf '%s\n' "${failed_log}" \
+            | grep -viE 'ANDROID_KEYSTORE|ANDROID_KEY_ALIAS|ANDROID_KEY_PASSWORD|^\s*$' \
+            | tail -n 8 || true)"
+
+          {
+            echo "## BUILD FAILED"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Failed step | ${failed_step} |"
+            echo "| Step outcome | ${failed_step_outcome} |"
+            echo "| Exit code | ${exit_code} |"
+            echo "| Commit SHA | \`${COMMIT_SHA}\` |"
+            echo "| Build type | ${REQUESTED_BUILD_TYPE} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ -n "${relevant_error}" ]]; then
+            {
+              echo ""
+              echo "### Final relevant error excerpt"
+              echo ""
+              echo '```text'
+              printf '%s\n' "${relevant_error}"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo ""
+              echo "Final log text was not retrievable; review the failed step above."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
