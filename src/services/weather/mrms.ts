@@ -1,5 +1,6 @@
 import type { WeatherProvenance } from '../../models/types';
 import { mmToInches, mmPerHourToInchesPerHour } from './conversions';
+import { createRateLimitError, guardedRequest } from '../network/requestGuard';
 
 export type FetchJson = typeof fetch;
 
@@ -145,33 +146,43 @@ export function createHttpMrmsProvider(
   return {
     async getPrecipitation(latitude, longitude, referenceTimeMs, utcOffsetSeconds) {
       if (!serviceUrl) return null;
-      const endpoint = `${serviceUrl.replace(/\/$/, '')}/mrms?latitude=${latitude}&longitude=${longitude}&referenceTimeMs=${referenceTimeMs}&utcOffsetSeconds=${utcOffsetSeconds}`;
       try {
-        const response = await fetchJson(endpoint, { headers: { Accept: 'application/json' } });
-        if (!response.ok) return null;
-        const payload: MrmsProviderPayload = await response.json();
-        const daily = accumulateMrmsDailyPrecipitation(payload.hourlyBuckets ?? [], referenceTimeMs, utcOffsetSeconds);
-        if (!daily.dataAvailable && payload.precipRateMmPerHour == null && payload.currentOneHour?.valueMm == null) {
-          return null;
-        }
+        const cacheKey = `${latitude.toFixed(3)},${longitude.toFixed(3)}:${Math.floor(referenceTimeMs / 60000)}`;
+        return await guardedRequest<MrmsPrecipitation | null>({
+          service: 'MRMS',
+          key: cacheKey,
+          cacheTtlMs: 30 * 1000,
+          cacheIf: (value) => value != null,
+          execute: async () => {
+            const endpoint = `${serviceUrl.replace(/\/$/, '')}/mrms?latitude=${latitude}&longitude=${longitude}&referenceTimeMs=${referenceTimeMs}&utcOffsetSeconds=${utcOffsetSeconds}`;
+            const response = await fetchJson(endpoint, { headers: { Accept: 'application/json' } });
+            if (response.status === 429) throw createRateLimitError('MRMS', response);
+            if (!response.ok) return null;
+            const payload: MrmsProviderPayload = await response.json();
+            const daily = accumulateMrmsDailyPrecipitation(payload.hourlyBuckets ?? [], referenceTimeMs, utcOffsetSeconds);
+            if (!daily.dataAvailable && payload.precipRateMmPerHour == null && payload.currentOneHour?.valueMm == null) {
+              return null;
+            }
 
-        const source = provenance(payload, latitude, longitude, referenceTimeMs, 'MRMS service/cache');
-        const currentEnd = payload.currentOneHour?.endMs;
-        const currentAge = currentEnd ? referenceTimeMs - currentEnd : Number.POSITIVE_INFINITY;
+            const source = provenance(payload, latitude, longitude, referenceTimeMs, 'MRMS service/cache');
+            const currentEnd = payload.currentOneHour?.endMs;
+            const currentAge = currentEnd ? referenceTimeMs - currentEnd : Number.POSITIVE_INFINITY;
 
-        return {
-          currentOneHourInches: payload.currentOneHour?.valueMm != null && currentAge <= 15 * 60 * 1000
-            ? mmToInches(payload.currentOneHour.valueMm)
-            : null,
-          currentPartialHourInches: payload.currentPartialHour?.valueMm != null
-            ? mmToInches(payload.currentPartialHour.valueMm)
-            : null,
-          precipitationRateInchesPerHour: payload.precipRateMmPerHour != null
-            ? mmPerHourToInchesPerHour(payload.precipRateMmPerHour)
-            : null,
-          ...daily,
-          source,
-        };
+            return {
+              currentOneHourInches: payload.currentOneHour?.valueMm != null && currentAge <= 15 * 60 * 1000
+                ? mmToInches(payload.currentOneHour.valueMm)
+                : null,
+              currentPartialHourInches: payload.currentPartialHour?.valueMm != null
+                ? mmToInches(payload.currentPartialHour.valueMm)
+                : null,
+              precipitationRateInchesPerHour: payload.precipRateMmPerHour != null
+                ? mmPerHourToInchesPerHour(payload.precipRateMmPerHour)
+                : null,
+              ...daily,
+              source,
+            };
+          },
+        });
       } catch {
         return null;
       }

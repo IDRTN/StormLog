@@ -6,6 +6,7 @@ import {
   metersToStatuteMiles,
   pascalToInchesOfMercury,
 } from './conversions';
+import { createRateLimitError, guardedRequest, isRateLimitError } from '../network/requestGuard';
 
 export const PRIMARY_NWS_STATION = 'KVTA';
 export const BACKUP_NWS_STATION = 'KZZV';
@@ -23,6 +24,7 @@ export interface NwsObservationResult {
   data?: WeatherData;
   error?: string;
   fresh?: boolean;
+  rateLimited?: boolean;
 }
 
 function qualityValue(container: any): number | null {
@@ -90,81 +92,94 @@ export async function fetchNwsObservation(
   referenceTimeMs: number,
   fetchJson: FetchJson = fetch,
 ): Promise<NwsObservationResult> {
-  const endpoint = `https://api.weather.gov/stations/${stationId}/observations/latest`;
+  const key = stationId;
   try {
-    const response = await fetchJson(endpoint, {
-      headers: {
-        Accept: 'application/geo+json',
-        'User-Agent': 'StormLog/1.0 (weather@stormlog.example)',
+    return await guardedRequest<NwsObservationResult>({
+      service: 'NWS observation',
+      key,
+      cacheTtlMs: 60 * 1000,
+      cacheIf: (result) => result.success,
+      execute: async () => {
+        const endpoint = `https://api.weather.gov/stations/${stationId}/observations/latest`;
+        const response = await fetchJson(endpoint, {
+          headers: {
+            Accept: 'application/geo+json',
+            'User-Agent': 'StormLog/1.0 (weather@stormlog.example)',
+          },
+        });
+        if (response.status === 429) throw createRateLimitError('NWS observation', response);
+        if (!response.ok) throw new Error(`NWS observation HTTP ${response.status}`);
+
+        const payload = await response.json();
+        const properties = payload?.properties;
+        if (!properties?.timestamp) throw new Error('Invalid NWS observation response');
+
+        const source = provenance(stationId, properties, referenceTimeMs, endpoint);
+        if (source.freshness !== 'current') {
+          return { success: false, fresh: false, error: 'NWS observation is stale' };
+        }
+
+        const temperatureC = qualityValue(properties.temperature);
+        const dewpointC = qualityValue(properties.dewpoint);
+        const humidity = qualityValue(properties.relativeHumidity);
+        const windSpeedKmh = qualityValue(properties.windSpeed);
+        const gustKmh = qualityValue(properties.windGust);
+        const visibilityMeters = qualityValue(properties.visibility);
+        const pressure = pressureInHg(
+          properties.barometricPressure,
+          properties.seaLevelPressure,
+          properties.altimeter,
+        );
+
+        const presentWeather = Array.isArray(properties.presentWeather)
+          ? properties.presentWeather
+              .map((item: any) => [item.intensity, item.weather, item.modifier].filter(Boolean).join(' '))
+              .filter(Boolean)
+          : [];
+        const cloudLayers = Array.isArray(properties.cloudLayers)
+          ? properties.cloudLayers.map((layer: any) => ({
+              amount: String(layer.amount ?? 'UNKNOWN'),
+              baseFeet: typeof layer.base?.value === 'number' ? Math.round(metersToFeet(layer.base.value)) : null,
+            }))
+          : [];
+
+        const data: WeatherData = {
+          temperature: temperatureC != null ? Math.round(celsiusToFahrenheit(temperatureC) * 10) / 10 : null,
+          humidity,
+          pressure,
+          windSpeed: windSpeedKmh != null ? Math.round(kmhToMph(windSpeedKmh) * 10) / 10 : null,
+          windDirection: qualityValue(properties.windDirection),
+          windGust: gustKmh != null ? Math.round(kmhToMph(gustKmh) * 10) / 10 : null,
+          dewPoint: dewpointC != null ? Math.round(celsiusToFahrenheit(dewpointC) * 10) / 10 : null,
+          precipitation: null,
+          observedDailyPrecipitation: null,
+          weatherCondition: properties.textDescription ?? null,
+          cape: null,
+          visibility: visibilityMeters != null ? Math.round(metersToStatuteMiles(visibilityMeters) * 10) / 10 : null,
+          presentWeather,
+          cloudLayers,
+          currentConditionsSource: source,
+          pressureSource: source,
+          utcOffsetSeconds: undefined,
+          weatherTimezone: source.timezone,
+          valueSources: [
+            { ...source, field: 'temperature', unit: 'degF', confidence: qualityConfidence(properties.temperature) },
+            { ...source, field: 'humidity', unit: '%', confidence: qualityConfidence(properties.relativeHumidity) },
+            { ...source, field: 'dewPoint', unit: 'degF', confidence: qualityConfidence(properties.dewpoint) },
+            { ...source, field: 'windSpeed', unit: 'mph', confidence: qualityConfidence(properties.windSpeed) },
+            { ...source, field: 'windGust', unit: 'mph', confidence: qualityConfidence(properties.windGust) },
+            { ...source, field: 'pressure', unit: 'inHg', confidence: qualityConfidence(properties.barometricPressure) },
+            { ...source, field: 'visibility', unit: 'mi', confidence: qualityConfidence(properties.visibility) },
+          ],
+        };
+
+        return { success: true, fresh: true, data };
       },
     });
-    if (!response.ok) return { success: false, error: `NWS observation HTTP ${response.status}` };
-
-    const payload = await response.json();
-    const properties = payload?.properties;
-    if (!properties?.timestamp) return { success: false, error: 'Invalid NWS observation response' };
-
-    const source = provenance(stationId, properties, referenceTimeMs, endpoint);
-    if (source.freshness !== 'current') {
-      return { success: false, fresh: false, error: 'NWS observation is stale' };
-    }
-
-    const temperatureC = qualityValue(properties.temperature);
-    const dewpointC = qualityValue(properties.dewpoint);
-    const humidity = qualityValue(properties.relativeHumidity);
-    const windSpeedKmh = qualityValue(properties.windSpeed);
-    const gustKmh = qualityValue(properties.windGust);
-    const visibilityMeters = qualityValue(properties.visibility);
-    const pressure = pressureInHg(
-      properties.barometricPressure,
-      properties.seaLevelPressure,
-      properties.altimeter,
-    );
-
-    const presentWeather = Array.isArray(properties.presentWeather)
-      ? properties.presentWeather
-          .map((item: any) => [item.intensity, item.weather, item.modifier].filter(Boolean).join(' '))
-          .filter(Boolean)
-      : [];
-    const cloudLayers = Array.isArray(properties.cloudLayers)
-      ? properties.cloudLayers.map((layer: any) => ({
-          amount: String(layer.amount ?? 'UNKNOWN'),
-          baseFeet: typeof layer.base?.value === 'number' ? Math.round(metersToFeet(layer.base.value)) : null,
-        }))
-      : [];
-
-    const data: WeatherData = {
-      temperature: temperatureC != null ? Math.round(celsiusToFahrenheit(temperatureC) * 10) / 10 : null,
-      humidity,
-      pressure,
-      windSpeed: windSpeedKmh != null ? Math.round(kmhToMph(windSpeedKmh) * 10) / 10 : null,
-      windDirection: qualityValue(properties.windDirection),
-      windGust: gustKmh != null ? Math.round(kmhToMph(gustKmh) * 10) / 10 : null,
-      dewPoint: dewpointC != null ? Math.round(celsiusToFahrenheit(dewpointC) * 10) / 10 : null,
-      precipitation: null,
-      observedDailyPrecipitation: null,
-      weatherCondition: properties.textDescription ?? null,
-      cape: null,
-      visibility: visibilityMeters != null ? Math.round(metersToStatuteMiles(visibilityMeters) * 10) / 10 : null,
-      presentWeather,
-      cloudLayers,
-      currentConditionsSource: source,
-      pressureSource: source,
-      utcOffsetSeconds: undefined,
-      weatherTimezone: source.timezone,
-      valueSources: [
-        { ...source, field: 'temperature', unit: 'degF', confidence: qualityConfidence(properties.temperature) },
-        { ...source, field: 'humidity', unit: '%', confidence: qualityConfidence(properties.relativeHumidity) },
-        { ...source, field: 'dewPoint', unit: 'degF', confidence: qualityConfidence(properties.dewpoint) },
-        { ...source, field: 'windSpeed', unit: 'mph', confidence: qualityConfidence(properties.windSpeed) },
-        { ...source, field: 'windGust', unit: 'mph', confidence: qualityConfidence(properties.windGust) },
-        { ...source, field: 'pressure', unit: 'inHg', confidence: qualityConfidence(properties.barometricPressure) },
-        { ...source, field: 'visibility', unit: 'mi', confidence: qualityConfidence(properties.visibility) },
-      ],
-    };
-
-    return { success: true, fresh: true, data };
   } catch (error: any) {
+    if (isRateLimitError(error)) {
+      return { success: false, rateLimited: true, error: error.message };
+    }
     return { success: false, error: error?.message ?? 'NWS observation request failed' };
   }
 }
@@ -174,6 +189,6 @@ export async function fetchBestNwsObservation(
   fetchJson: FetchJson = fetch,
 ): Promise<NwsObservationResult> {
   const primary = await fetchNwsObservation(PRIMARY_NWS_STATION, referenceTimeMs, fetchJson);
-  if (primary.success) return primary;
+  if (primary.success || primary.rateLimited) return primary;
   return fetchNwsObservation(BACKUP_NWS_STATION, referenceTimeMs, fetchJson);
 }

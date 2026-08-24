@@ -4,6 +4,7 @@ import { fetchBestNwsObservation, type FetchJson } from './nwsObservations';
 import { fetchNwsForecast, type FetchJson as ForecastFetchJson } from './nwsForecast';
 import { fetchOpenMeteoSnapshot } from './openMeteo';
 import { createHttpMrmsProvider, type MrmsProvider } from './mrms';
+import { guardedRequest } from '../network/requestGuard';
 
 export const WEATHER_FEATURE_FLAGS = {
   NWS_CURRENT_CONDITIONS: true,
@@ -71,53 +72,61 @@ export function createStormLogWeatherProvider(
     ): Promise<WeatherResult> {
       const referenceTimeMs = explicitReferenceTimeMs ?? Date.now();
       try {
-        const openMeteoResult = await fetchOpenMeteoSnapshot(
-          latitude,
-          longitude,
-          referenceTimeMs,
-          fetchJson,
-        );
-        const utcOffsetSeconds = openMeteoResult.data.utcOffsetSeconds ?? 0;
-        const [nwsResult, forecastResult, mrmsResult] = await Promise.all([
-          features.NWS_CURRENT_CONDITIONS || features.NWS_PRESSURE
-            ? fetchBestNwsObservation(referenceTimeMs, fetchJson)
-            : Promise.resolve({ success: false as const, error: 'disabled' }),
-          features.NWS_FORECAST
-            ? fetchNwsForecast(latitude, longitude, referenceTimeMs, fetchJson)
-            : Promise.resolve({ success: false as const, error: 'disabled' }),
-          features.MRMS_PRECIPITATION
-            ? mrms.getPrecipitation(latitude, longitude, referenceTimeMs, utcOffsetSeconds)
-            : Promise.resolve(null),
-        ]);
+        return await guardedRequest<WeatherResult>({
+          service: 'Weather refresh',
+          key: `${latitude.toFixed(3)},${longitude.toFixed(3)}:${Math.floor(referenceTimeMs / 60000)}`,
+          cacheTtlMs: 60 * 1000,
+          cacheIf: (result) => result.success,
+          execute: async () => {
+            const openMeteoResult = await fetchOpenMeteoSnapshot(
+              latitude,
+              longitude,
+              referenceTimeMs,
+              fetchJson,
+            );
+            const utcOffsetSeconds = openMeteoResult.data.utcOffsetSeconds ?? 0;
+            const [nwsResult, forecastResult, mrmsResult] = await Promise.all([
+              features.NWS_CURRENT_CONDITIONS || features.NWS_PRESSURE
+                ? fetchBestNwsObservation(referenceTimeMs, fetchJson)
+                : Promise.resolve({ success: false as const, error: 'disabled' }),
+              features.NWS_FORECAST
+                ? fetchNwsForecast(latitude, longitude, referenceTimeMs, fetchJson)
+                : Promise.resolve({ success: false as const, error: 'disabled' }),
+              features.MRMS_PRECIPITATION
+                ? mrms.getPrecipitation(latitude, longitude, referenceTimeMs, utcOffsetSeconds)
+                : Promise.resolve(null),
+            ]);
 
-        let weatherData = openMeteoResult.data;
-        if (nwsResult.success && nwsResult.data) weatherData = mergeWeatherData(weatherData, nwsResult.data);
+            let weatherData = openMeteoResult.data;
+            if (nwsResult.success && nwsResult.data) weatherData = mergeWeatherData(weatherData, nwsResult.data);
 
-        if (forecastResult.success && forecastResult.source) {
-          weatherData.forecast = {
-            periods: forecastResult.periods ?? [],
-            hourlyPeriods: forecastResult.hourlyPeriods ?? [],
-            timezone: forecastResult.timezone ?? weatherData.weatherTimezone ?? 'unknown',
-            utcOffsetSeconds: weatherData.utcOffsetSeconds ?? 0,
-            source: forecastResult.source,
-          };
-          weatherData.forecastSource = forecastResult.source;
-        }
+            if (forecastResult.success && forecastResult.source) {
+              weatherData.forecast = {
+                periods: forecastResult.periods ?? [],
+                hourlyPeriods: forecastResult.hourlyPeriods ?? [],
+                timezone: forecastResult.timezone ?? weatherData.weatherTimezone ?? 'unknown',
+                utcOffsetSeconds: weatherData.utcOffsetSeconds ?? 0,
+                source: forecastResult.source,
+              };
+              weatherData.forecastSource = forecastResult.source;
+            }
 
-        if (mrmsResult) {
-          weatherData.precipitation = mrmsResult.currentOneHourInches;
-          weatherData.precipitationRateInchesPerHour = mrmsResult.precipitationRateInchesPerHour;
-          weatherData.observedDailyPrecipitation = mrmsResult.observedDailyPrecipitationInches;
-          weatherData.observedDailyPrecipitationIsComplete = mrmsResult.observedDailyIsComplete;
-          weatherData.precipitationIsComplete = mrmsResult.observedDailyIsComplete;
-          weatherData.currentPartialHourPrecipitation = mrmsResult.currentPartialHourInches;
-          weatherData.precipitationSource = mrmsResult.source;
-          if (mrmsResult.precipitationRateInchesPerHour != null) {
-            weatherData.rainRateSource = mrmsResult.source;
-          }
-        }
+            if (mrmsResult) {
+              weatherData.precipitation = mrmsResult.currentOneHourInches;
+              weatherData.precipitationRateInchesPerHour = mrmsResult.precipitationRateInchesPerHour;
+              weatherData.observedDailyPrecipitation = mrmsResult.observedDailyPrecipitationInches;
+              weatherData.observedDailyPrecipitationIsComplete = mrmsResult.observedDailyIsComplete;
+              weatherData.precipitationIsComplete = mrmsResult.observedDailyIsComplete;
+              weatherData.currentPartialHourPrecipitation = mrmsResult.currentPartialHourInches;
+              weatherData.precipitationSource = mrmsResult.source;
+              if (mrmsResult.precipitationRateInchesPerHour != null) {
+                weatherData.rainRateSource = mrmsResult.source;
+              }
+            }
 
-        return { success: true, data: weatherData };
+            return { success: true, data: weatherData };
+          },
+        });
       } catch (error: any) {
         const message = error?.message || String(error);
         const noConnection = message.includes('Network') || message.includes('fetch') || message.includes('timeout');

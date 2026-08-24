@@ -1,4 +1,6 @@
 import type { ForecastPeriod, WeatherProvenance } from '../../models/types';
+import { createRateLimitError, guardedRequest } from '../network/requestGuard';
+import { fetchNwsPointData } from '../network/nwsPoints';
 
 export type FetchJson = typeof fetch;
 
@@ -51,6 +53,7 @@ async function fetchPeriods(url: string, fetchJson: FetchJson): Promise<any[]> {
       'User-Agent': 'StormLog/1.0 (weather@stormlog.example)',
     },
   });
+  if (response.status === 429) throw createRateLimitError('NWS forecast', response);
   if (!response.ok) throw new Error(`NWS forecast HTTP ${response.status}`);
   const payload = await response.json();
   return Array.isArray(payload?.properties?.periods) ? payload.properties.periods : [];
@@ -62,55 +65,55 @@ export async function fetchNwsForecast(
   referenceTimeMs: number,
   fetchJson: FetchJson = fetch,
 ): Promise<NwsForecastResult> {
-  const pointEndpoint = `https://api.weather.gov/points/${latitude},${longitude}`;
   try {
-    const response = await fetchJson(pointEndpoint, {
-      headers: {
-        Accept: 'application/geo+json',
-        'User-Agent': 'StormLog/1.0 (weather@stormlog.example)',
+    return await guardedRequest<NwsForecastResult>({
+      service: 'NWS forecast',
+      key: `${latitude.toFixed(3)},${longitude.toFixed(3)}`,
+      cacheTtlMs: 60 * 1000,
+      cacheIf: (result) => result.success,
+      execute: async () => {
+        const point = await fetchNwsPointData(latitude, longitude, fetchJson);
+        const forecastEndpoint = point?.forecast;
+        const hourlyEndpoint = point?.forecastHourly;
+        const gridId = point?.gridId;
+        const gridX = point?.gridX;
+        const gridY = point?.gridY;
+        if (!forecastEndpoint || !hourlyEndpoint || !gridId || gridX == null || gridY == null) {
+          return { success: false, error: 'Incomplete NWS point response' };
+        }
+
+        const [periodJson, hourlyJson] = await Promise.all([
+          fetchPeriods(forecastEndpoint, fetchJson),
+          fetchPeriods(hourlyEndpoint, fetchJson),
+        ]);
+        const periods = periodJson.map(mapPeriod).filter((period) => Number.isFinite(period.startTime));
+        const hourlyPeriods = hourlyJson.map(mapPeriod).filter((period) => Number.isFinite(period.startTime));
+        if (!periods.length && !hourlyPeriods.length) {
+          return { success: false, error: 'NWS forecast has no periods' };
+        }
+
+        return {
+          success: true,
+          periods,
+          hourlyPeriods,
+          timezone: point.timezone ?? 'unknown',
+          source: {
+            provider: 'NWS',
+            source: `NWS ${gridId} ${gridX},${gridY}`,
+            endpoint: `https://api.weather.gov/points/${latitude},${longitude}`,
+            gridId: `${gridId}/${gridX},${gridY}`,
+            latitude,
+            longitude,
+            observationTime: referenceTimeMs,
+            retrievedTime: referenceTimeMs,
+            timezone: point.timezone,
+            freshness: 'current',
+            confidence: 0.9,
+            completeness: (periods.length ? 0.5 : 0) + (hourlyPeriods.length ? 0.5 : 0),
+          },
+        };
       },
     });
-    if (!response.ok) return { success: false, error: `NWS point HTTP ${response.status}` };
-    const point = await response.json();
-    const forecastEndpoint = point?.properties?.forecast;
-    const hourlyEndpoint = point?.properties?.forecastHourly;
-    const gridId = point?.properties?.gridId;
-    const gridX = point?.properties?.gridX;
-    const gridY = point?.properties?.gridY;
-    if (!forecastEndpoint || !hourlyEndpoint || !gridId || gridX == null || gridY == null) {
-      return { success: false, error: 'Incomplete NWS point response' };
-    }
-
-    const [periodJson, hourlyJson] = await Promise.all([
-      fetchPeriods(forecastEndpoint, fetchJson),
-      fetchPeriods(hourlyEndpoint, fetchJson),
-    ]);
-    const periods = periodJson.map(mapPeriod).filter((period) => Number.isFinite(period.startTime));
-    const hourlyPeriods = hourlyJson.map(mapPeriod).filter((period) => Number.isFinite(period.startTime));
-    if (!periods.length && !hourlyPeriods.length) {
-      return { success: false, error: 'NWS forecast has no periods' };
-    }
-
-    return {
-      success: true,
-      periods,
-      hourlyPeriods,
-      timezone: point.properties.timezone ?? 'unknown',
-      source: {
-        provider: 'NWS',
-        source: `NWS ${gridId} ${gridX},${gridY}`,
-        endpoint: pointEndpoint,
-        gridId: `${gridId}/${gridX},${gridY}`,
-        latitude,
-        longitude,
-        observationTime: referenceTimeMs,
-        retrievedTime: referenceTimeMs,
-        timezone: point.properties.timezone,
-        freshness: 'current',
-        confidence: 0.9,
-        completeness: (periods.length ? 0.5 : 0) + (hourlyPeriods.length ? 0.5 : 0),
-      },
-    };
   } catch (error: any) {
     return { success: false, error: error?.message ?? 'NWS forecast request failed' };
   }

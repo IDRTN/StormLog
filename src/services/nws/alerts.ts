@@ -1,4 +1,5 @@
 import type { NwsAlert } from '../../models/types';
+import { createRateLimitError, guardedRequest } from '../network/requestGuard';
 
 const NWS_API = 'https://api.weather.gov';
 
@@ -30,17 +31,26 @@ export async function fetchNwsAlerts(
   longitude: number,
   nowMs?: number
 ): Promise<NwsAlert[]> {
-  const url = `${NWS_API}/alerts/active?point=${latitude},${longitude}`;
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'StormLog/1.0 (stormlog@example.com)',
-      Accept: 'application/geo+json',
+  const cacheKey = `${latitude.toFixed(3)},${longitude.toFixed(3)}:${Math.floor((nowMs ?? Date.now()) / 60000)}`;
+  return guardedRequest<NwsAlert[]>({
+    service: 'NWS alerts',
+    key: cacheKey,
+    cacheTtlMs: 30 * 1000,
+    execute: async () => {
+      const url = `${NWS_API}/alerts/active?point=${latitude},${longitude}`;
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'StormLog/1.0 (stormlog@example.com)',
+          Accept: 'application/geo+json',
+        },
+      });
+      if (response.status === 429) throw createRateLimitError('NWS alerts', response);
+      if (!response.ok) throw new Error(`NWS alerts HTTP ${response.status}`);
+
+      const json = await response.json();
+      return normalizeNwsAlerts(json.features || [], nowMs ?? Date.now());
     },
   });
-  if (!response.ok) throw new Error(`NWS alerts HTTP ${response.status}`);
-
-  const json = await response.json();
-  return normalizeNwsAlerts(json.features || [], nowMs ?? Date.now());
 }
 
 export async function getActiveAlertTypes(

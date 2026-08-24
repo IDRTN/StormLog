@@ -2,6 +2,15 @@ name: StormLog Android APK
 
 on:
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: Android build type
+        required: true
+        default: release
+        type: choice
+        options:
+          - release
+          - debug
 
 concurrency:
   group: stormlog-android-apk-${{ github.ref }}
@@ -38,15 +47,22 @@ jobs:
         run: |
           COMMIT_SHA="$(git rev-parse HEAD)"
           WORKFLOW_SHA="${{ github.sha }}"
+          BUILD_TYPE="${{ inputs.build_type || 'debug' }}"
           echo "Git commit SHA: ${COMMIT_SHA}"
           echo "Workflow event SHA: ${WORKFLOW_SHA}"
           test "${COMMIT_SHA}" = "${WORKFLOW_SHA}"
+
+          case "${BUILD_TYPE}" in
+            debug|release) ;;
+            *) echo "::error::Unsupported build type: ${BUILD_TYPE}"; exit 1 ;;
+          esac
 
           ACTUAL_EXPO_SDK="$(node -p "require('./node_modules/expo/package.json').version" 2>/dev/null || true)"
           ACTUAL_REACT_NATIVE="$(node -p "require('./react-native/package.json').version" 2>/dev/null || true)"
 
           {
             echo "commit_sha=${COMMIT_SHA}"
+            echo "build_type=${BUILD_TYPE}"
             echo "expo_sdk=${ACTUAL_EXPO_SDK:-not-installed-yet}"
             echo "react_native=${ACTUAL_REACT_NATIVE:-not-installed-yet}"
             echo "node_version=${NODE_VERSION}"
@@ -179,6 +195,11 @@ jobs:
           printf '%s\n' "Android Build Tools:        ${ANDROID_BUILD_TOOLS_VERSION}"
           printf '%s\n' "Android NDK:                ${ANDROID_NDK_VERSION}"
           printf '%s\n' "CMake:                      ${CMAKE_VERSION}"
+          if [[ "${{ steps.identity.outputs.build_type }}" == "release" ]]; then
+            printf '%s\n' "Build type:                 release"
+          else
+            printf '%s\n' "Build type:                 debug"
+          fi
           printf '%s\n' "==========================================="
 
       - name: Install exact locked dependencies
@@ -236,9 +257,93 @@ jobs:
           test -f "android/app/build.gradle"
           grep -Fq "namespace 'com.stormlog.app'" android/app/build.gradle
 
+      - name: Configure release signing from GitHub secrets
+        if: steps.identity.outputs.build_type == 'release'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          STORMLOG_RELEASE_KEYSTORE: ${{ runner.temp }}/stormlog-release.keystore
+          STORMLOG_RELEASE_SIGNING_GRADLE: ${{ runner.temp }}/stormlog-release-signing.gradle
+        run: |
+          set -euo pipefail
+
+          missing=0
+          for variable in \
+            ANDROID_KEYSTORE_BASE64 \
+            ANDROID_KEYSTORE_PASSWORD \
+            ANDROID_KEY_ALIAS \
+            ANDROID_KEY_PASSWORD
+          do
+            if [[ -z "${!variable:-}" ]]; then
+              echo "::error title=Release signing configuration incomplete::Required GitHub secret ${variable} is not set."
+              missing=1
+            fi
+          done
+          if (( missing > 0 )); then
+            exit "${missing}"
+          fi
+
+          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | tr -d '\r\n' | base64 --decode \
+            > "${STORMLOG_RELEASE_KEYSTORE}"
+          chmod 600 "${STORMLOG_RELEASE_KEYSTORE}"
+          test -s "${STORMLOG_RELEASE_KEYSTORE}"
+
+          if ! KEYSTORE_ENTRY="$(keytool \
+            -list \
+            -alias "${ANDROID_KEY_ALIAS}" \
+            -keystore "${STORMLOG_RELEASE_KEYSTORE}" \
+            -storepass "${ANDROID_KEYSTORE_PASSWORD}" \
+            2>/dev/null)"; then
+            echo "::error title=Release signing configuration invalid::The keystore could not be opened or the configured alias was not found."
+            exit 1
+          fi
+
+          if ! printf '%s\n' "${KEYSTORE_ENTRY}" | grep -Fq 'PrivateKeyEntry'; then
+            echo "::error title=Release signing configuration invalid::The configured alias does not contain a private key."
+            exit 1
+          fi
+
+          cat > "${STORMLOG_RELEASE_SIGNING_GRADLE}" <<'GRADLE'
+          android {
+            signingConfigs {
+              stormlogRelease {
+                storeFile file(System.getenv("STORMLOG_RELEASE_KEYSTORE"))
+                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+              }
+            }
+
+            buildTypes {
+              release {
+                signingConfig signingConfigs.stormlogRelease
+              }
+            }
+          }
+          GRADLE
+
+          chmod 600 "${STORMLOG_RELEASE_SIGNING_GRADLE}"
+          printf '\napply from: "%s"\n' "${STORMLOG_RELEASE_SIGNING_GRADLE}" \
+            >> android/app/build.gradle
+          echo "Release signing configuration installed from GitHub secrets."
+
       - name: Build unsigned-testable debug APK
+        if: steps.identity.outputs.build_type == 'debug'
         working-directory: android
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
+
+      - name: Build signed standalone release APK
+        if: steps.identity.outputs.build_type == 'release'
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          STORMLOG_RELEASE_KEYSTORE: ${{ runner.temp }}/stormlog-release.keystore
+          STORMLOG_RELEASE_SIGNING_GRADLE: ${{ runner.temp }}/stormlog-release-signing.gradle
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
 
       - name: Verify source with expected CNG changes
         run: |
@@ -266,7 +371,8 @@ jobs:
 
       - name: Validate installable APK
         run: |
-          APK_SOURCE="android/app/build/outputs/apk/debug/app-debug.apk"
+          BUILD_TYPE="${{ steps.identity.outputs.build_type }}"
+          APK_SOURCE="android/app/build/outputs/${BUILD_TYPE}/app-${BUILD_TYPE}.apk"
           AAPT2="${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/aapt2"
           APKSIGNER="${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/apksigner"
 
@@ -278,6 +384,25 @@ jobs:
 
           echo "${BADGING}" | grep -F "package: name='${ANDROID_PACKAGE_NAME}' versionCode='${EXPECTED_VERSION_CODE}' versionName='${APP_VERSION}'"
           echo "${BADGING}" | grep -Eq "native-code:[[:space:]]+.*arm64-v8a"
+
+          if [[ "${BUILD_TYPE}" == "release" ]]; then
+            if ! zipinfo -1 "${APK_SOURCE}" | grep -Fxq 'assets/index.android.bundle'; then
+              echo "::error::Release APK is not standalone: assets/index.android.bundle is missing."
+              exit 1
+            fi
+
+            MANIFEST="$("${AAPT2}" dump xmltree --file AndroidManifest.xml "${APK_SOURCE}")"
+            if printf '%s\n' "${MANIFEST}" | grep -Eq 'android:debuggable\(0x0101000f\)=true'; then
+              echo "::error::Release APK must not be debuggable."
+              exit 1
+            fi
+
+            CERTIFICATES="$("${APKSIGNER}" verify --print-certs "${APK_SOURCE}")"
+            if printf '%s\n' "${CERTIFICATES}" | grep -Fq 'CN=Android Debug'; then
+              echo "::error::Release APK is signed by the Android Debug certificate."
+              exit 1
+            fi
+          fi
 
           "${APKSIGNER}" verify --verbose "${APK_SOURCE}"
 
@@ -301,6 +426,8 @@ jobs:
             echo "| Field | Value |"
             echo "|---|---|"
             echo "| Commit | $(git rev-parse HEAD) |"
+            echo "| Build type | ${BUILD_TYPE} |"
+            echo "| Standalone JS bundle | $([[ "${BUILD_TYPE}" == release ]] && echo verified || echo not-applicable) |"
             echo "| Package | ${ANDROID_PACKAGE_NAME} |"
             echo "| Version | ${APP_VERSION} (${EXPECTED_VERSION_CODE}) |"
             echo "| Expo SDK | ${EXPO_SDK_VERSION} |"
@@ -318,3 +445,9 @@ jobs:
           path: stormlog-current.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Remove temporary signing material
+        if: always()
+        run: |
+          rm -f "${RUNNER_TEMP}/stormlog-release.keystore" \
+                "${RUNNER_TEMP}/stormlog-release-signing.gradle"

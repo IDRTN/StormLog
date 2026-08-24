@@ -1,6 +1,7 @@
 import type { WeatherProvider, WeatherResult } from './types';
 import type { ForecastPeriod, WeatherData, WeatherProvenance } from '../../models/types';
 import { getLocalDateString } from '../../util/dateUtils';
+import { createRateLimitError, guardedRequest } from '../network/requestGuard';
 
 const WMO_CODES: Record<number, string> = {
   0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast',
@@ -150,64 +151,74 @@ export async function fetchOpenMeteoSnapshot(
     `&past_days=1&forecast_days=8` +
     `&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch` +
     `&timezone=auto`;
-  const response = await fetchJson(url);
-  if (!response.ok) throw new Error(response.status === 429 ? 'API rate limit exceeded' : `Weather API error: ${response.status}`);
-  const payload = await response.json();
-  const current = payload.current;
-  if (!current) throw new Error('Invalid weather API response');
+  const cacheKey = `${latitude.toFixed(3)},${longitude.toFixed(3)},${Math.floor(referenceTimeMs / 60000)}`;
 
-  const utcOffsetSeconds = payload.utc_offset_seconds ?? 0;
-  const apiTimezone = payload.timezone ?? 'unknown';
-  const source = provenance(latitude, longitude, referenceTimeMs, apiTimezone, utcOffsetSeconds);
-  const hourlyTimes: string[] = payload.hourly?.time ?? [];
-  const hourlyPrecip: (number | null)[] = payload.hourly?.precipitation ?? [];
-  const hourlyCape: (number | null)[] = payload.hourly?.cape ?? [];
+  return guardedRequest<OpenMeteoSnapshot>({
+    service: 'Open-Meteo',
+    key: cacheKey,
+    cacheTtlMs: 60 * 1000,
+    execute: async () => {
+      const response = await fetchJson(url);
+      if (response.status === 429) throw createRateLimitError('Open-Meteo', response);
+      if (!response.ok) throw new Error(`Weather API error: ${response.status}`);
+      const payload = await response.json();
+      const current = payload.current;
+      if (!current) throw new Error('Invalid weather API response');
 
-  let observedDailyPrecip: number | null = null;
-  let observedDailyComplete = false;
-  let observedDailyPartialHours = 0;
-  if (hourlyTimes.length > 0 && hourlyPrecip.length > 0) {
-    const result = calculateObservedDailyPrecip(hourlyTimes, hourlyPrecip, utcOffsetSeconds, referenceTimeMs);
-    observedDailyPrecip = result.total;
-    observedDailyComplete = result.isComplete;
-    observedDailyPartialHours = result.nullValuesSkipped.length;
-  }
+      const utcOffsetSeconds = payload.utc_offset_seconds ?? 0;
+      const apiTimezone = payload.timezone ?? 'unknown';
+      const source = provenance(latitude, longitude, referenceTimeMs, apiTimezone, utcOffsetSeconds);
+      const hourlyTimes: string[] = payload.hourly?.time ?? [];
+      const hourlyPrecip: (number | null)[] = payload.hourly?.precipitation ?? [];
+      const hourlyCape: (number | null)[] = payload.hourly?.cape ?? [];
 
-  const mslPressurePa = current.pressure_msl ?? null;
-  const pressureHpa = mslPressurePa ?? current.surface_pressure ?? null;
-  const pressureInHg = pressureHpa != null ? pressureHpa * 0.02953 : null;
-  const temp = current.temperature_2m ?? null;
-  const humidity = current.relative_humidity_2m ?? null;
-  const dewPoint = temp != null && humidity != null ? calculateDewPoint(temp, humidity) : null;
-  const cape = getCurrentHourCape(hourlyTimes, hourlyCape, utcOffsetSeconds, referenceTimeMs);
-  const forecast = buildOpenMeteoForecast(payload, source);
+      let observedDailyPrecip: number | null = null;
+      let observedDailyComplete = false;
+      let observedDailyPartialHours = 0;
+      if (hourlyTimes.length > 0 && hourlyPrecip.length > 0) {
+        const result = calculateObservedDailyPrecip(hourlyTimes, hourlyPrecip, utcOffsetSeconds, referenceTimeMs);
+        observedDailyPrecip = result.total;
+        observedDailyComplete = result.isComplete;
+        observedDailyPartialHours = result.nullValuesSkipped.length;
+      }
 
-  return {
-    payload,
-    data: {
-      temperature: temp,
-      humidity,
-      pressure: pressureInHg != null ? Math.round(pressureInHg * 100) / 100 : null,
-      windSpeed: current.wind_speed_10m ?? null,
-      windDirection: current.wind_direction_10m ?? null,
-      windGust: current.wind_gusts_10m ?? null,
-      dewPoint: dewPoint != null ? Math.round(dewPoint * 10) / 10 : null,
-      precipitation: current.precipitation ?? null,
-      observedDailyPrecipitation: observedDailyPrecip,
-      observedDailyPrecipitationIsComplete: observedDailyPrecip == null ? undefined : observedDailyComplete,
-      observedDailyPrecipitationPartialHours: observedDailyPartialHours,
-      weatherCondition: WMO_CODES[current.weather_code] ?? `Unknown (${current.weather_code})`,
-      cape,
-      utcOffsetSeconds,
-      weatherTimezone: apiTimezone,
-      referenceTimeMs,
-      pressureSource: source,
-      precipitationSource: source,
-      capeSource: source,
-      forecastSource: source,
-      forecast,
+      const mslPressurePa = current.pressure_msl ?? null;
+      const pressureHpa = mslPressurePa ?? current.surface_pressure ?? null;
+      const pressureInHg = pressureHpa != null ? pressureHpa * 0.02953 : null;
+      const temp = current.temperature_2m ?? null;
+      const humidity = current.relative_humidity_2m ?? null;
+      const dewPoint = temp != null && humidity != null ? calculateDewPoint(temp, humidity) : null;
+      const cape = getCurrentHourCape(hourlyTimes, hourlyCape, utcOffsetSeconds, referenceTimeMs);
+      const forecast = buildOpenMeteoForecast(payload, source);
+
+      return {
+        payload,
+        data: {
+          temperature: temp,
+          humidity,
+          pressure: pressureInHg != null ? Math.round(pressureInHg * 100) / 100 : null,
+          windSpeed: current.wind_speed_10m ?? null,
+          windDirection: current.wind_direction_10m ?? null,
+          windGust: current.wind_gusts_10m ?? null,
+          dewPoint: dewPoint != null ? Math.round(dewPoint * 10) / 10 : null,
+          precipitation: current.precipitation ?? null,
+          observedDailyPrecipitation: observedDailyPrecip,
+          observedDailyPrecipitationIsComplete: observedDailyPrecip == null ? undefined : observedDailyComplete,
+          observedDailyPrecipitationPartialHours: observedDailyPartialHours,
+          weatherCondition: WMO_CODES[current.weather_code] ?? `Unknown (${current.weather_code})`,
+          cape,
+          utcOffsetSeconds,
+          weatherTimezone: apiTimezone,
+          referenceTimeMs,
+          pressureSource: source,
+          precipitationSource: source,
+          capeSource: source,
+          forecastSource: source,
+          forecast,
+        },
+      };
     },
-  };
+  });
 }
 
 /**

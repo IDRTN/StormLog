@@ -35,6 +35,7 @@ export default function HomeScreen() {
   const [now, setNow] = useState(new Date());
   const [, setAnalysisLoading] = useState(false);
   const analysisTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const analysisInFlightRef = useRef(false);
 
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 1000);
@@ -56,6 +57,11 @@ export default function HomeScreen() {
   // Run tornado analysis whenever weather or location changes
   const runAnalysis = useCallback(async () => {
     if (!weather || !location) return;
+    if (analysisInFlightRef.current) {
+      console.log('[HOME] Analysis skipped: already running');
+      return;
+    }
+    analysisInFlightRef.current = true;
     setAnalysisLoading(true);
     try {
       // Get recent observations from active storm event if logging
@@ -104,8 +110,10 @@ export default function HomeScreen() {
       await analyze(input);
     } catch (err) {
       console.error('[HOME] Analysis failed:', err);
+    } finally {
+      analysisInFlightRef.current = false;
+      setAnalysisLoading(false);
     }
-    setAnalysisLoading(false);
   }, [weather, location, activeEventId, analyze]);
 
   // Re-run analysis when weather loads
