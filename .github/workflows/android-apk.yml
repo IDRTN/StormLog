@@ -400,7 +400,7 @@ jobs:
       - name: Validate installable APK
         run: |
           BUILD_TYPE="${{ steps.identity.outputs.build_type }}"
-          APK_SOURCE="android/app/build/outputs/${BUILD_TYPE}/app-${BUILD_TYPE}.apk"
+          APK_SOURCE="android/app/build/outputs/apk/${BUILD_TYPE}/app-${BUILD_TYPE}.apk"
           AAPT2="${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/aapt2"
           APKSIGNER="${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/apksigner"
 
