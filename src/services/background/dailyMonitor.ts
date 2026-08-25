@@ -30,6 +30,9 @@ export const DAILY_MONITOR_ENABLED_KEY = 'daily_monitor_enabled';
 export const LAST_COLLECTION_KEY = 'daily_monitor_last_collection';
 export const LAST_ERROR_KEY = 'daily_monitor_last_error';
 export const LAST_COLLECTION_DATE_KEY = 'daily_monitor_last_collection_date';
+export const CACHED_LOCATION_LAT_KEY = 'daily_monitor_cached_location_lat';
+export const CACHED_LOCATION_LON_KEY = 'daily_monitor_cached_location_lon';
+export const CACHED_LOCATION_TIMESTAMP_KEY = 'daily_monitor_cached_location_timestamp';
 
 const dailyMonitorCoordinator = new DailyMonitorCoordinator({
   runCollection: executeDailyCollectionPipeline,
@@ -107,12 +110,21 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
   }
 
   // Step 2: Get location
+  // Priority: fresh GPS → OS last-known → StormLog cached
   let lat: number, lon: number;
+  let locationSource: 'current' | 'os_last_known' | 'stormlog_cached' = 'current';
   try {
     const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Low });
     lat = loc.coords.latitude;
     lon = loc.coords.longitude;
-    console.log(`${TAG} Location: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
+    locationSource = 'current';
+    console.log(`${TAG} Location: ${lat.toFixed(4)}, ${lon.toFixed(4)} [current]`);
+    // Persist successful GPS fix for background fallback
+    try {
+      await AsyncStorage.setItem(CACHED_LOCATION_LAT_KEY, lat.toString());
+      await AsyncStorage.setItem(CACHED_LOCATION_LON_KEY, lon.toString());
+      await AsyncStorage.setItem(CACHED_LOCATION_TIMESTAMP_KEY, Date.now().toString());
+    } catch {}
   } catch (err: any) {
     console.log(`${TAG} getCurrentPosition failed (${err?.message}), trying last known...`);
     try {
@@ -120,9 +132,26 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
       if (last) {
         lat = last.coords.latitude;
         lon = last.coords.longitude;
-        console.log(`${TAG} Last known: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
+        locationSource = 'os_last_known';
+        console.log(`${TAG} Last known: ${lat.toFixed(4)}, ${lon.toFixed(4)} [os_last_known]`);
       } else {
-        return { success: false, error: 'No location available' };
+        // Attempt StormLog cached location as final fallback
+        const cachedLat = await AsyncStorage.getItem(CACHED_LOCATION_LAT_KEY);
+        const cachedLon = await AsyncStorage.getItem(CACHED_LOCATION_LON_KEY);
+        const cachedTs = await AsyncStorage.getItem(CACHED_LOCATION_TIMESTAMP_KEY);
+        if (cachedLat && cachedLon && cachedTs) {
+          lat = parseFloat(cachedLat);
+          lon = parseFloat(cachedLon);
+          if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            locationSource = 'stormlog_cached';
+            const ageMinutes = Math.round((Date.now() - Number(cachedTs)) / 60_000);
+            console.log(`${TAG} Cached location: ${lat.toFixed(4)}, ${lon.toFixed(4)} [stormlog_cached, ${ageMinutes}m old]`);
+          } else {
+            return { success: false, error: 'No location available' };
+          }
+        } else {
+          return { success: false, error: 'No location available' };
+        }
       }
     } catch {
       return { success: false, error: 'Failed to get location' };
