@@ -14,6 +14,15 @@ import {
 import { dispatchWarningNotification } from '../stormLogs/warningNotificationDecision';
 import { expireDueAutomaticWarnings } from '../../database/warningEvents';
 import { getLocalDateString, formatLocalDateTime } from '../../util/dateUtils';
+import {
+  DailyMonitorCoordinator,
+  DAILY_MONITOR_ENABLED_EXPORT,
+  DAILY_MONITOR_INTERVAL_EXPORT,
+  LAST_COLLECTION_KEY_EXPORT,
+  LAST_ERROR_EXPORT,
+  type DailyCollectionMode,
+  type DailyCollectionResult,
+} from './dailyMonitorCoordinator';
 
 export const DAILY_MONITOR_TASK = 'STORM_LOG_DAILY_MONITOR';
 export const DAILY_MONITOR_INTERVAL_KEY = 'daily_monitor_interval';
@@ -21,6 +30,26 @@ export const DAILY_MONITOR_ENABLED_KEY = 'daily_monitor_enabled';
 export const LAST_COLLECTION_KEY = 'daily_monitor_last_collection';
 export const LAST_ERROR_KEY = 'daily_monitor_last_error';
 export const LAST_COLLECTION_DATE_KEY = 'daily_monitor_last_collection_date';
+
+const dailyMonitorCoordinator = new DailyMonitorCoordinator({
+  runCollection: executeDailyCollectionPipeline,
+  storage: AsyncStorage,
+  scheduler: {
+    setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+    clearTimeout: (timerId) => clearTimeout(timerId as Parameters<typeof clearTimeout>[0]),
+  },
+  background: {
+    isRegistered: () => TaskManager.isTaskRegisteredAsync(DAILY_MONITOR_TASK),
+    register: async (intervalMinutes) => {
+      await BackgroundFetch.registerTaskAsync(DAILY_MONITOR_TASK, {
+        minimumInterval: Math.max(intervalMinutes * 60, 5 * 60),
+        stopOnTerminate: false,
+        startOnBoot: true,
+      });
+    },
+    unregister: () => BackgroundFetch.unregisterTaskAsync(DAILY_MONITOR_TASK),
+  },
+});
 
 // ============================================================
 // Background task definition — must be at module top level
@@ -32,16 +61,18 @@ TaskManager.defineTask(DAILY_MONITOR_TASK, async () => {
   console.log(`${TAG} Local date: ${getLocalDateString(now)}`);
 
   try {
-    const result = await performDailyCollection();
+    const result = await dailyMonitorCoordinator.collectAutomatic();
     if (!result.success) {
       const msg = `${formatLocalDateTime(new Date())}: ${result.error || 'Unknown collection error'}`;
       console.error(`${TAG} FAILED:`, msg);
       await AsyncStorage.setItem(LAST_ERROR_KEY, msg);
       return BackgroundFetch.BackgroundFetchResult.Failed;
     }
-    await AsyncStorage.setItem(LAST_COLLECTION_KEY, Date.now().toString());
+    if (result.outcome === 'skipped_recent_automatic') {
+      return BackgroundFetch.BackgroundFetchResult.NoData;
+    }
+
     await AsyncStorage.setItem(LAST_COLLECTION_DATE_KEY, getLocalDateString(new Date()));
-    await AsyncStorage.removeItem(LAST_ERROR_KEY);
     return BackgroundFetch.BackgroundFetchResult.NewData;
   } catch (error: any) {
     const msg = error?.message || String(error);
@@ -54,7 +85,7 @@ TaskManager.defineTask(DAILY_MONITOR_TASK, async () => {
 // ============================================================
 // Core collection — works in foreground AND background.
 // ============================================================
-export async function performDailyCollection(): Promise<{ success: boolean; error?: string }> {
+export async function executeDailyCollectionPipeline(): Promise<{ success: boolean; error?: string }> {
   const TAG = '[DAILY-COLLECT]';
   const now = new Date();
   const localDate = getLocalDateString(now);
@@ -240,21 +271,50 @@ export async function performDailyCollection(): Promise<{ success: boolean; erro
 // ============================================================
 // Register background task with Android
 // ============================================================
+export function subscribeToDailyMonitor(
+  listener: (state: {
+    isActive: boolean;
+    intervalMinutes: number;
+    loading: boolean;
+    lastCollectionTime: number | null;
+    lastError: string | null;
+  }) => void,
+): () => void {
+  return dailyMonitorCoordinator.subscribe(listener);
+}
+
+export async function initializeDailyMonitorCoordinator(): Promise<void> {
+  await dailyMonitorCoordinator.initialize();
+}
+
+export async function startDailyMonitor(intervalMinutes?: number): Promise<void> {
+  await dailyMonitorCoordinator.startMonitor(intervalMinutes);
+}
+
+export async function stopDailyMonitor(): Promise<void> {
+  await dailyMonitorCoordinator.stopMonitor();
+}
+
+export async function setDailyMonitorInterval(minutes: number): Promise<void> {
+  await dailyMonitorCoordinator.setIntervalMinutes(minutes);
+}
+
+export async function collectDailyWeatherManually(): Promise<DailyCollectionResult> {
+  return dailyMonitorCoordinator.collectManual();
+}
+
+export async function performDailyCollection(mode: DailyCollectionMode = 'manual'): Promise<DailyCollectionResult> {
+  if (mode === 'automatic') {
+    return dailyMonitorCoordinator.collectAutomatic();
+  }
+  return dailyMonitorCoordinator.collectManual();
+}
+
 export async function registerBackgroundTask(intervalMinutes: number = 15): Promise<{ success: boolean; error?: string }> {
   try {
-    const intervalSeconds = Math.max(intervalMinutes * 60, 5 * 60);
-    const isRegistered = await TaskManager.isTaskRegisteredAsync(DAILY_MONITOR_TASK);
-    if (isRegistered) {
-      await BackgroundFetch.unregisterTaskAsync(DAILY_MONITOR_TASK);
-    }
-    await BackgroundFetch.registerTaskAsync(DAILY_MONITOR_TASK, {
-      minimumInterval: intervalSeconds,
-      stopOnTerminate: false,
-      startOnBoot: true,
-    });
-    const verify = await TaskManager.isTaskRegisteredAsync(DAILY_MONITOR_TASK);
-    console.log(`[BG-REGISTER] verified: ${verify}, interval: ${intervalSeconds}s`);
-    if (!verify) return { success: false, error: 'Registration not verified' };
+    await dailyMonitorCoordinator.registerBackground(intervalMinutes);
+    const registered = await TaskManager.isTaskRegisteredAsync(DAILY_MONITOR_TASK);
+    if (!registered) return { success: false, error: 'Registration not verified' };
     return { success: true };
   } catch (error: any) {
     return { success: false, error: error?.message };
@@ -262,11 +322,7 @@ export async function registerBackgroundTask(intervalMinutes: number = 15): Prom
 }
 
 export async function unregisterBackgroundTask(): Promise<void> {
-  try {
-    if (await TaskManager.isTaskRegisteredAsync(DAILY_MONITOR_TASK)) {
-      await BackgroundFetch.unregisterTaskAsync(DAILY_MONITOR_TASK);
-    }
-  } catch {}
+  await dailyMonitorCoordinator.unregisterBackground();
 }
 
 export async function isBackgroundTaskRegistered(): Promise<boolean> {

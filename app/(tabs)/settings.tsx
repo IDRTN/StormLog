@@ -18,7 +18,6 @@ import * as Device from 'expo-device';
 import { Colors, SPACING, BORDER_RADIUS } from '../../src/constants/theme';
 import { useStormLogger } from '../../src/hooks/useStormLogger';
 import { useDailyMonitor } from '../../src/hooks/useDailyMonitor';
-import { performDailyCollection } from '../../src/services/background/dailyMonitor';
 import { requestNotificationPermission, sendNotification } from '../../src/services/notifications';
 import { deleteAllDailyRecords, getDailyRecordCount } from '../../src/database/dailyWeather';
 
@@ -85,7 +84,7 @@ export default function SettingsScreen() {
   const handleRunNow = async () => {
     setTestLoading(true);
     setTestResult(null);
-    const result = await performDailyCollection();
+    const result = await daily.collectNow();
     if (result.success) {
       setTestResult({ ok: true, msg: 'SUCCESS: Weather observation saved + notification sent.' });
     } else {
