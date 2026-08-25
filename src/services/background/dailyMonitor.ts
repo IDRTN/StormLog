@@ -5,7 +5,14 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { fetchWeather } from '../weather';
 import { insertDailyRecord } from '../../database/dailyWeather';
 import { getActiveAlertTypes, fetchNwsAlerts } from '../nws/alerts';
-import { notifyWeatherCollected, notifyNwsAlert, notifyCollectionFailed } from '../notifications';
+import { notifyWeatherCollected, notifyCollectionFailed } from '../notifications';
+import {
+  processNwsAlertsForStormEvents,
+  withNwsAlertProcessingFailures,
+  type NwsAlertProcessingFailure,
+} from '../stormLogs/nwsWarningTrigger';
+import { dispatchWarningNotification } from '../stormLogs/warningNotificationDecision';
+import { expireDueAutomaticWarnings } from '../../database/warningEvents';
 import { getLocalDateString, formatLocalDateTime } from '../../util/dateUtils';
 
 export const DAILY_MONITOR_TASK = 'STORM_LOG_DAILY_MONITOR';
@@ -25,7 +32,13 @@ TaskManager.defineTask(DAILY_MONITOR_TASK, async () => {
   console.log(`${TAG} Local date: ${getLocalDateString(now)}`);
 
   try {
-    await performDailyCollection();
+    const result = await performDailyCollection();
+    if (!result.success) {
+      const msg = `${formatLocalDateTime(new Date())}: ${result.error || 'Unknown collection error'}`;
+      console.error(`${TAG} FAILED:`, msg);
+      await AsyncStorage.setItem(LAST_ERROR_KEY, msg);
+      return BackgroundFetch.BackgroundFetchResult.Failed;
+    }
     await AsyncStorage.setItem(LAST_COLLECTION_KEY, Date.now().toString());
     await AsyncStorage.setItem(LAST_COLLECTION_DATE_KEY, getLocalDateString(new Date()));
     await AsyncStorage.removeItem(LAST_ERROR_KEY);
@@ -99,25 +112,55 @@ export async function performDailyCollection(): Promise<{ success: boolean; erro
 
   // Step 4: NWS alerts
   let alertTypes: string[] = [];
+  let alertProcessingFailures: NwsAlertProcessingFailure[] = [];
+  let warningBatch: Awaited<ReturnType<typeof processNwsAlertsForStormEvents>> | null = null;
+  const alertCycleTime = weatherResult.data.referenceTimeMs ?? now.getTime();
+  try {
+    await expireDueAutomaticWarnings(alertCycleTime);
+  } catch (err: any) {
+    alertProcessingFailures.push({
+      alertId: null,
+      error: err,
+    });
+    console.error(`${TAG} Automatic warning expiration failed:`, err?.message || String(err));
+  }
+
   try {
     const alerts = await fetchNwsAlerts(lat, lon, weatherResult.data.referenceTimeMs ?? Date.now());
     alertTypes = [...new Set(alerts.map(a => a.event))];
     console.log(`${TAG} NWS alerts: ${alertTypes.length > 0 ? alertTypes.join(', ') : 'none'}`);
 
-    const severeEvents = alerts.filter(a =>
-      a.severity === 'Extreme' || a.severity === 'Severe'
-    );
-    const sentKey = `nws_sent_${localDate}`;
-    const alreadySent = await AsyncStorage.getItem(sentKey);
-    const sentSet = new Set(alreadySent ? JSON.parse(alreadySent) : []);
+    try {
+      warningBatch = await processNwsAlertsForStormEvents(
+        alerts,
+        undefined,
+        {
+          notifyWarning: dispatchWarningNotification,
+        }
+      );
+      alertProcessingFailures = warningBatch.failures;
+      for (const failure of warningBatch.failures) {
+        console.error(
+          `${TAG} NWS warning processing failed for ${failure.alertId ?? '<missing-id>'}:`,
+          failure.error
+        );
+      }
+    } catch (err: any) {
+      alertProcessingFailures = [{ alertId: null, error: err }];
+      console.error(`${TAG} NWS warning batch failed:`, err?.message || String(err));
+    }
 
-    for (const alert of severeEvents) {
-      if (!sentSet.has(alert.event)) {
-        await notifyNwsAlert(alert.event, alert.headline);
-        sentSet.add(alert.event);
+    for (const delivered of warningBatch?.results ?? []) {
+      const notification = delivered.notification as
+        | { status?: string; error?: unknown }
+        | undefined;
+      if (notification?.status === 'failed') {
+        console.error(
+          `${TAG} Warning notification failed for ${delivered.alertId ?? '<missing-id>'}:`,
+          notification.error
+        );
       }
     }
-    await AsyncStorage.setItem(sentKey, JSON.stringify([...sentSet]));
   } catch (err: any) {
     console.log(`${TAG} NWS failed (non-critical): ${err?.message}`);
   }
@@ -175,9 +218,18 @@ export async function performDailyCollection(): Promise<{ success: boolean; erro
     });
     console.log(`${TAG} DB INSERT OK — row ${rowId}, date: ${localDate}, precip: ${observedDailyPrecip}"`);
 
-    await notifyWeatherCollected(weatherResult.data.temperature, weatherResult.data.weatherCondition);
+    const collectionResult = withNwsAlertProcessingFailures(
+      { success: true },
+      alertProcessingFailures
+    );
 
-    return { success: true };
+    if (collectionResult.success) {
+      await notifyWeatherCollected(weatherResult.data.temperature, weatherResult.data.weatherCondition);
+    } else {
+      await notifyCollectionFailed(collectionResult.error || 'NWS warning processing failed');
+    }
+
+    return collectionResult;
   } catch (err: any) {
     const msg = `DB insert failed: ${err?.message || String(err)}`;
     console.error(`${TAG} ${msg}`);

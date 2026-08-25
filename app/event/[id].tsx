@@ -13,12 +13,14 @@ import { WeatherDataRow } from '../../src/components/WeatherDataRow';
 import { getStormEventById } from '../../src/database/stormEvents';
 import { getObservationsByEvent } from '../../src/database/observations';
 import { getAnalysisSnapshotsByEvent } from '../../src/database/analysisSnapshots';
-import type { StormEvent, WeatherObservation, AnalysisSnapshot } from '../../src/models/types';
+import type { WeatherObservation, AnalysisSnapshot } from '../../src/models/types';
+import type { StormEventWithWarningMetadata } from '../../src/database/stormEvents';
+import { getWarningEventDisplay } from '../../src/services/stormLogs/warningDisplay';
 import { getAssessmentColor as getLevelColor, getAssessmentEmoji as getLevelEmoji } from '../../src/services/analysis/tornadoAnalysis';
 
 export default function EventDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const [event, setEvent] = useState<StormEvent | null>(null);
+  const [event, setEvent] = useState<StormEventWithWarningMetadata | null>(null);
   const [observations, setObservations] = useState<WeatherObservation[]>([]);
   const [snapshots, setSnapshots] = useState<AnalysisSnapshot[]>([]);
   const [loading, setLoading] = useState(true);
@@ -61,6 +63,7 @@ export default function EventDetailScreen() {
 
   const formatTime = (ts: number) =>
     new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const warningDisplay = event ? getWarningEventDisplay(event) : null;
 
   // Compute min/max for key metrics
   const temps = observations.map((o) => o.temperature).filter((v): v is number => v != null);
@@ -91,6 +94,33 @@ export default function EventDetailScreen() {
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       {/* Event Header */}
       <Text style={styles.eventName}>{event.eventName}</Text>
+
+      {warningDisplay?.sourceLabel != null && (
+        <View
+          style={warningStyles.warningCard}
+          accessible
+          accessibilityLabel={`${warningDisplay.sourceLabel}. ${warningDisplay.warningType}. ${warningDisplay.lifecycleLabel}`}
+        >
+          <View style={warningStyles.warningHeader}>
+            <Ionicons name="warning" size={16} color={Colors.warning} />
+            <Text style={warningStyles.warningSource}>{warningDisplay.sourceLabel}</Text>
+          </View>
+          <Text style={warningStyles.warningType}>{warningDisplay.warningType}</Text>
+          <Text
+            style={[
+              warningStyles.warningStatus,
+              { color: warningDisplay.lifecycleTone === 'active' ? Colors.loggingActive : Colors.textSecondary },
+            ]}
+          >
+            ● {warningDisplay.lifecycleLabel}
+          </Text>
+          {warningDisplay.warningEndsAt != null && (
+            <Text style={warningStyles.warningExpiration}>
+              Warning ends: {formatDateTime(warningDisplay.warningEndsAt)}
+            </Text>
+          )}
+        </View>
+      )}
 
       <View style={styles.card}>
         <View style={styles.infoRow}>
@@ -459,4 +489,20 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
     fontSize: 11,
   },
+});
+
+const warningStyles = StyleSheet.create({
+  warningCard: {
+    backgroundColor: Colors.surface,
+    borderColor: Colors.warning,
+    borderWidth: 1,
+    borderRadius: BORDER_RADIUS.md,
+    padding: SPACING.lg,
+    marginBottom: SPACING.lg,
+  },
+  warningHeader: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm },
+  warningSource: { color: Colors.warning, fontSize: 11, fontWeight: '700' },
+  warningType: { color: Colors.white, fontSize: 18, fontWeight: '700', marginTop: SPACING.sm },
+  warningStatus: { fontSize: 12, fontWeight: '700', marginTop: SPACING.xs },
+  warningExpiration: { color: Colors.textSecondary, fontSize: 12, marginTop: SPACING.xs },
 });

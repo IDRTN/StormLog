@@ -19,12 +19,24 @@ import { useTornadoAnalysis } from '../../src/hooks/useTornadoAnalysis';
 import { fetchWeather } from '../../src/services/weather';
 import { getRecentObservations } from '../../src/database/observations';
 import { getActiveAlertTypes } from '../../src/services/nws/alerts';
+import { getWarningEventDisplay } from '../../src/services/stormLogs/warningDisplay';
 import type { WeatherData } from '../../src/models/types';
 import type { AnalysisInput } from '../../src/services/analysis/types';
 
 export default function HomeScreen() {
   const { location, permission, error: locationError, getCurrentLocation } = useLocation();
-  const { isLogging, activeEventId, observationCount, error: loggerError, startStormLog, stopStormLog } = useStormLogger();
+  const {
+    isLogging,
+    activeEvent,
+    activeEventId,
+    observationCount,
+    error: loggerError,
+    startStormLog,
+    stopStormLog,
+    refreshActiveStormEvent,
+  } = useStormLogger();
+  const automaticWarning = activeEvent?.isAutomatic === true ? activeEvent : null;
+  const automaticWarningDisplay = automaticWarning ? getWarningEventDisplay(automaticWarning) : null;
   const dailyMonitor = useDailyMonitor();
   const { result: analysisResult, analyze, loading: analysisLoading, radarStatus } = useTornadoAnalysis();
 
@@ -51,8 +63,9 @@ export default function HomeScreen() {
     const result = await fetchWeather(loc.latitude, loc.longitude);
     if (result.success) { setWeather(result.data); setLastUpdated(new Date().toLocaleTimeString()); }
     else { setWeatherError(result.error); }
+    await refreshActiveStormEvent();
     setWeatherLoading(false);
-  }, [location, getCurrentLocation]);
+  }, [location, getCurrentLocation, refreshActiveStormEvent]);
 
   // Run tornado analysis whenever weather or location changes
   const runAnalysis = useCallback(async () => {
@@ -250,21 +263,52 @@ export default function HomeScreen() {
         <TornadoAnalysisCard result={analysisResult} loading={analysisLoading} radarStatus={radarStatus} />
       </View>
 
-      <TouchableOpacity
-        style={[styles.logBtn, isLogging ? styles.logBtnActive : styles.logBtnInactive]}
-        onPress={handleStartStop}
-        activeOpacity={0.8}
-      >
-        {isLogging && <View style={styles.pulseDot} />}
-        <Text style={styles.logBtnText}>{isLogging ? 'STOP STORM LOG' : 'START STORM LOG'}</Text>
-      </TouchableOpacity>
-
-      {isLogging && (
-        <View style={styles.loggingInfo}>
-          <View style={styles.loggingDot} />
-          <Text style={styles.loggingText}>STORM LOG ACTIVE</Text>
-          {observationCount > 0 && <Text style={styles.loggingSubText}>{observationCount} observations recorded</Text>}
+      {automaticWarning && automaticWarningDisplay ? (
+        <View
+          style={styles.warningEventBanner}
+          accessible
+          accessibilityLabel={`${automaticWarningDisplay.sourceLabel}. ${automaticWarningDisplay.warningType}. ${automaticWarningDisplay.lifecycleLabel}`}
+        >
+          <Ionicons name="warning" size={20} color={Colors.warning} />
+          <View style={styles.warningEventContent}>
+            <Text style={styles.warningEventSource}>{automaticWarningDisplay.sourceLabel}</Text>
+            <Text style={styles.warningEventType}>{automaticWarningDisplay.warningType}</Text>
+            <Text
+              style={[
+                styles.warningEventStatus,
+                { color: automaticWarningDisplay.lifecycleTone === 'active' ? Colors.loggingActive : Colors.textSecondary },
+              ]}
+            >
+              ● {automaticWarningDisplay.lifecycleLabel}
+            </Text>
+            {automaticWarningDisplay.warningEndsAt != null && (
+              <Text style={styles.warningEventExpiration}>
+                Warning ends {new Date(automaticWarningDisplay.warningEndsAt).toLocaleString('en-US', {
+                  month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+                })}
+              </Text>
+            )}
+          </View>
         </View>
+      ) : (
+        <>
+          <TouchableOpacity
+            style={[styles.logBtn, isLogging ? styles.logBtnActive : styles.logBtnInactive]}
+            onPress={handleStartStop}
+            activeOpacity={0.8}
+          >
+            {isLogging && <View style={styles.pulseDot} />}
+            <Text style={styles.logBtnText}>{isLogging ? 'STOP STORM LOG' : 'START STORM LOG'}</Text>
+          </TouchableOpacity>
+
+          {isLogging && (
+            <View style={styles.loggingInfo}>
+              <View style={styles.loggingDot} />
+              <Text style={styles.loggingText}>STORM LOG ACTIVE</Text>
+              {observationCount > 0 && <Text style={styles.loggingSubText}>{observationCount} observations recorded</Text>}
+            </View>
+          )}
+        </>
       )}
 
       <View style={{ height: 40 }} />
@@ -301,6 +345,22 @@ const styles = StyleSheet.create({
   loggingInfo: { flexDirection: 'column', alignItems: 'center', gap: SPACING.xs, marginTop: SPACING.md },
   sourceDiagnostics: { width: '100%', marginTop: SPACING.sm },
   sourceDiagnosticText: { color: Colors.textSecondary, fontSize: 10, lineHeight: 14, textAlign: 'center' },
+  warningEventBanner: {
+    flexDirection: 'row',
+    width: '100%',
+    marginTop: SPACING.lg,
+    padding: SPACING.lg,
+    gap: SPACING.md,
+    backgroundColor: Colors.surface,
+    borderColor: Colors.warning,
+    borderWidth: 1,
+    borderRadius: BORDER_RADIUS.md,
+  },
+  warningEventContent: { flex: 1 },
+  warningEventSource: { color: Colors.warning, fontSize: 11, fontWeight: '700' },
+  warningEventType: { color: Colors.white, fontSize: 17, fontWeight: '700', marginTop: SPACING.xs },
+  warningEventStatus: { fontSize: 12, fontWeight: '700', marginTop: SPACING.xs },
+  warningEventExpiration: { color: Colors.textSecondary, fontSize: 12, marginTop: SPACING.xs },
   loggingDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: Colors.loggingActive },
   loggingText: { color: Colors.loggingActive, fontSize: 14, fontWeight: '700' },
   loggingSubText: { color: Colors.textSecondary, fontSize: 12 },

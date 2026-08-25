@@ -1,7 +1,8 @@
 import * as SQLite from 'expo-sqlite';
+import { CURRENT_SCHEMA_VERSION } from './schema';
 
 const DB_NAME = 'stormlog.db';
-const CURRENT_VERSION = 5;
+const CURRENT_VERSION = CURRENT_SCHEMA_VERSION;
 
 let db: SQLite.SQLiteDatabase | null = null;
 
@@ -143,6 +144,72 @@ async function migrateDatabase(database: SQLite.SQLiteDatabase): Promise<void> {
         await database.execAsync(`ALTER TABLE daily_weather ADD COLUMN ${column} ${type}`);
       }
     }
+  }
+
+  if (version < 6) {
+    await database.withTransactionAsync(async () => {
+      await database.execAsync(`
+        CREATE TABLE IF NOT EXISTS processed_nws_alerts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          nws_alert_id TEXT NOT NULL UNIQUE,
+          first_seen_at INTEGER NOT NULL,
+          processed_at INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'PROCESSED',
+          source TEXT,
+          storm_event_id INTEGER,
+          FOREIGN KEY (storm_event_id) REFERENCES storm_events(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_processed_nws_alerts_processed_at
+          ON processed_nws_alerts(processed_at);
+      `);
+
+      const stormEventColumns = new Set(
+        (await database.getAllAsync<{ name: string }>('PRAGMA table_info(storm_events)'))
+          .map((column) => column.name)
+      );
+
+      if (!stormEventColumns.has('nws_alert_id')) {
+        await database.execAsync('ALTER TABLE storm_events ADD COLUMN nws_alert_id TEXT');
+      }
+      if (!stormEventColumns.has('trigger_source')) {
+        await database.execAsync('ALTER TABLE storm_events ADD COLUMN trigger_source TEXT');
+      }
+      if (!stormEventColumns.has('is_automatic')) {
+        await database.execAsync('ALTER TABLE storm_events ADD COLUMN is_automatic INTEGER');
+      }
+
+      await database.execAsync(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_storm_events_nws_alert_id
+          ON storm_events(nws_alert_id)
+          WHERE nws_alert_id IS NOT NULL
+      `);
+    });
+  }
+
+  if (version < 7) {
+    await database.withTransactionAsync(async () => {
+      const stormEventColumns = new Set(
+        (await database.getAllAsync<{ name: string }>('PRAGMA table_info(storm_events)'))
+          .map((column) => column.name)
+      );
+
+      if (!stormEventColumns.has('warning_status')) {
+        await database.execAsync('ALTER TABLE storm_events ADD COLUMN warning_status TEXT');
+      }
+      if (!stormEventColumns.has('warning_ends_at')) {
+        await database.execAsync('ALTER TABLE storm_events ADD COLUMN warning_ends_at INTEGER');
+      }
+      if (!stormEventColumns.has('current_nws_alert_id')) {
+        await database.execAsync('ALTER TABLE storm_events ADD COLUMN current_nws_alert_id TEXT');
+      }
+
+      await database.execAsync(`
+        CREATE INDEX IF NOT EXISTS idx_storm_events_automatic_warning_end
+          ON storm_events(warning_ends_at)
+          WHERE endTime IS NULL AND is_automatic = 1
+      `);
+    });
   }
 
   await database.execAsync(`PRAGMA user_version = ${CURRENT_VERSION}`);

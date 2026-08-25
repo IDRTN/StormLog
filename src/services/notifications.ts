@@ -1,6 +1,11 @@
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import { Platform } from 'react-native';
+import {
+  warningNotificationText,
+  WarningNotificationPermissionDeniedError,
+  type WarningNotificationContentInput,
+} from './stormLogs/warningNotificationContent';
 
 // ============================================================
 // Configure foreground notification display
@@ -170,6 +175,63 @@ export async function notifyWeatherCollected(temp: number | null, condition: str
 
 export async function notifyNwsAlert(eventType: string, headline: string | null): Promise<void> {
   await sendNotification(`⚠️ NWS: ${eventType}`, headline || 'Active weather alert', 'alerts');
+}
+
+export { warningNotificationText, WarningNotificationPermissionDeniedError };
+type WarningNotificationInput = WarningNotificationContentInput;
+
+export async function ensureWarningNotificationChannel(): Promise<void> {
+  if (Platform.OS !== 'android') return;
+  await ensureNotificationChannels();
+}
+
+async function notifyWarningLifecycle(input: WarningNotificationInput): Promise<void> {
+  await ensureWarningNotificationChannel();
+
+  const { status } = await Notifications.getPermissionsAsync();
+  if (status !== 'granted') {
+    console.warn('[WARNING-NOTIF] Permission denied; warning processing is unaffected.');
+    throw new WarningNotificationPermissionDeniedError();
+  }
+
+  const { title, body } = warningNotificationText(input);
+  if (title.includes(String(input.eventId)) || body.includes(String(input.eventId))) {
+    throw new Error('Warning notification text must not contain internal event IDs');
+  }
+
+  await Notifications.scheduleNotificationAsync({
+    content: {
+      title,
+      body,
+      data: {
+        category: 'nws_warning',
+        lifecycle: input.lifecycle,
+        ...(input.eventId == null ? {} : { stormEventId: input.eventId }),
+      },
+    },
+    trigger: {
+      type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+      seconds: 1,
+    },
+  });
+}
+
+export function notifyWarningCreated(
+  input: Omit<WarningNotificationInput, 'lifecycle'>
+): Promise<void> {
+  return notifyWarningLifecycle({ ...input, lifecycle: 'created' });
+}
+
+export function notifyWarningUpdated(
+  input: Omit<WarningNotificationInput, 'lifecycle'>
+): Promise<void> {
+  return notifyWarningLifecycle({ ...input, lifecycle: 'updated' });
+}
+
+export function notifyWarningCanceled(
+  input: Omit<WarningNotificationInput, 'lifecycle'>
+): Promise<void> {
+  return notifyWarningLifecycle({ ...input, lifecycle: 'canceled' });
 }
 
 export async function notifyCollectionFailed(error: string): Promise<void> {

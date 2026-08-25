@@ -1,5 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { createStormEvent, endStormEvent, getActiveStormEvent } from '../database/stormEvents';
+import {
+  createStormEvent,
+  endStormEvent,
+  getActiveStormEvent,
+  type StormEventWithWarningMetadata,
+} from '../database/stormEvents';
 import { insertObservation } from '../database/observations';
 import { fetchWeather } from '../services/weather';
 import { notifyStormLogStarted, notifyStormLogStopped, notifyCollectionFailed } from '../services/notifications';
@@ -9,6 +14,7 @@ import * as Location from 'expo-location';
 export interface StormLoggerState {
   isLogging: boolean;
   activeEventId: number | null;
+  activeEvent: StormEventWithWarningMetadata | null;
   lastObservationTime: number | null;
   observationCount: number;
   error: string | null;
@@ -19,6 +25,7 @@ export function useStormLogger() {
   const [state, setState] = useState<StormLoggerState>({
     isLogging: false,
     activeEventId: null,
+    activeEvent: null,
     lastObservationTime: null,
     observationCount: 0,
     error: null,
@@ -31,7 +38,14 @@ export function useStormLogger() {
   useEffect(() => {
     (async () => {
       const active = await getActiveStormEvent();
-      if (active) {
+      if (active?.isAutomatic === true) {
+        setState(s => ({
+          ...s,
+          isLogging: false,
+          activeEventId: active.id,
+          activeEvent: active,
+        }));
+      } else if (active) {
         setState(s => ({ ...s, isLogging: true, activeEventId: active.id }));
         eventIdRef.current = active.id;
         startPeriodicFetch(active.id, state.intervalMinutes);
@@ -77,7 +91,51 @@ export function useStormLogger() {
     if (intervalRef.current) clearInterval(intervalRef.current);
     const ms = intervalMinutes * 60 * 1000;
     intervalRef.current = setInterval(() => doWeatherFetch(eventId), ms);
-  }, [doWeatherFetch]);
+    }, [doWeatherFetch]);
+
+  const refreshActiveStormEvent = useCallback(async () => {
+    const active = await getActiveStormEvent();
+
+    if (active?.isAutomatic === true) {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      eventIdRef.current = null;
+      setState(s => ({
+        ...s,
+        isLogging: false,
+        activeEventId: active.id,
+        activeEvent: active,
+      }));
+      return;
+    }
+
+    if (active) {
+      eventIdRef.current = active.id;
+      setState(s => ({
+        ...s,
+        isLogging: true,
+        activeEventId: active.id,
+        activeEvent: active,
+      }));
+      startPeriodicFetch(active.id, state.intervalMinutes);
+      return;
+    }
+
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    eventIdRef.current = null;
+    setState(s => ({
+      ...s,
+      isLogging: false,
+      activeEventId: null,
+      activeEvent: null,
+      lastObservationTime: null,
+    }));
+  }, [startPeriodicFetch]);
 
   const startStormLog = useCallback(async (location: LocationData | null) => {
     const lat = location?.latitude ?? 0;
@@ -115,7 +173,14 @@ export function useStormLogger() {
     }
 
     eventIdRef.current = null;
-    setState(s => ({ ...s, isLogging: false, activeEventId: null, lastObservationTime: null, error: null }));
+    setState(s => ({
+      ...s,
+      isLogging: false,
+      activeEventId: null,
+      activeEvent: null,
+      lastObservationTime: null,
+      error: null,
+    }));
 
     await notifyStormLogStopped(obsCount);
   }, [state.observationCount]);
@@ -125,5 +190,12 @@ export function useStormLogger() {
     if (state.isLogging && eventIdRef.current) startPeriodicFetch(eventIdRef.current, minutes);
   }, [state.isLogging, startPeriodicFetch]);
 
-  return { ...state, startStormLog, stopStormLog, setIntervalMinutes, doWeatherFetch };
+  return {
+    ...state,
+    startStormLog,
+    stopStormLog,
+    setIntervalMinutes,
+    doWeatherFetch,
+    refreshActiveStormEvent,
+  };
 }

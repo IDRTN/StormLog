@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -7,14 +7,15 @@ import {
   TouchableOpacity,
   Alert,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, SPACING, BORDER_RADIUS } from '../../src/constants/theme';
 import { getAllStormEvents, deleteStormEvent } from '../../src/database/stormEvents';
 import { getObservationCount } from '../../src/database/observations';
-import type { StormEvent } from '../../src/models/types';
+import type { StormEventWithWarningMetadata } from '../../src/database/stormEvents';
+import { getWarningEventDisplay } from '../../src/services/stormLogs/warningDisplay';
 
-interface EventWithCount extends StormEvent {
+interface EventWithCount extends StormEventWithWarningMetadata {
   observationCount: number;
 }
 
@@ -33,9 +34,9 @@ export default function HistoryScreen() {
     setEvents(withCounts);
   }, []);
 
-  useEffect(() => {
+  useFocusEffect(useCallback(() => {
     loadEvents();
-  }, [loadEvents]);
+  }, [loadEvents]));
 
   const handleDelete = (event: EventWithCount) => {
     Alert.alert('Delete Event', `Delete "${event.eventName}"?`, [
@@ -56,7 +57,13 @@ export default function HistoryScreen() {
   const formatTime = (ts: number) =>
     new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 
-  const renderItem = ({ item }: { item: EventWithCount }) => (
+  const formatDateTime = (ts: number) =>
+    new Date(ts).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+  const renderItem = ({ item }: { item: EventWithCount }) => {
+    const warningDisplay = getWarningEventDisplay(item);
+
+    return (
     <TouchableOpacity
       style={styles.eventCard}
       onPress={() => router.push(`/event/${item.id}`)}
@@ -90,13 +97,36 @@ export default function HistoryScreen() {
         <Text style={styles.eventDetail}>{item.observationCount} observations</Text>
       </View>
 
-      {item.endTime === null && (
+      {warningDisplay.sourceLabel == null && item.endTime === null && (
         <View style={styles.activeBadge}>
           <Text style={styles.activeBadgeText}>● ACTIVE</Text>
         </View>
       )}
+
+      {warningDisplay.sourceLabel != null && (
+        <View
+          style={styles.warningBadge}
+          accessible
+          accessibilityLabel={`${warningDisplay.sourceLabel}. ${warningDisplay.warningType}. ${warningDisplay.lifecycleLabel}`}
+        >
+          <Text style={styles.warningSourceText}>{warningDisplay.sourceLabel}</Text>
+          <Text style={styles.warningTypeText}>{warningDisplay.warningType}</Text>
+          <Text
+            style={[
+              styles.warningStatusText,
+              { color: warningDisplay.lifecycleTone === 'active' ? Colors.loggingActive : Colors.textSecondary },
+            ]}
+          >
+            ● {warningDisplay.lifecycleLabel}
+          </Text>
+          {warningDisplay.warningEndsAt != null && (
+            <Text style={styles.warningExpirationText}>Ends {formatDateTime(warningDisplay.warningEndsAt)}</Text>
+          )}
+        </View>
+      )}
     </TouchableOpacity>
-  );
+    );
+  };
 
   return (
     <View style={styles.container}>
@@ -132,6 +162,11 @@ const styles = StyleSheet.create({
   eventDetail: { color: Colors.textSecondary, fontSize: 13 },
   activeBadge: { marginTop: SPACING.sm },
   activeBadgeText: { color: Colors.primary, fontSize: 12, fontWeight: '700' },
+  warningBadge: { marginTop: SPACING.sm },
+  warningSourceText: { color: Colors.warning, fontSize: 11, fontWeight: '700' },
+  warningTypeText: { color: Colors.white, fontSize: 14, fontWeight: '600', marginTop: 2 },
+  warningStatusText: { fontSize: 12, fontWeight: '700', marginTop: 2 },
+  warningExpirationText: { color: Colors.textSecondary, fontSize: 12, marginTop: 2 },
   empty: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: SPACING.sm },
   emptyTitle: { color: Colors.text, fontSize: 18, fontWeight: '600' },
   emptySubtitle: { color: Colors.textSecondary, fontSize: 14 },
