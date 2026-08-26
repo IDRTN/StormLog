@@ -167,10 +167,13 @@ export async function notifyStormLogStopped(count: number): Promise<void> {
   await sendNotification('⛈️ Storm Log Stopped', `${count} observation(s) recorded.`);
 }
 
-export async function notifyWeatherCollected(temp: number | null, condition: string | null): Promise<void> {
-  const t = temp != null ? `${Math.round(temp)}°F` : '--';
-  const c = condition || 'Unknown';
-  await sendNotification('🌤️ Weather Recorded', `${t} — ${c}`, 'weather');
+export async function notifyWeatherCollected(temp: number | null, condition: string | null, collectionTimeMs?: number): Promise<void> {
+  const time = collectionTimeMs != null
+    ? new Date(collectionTimeMs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
+    : new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  const t = temp != null ? `${Math.round(temp)}°F` : 'Temp unavailable';
+  const c = condition || 'Conditions unavailable';
+  await sendNotification('StormLog — Daily Monitor', `${time} · ${t} · ${c}`, 'weather');
 }
 
 export async function notifyNwsAlert(eventType: string, headline: string | null): Promise<void> {

@@ -302,7 +302,7 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
     );
 
     if (collectionResult.success) {
-      await notifyWeatherCollected(weatherResult.data.temperature, weatherResult.data.weatherCondition);
+      await notifyWeatherCollected(weatherResult.data.temperature, weatherResult.data.weatherCondition, Date.now());
     } else {
       await notifyCollectionFailed(collectionResult.error || 'NWS warning processing failed');
     }
