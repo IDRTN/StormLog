@@ -134,6 +134,7 @@ export class DailyMonitorCoordinator {
     if (isActive) {
       this.scheduleNext();
       await this.registerBackground(interval);
+      await this.startForegroundService(interval);
     }
   }
 

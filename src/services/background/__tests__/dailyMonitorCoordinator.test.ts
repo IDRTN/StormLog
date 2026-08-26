@@ -34,6 +34,8 @@ function fakeDependencies() {
   let timerId = 0;
   let activeRegistrationInterval: number | null = null;
   let registerCalls = 0;
+  let foregroundServiceStartCalls = 0;
+  let foregroundServiceStopCalls = 0;
 
   const deps: DailyMonitorCoordinatorDependencies = {
     now: () => 1_000_000,
@@ -67,6 +69,16 @@ function fakeDependencies() {
         activeRegistrationInterval = null;
       },
     },
+    foregroundService: {
+      start: async (intervalMinutes: number) => {
+        foregroundServiceStartCalls += 1;
+        return { success: true };
+      },
+      stop: async () => {
+        foregroundServiceStopCalls += 1;
+      },
+      isRunning: async () => false,
+    },
   };
 
   return {
@@ -75,6 +87,8 @@ function fakeDependencies() {
       executionCount,
       activeRegistrationInterval,
       registerCalls,
+      foregroundServiceStartCalls,
+      foregroundServiceStopCalls,
       timers: [...timers.values()].map((entry) => entry.atMs),
       timerCount: timers.size,
     }),
@@ -344,6 +358,43 @@ void (async function main() {
 
     assertEqual(getState().executionCount, 2, 'two collections ran');
     assert(collectionTimes.length === 2, `expected 2 collection times, got ${collectionTimes.length}`);
+  });
+
+  await test('initialize with persisted active state starts foreground service', async () => {
+    const { deps, storage, getState } = fakeDependencies();
+    storage.set('daily_monitor_enabled', 'true');
+    storage.set('daily_monitor_interval', '15');
+    const coordinator = new DailyMonitorCoordinator(deps);
+    coordinator.subscribe(() => undefined);
+    await coordinator.initialize();
+    assertEqual(getState().foregroundServiceStartCalls, 1, 'foreground service started once on initialize');
+    assertEqual(coordinator.getState().isActive, true, 'monitor is active');
+  });
+
+  await test('initialize with disabled state does NOT start foreground service', async () => {
+    const { deps, storage, getState } = fakeDependencies();
+    storage.set('daily_monitor_enabled', 'false');
+    const coordinator = new DailyMonitorCoordinator(deps);
+    coordinator.subscribe(() => undefined);
+    await coordinator.initialize();
+    assertEqual(getState().foregroundServiceStartCalls, 0, 'foreground service not started when disabled');
+    assertEqual(coordinator.getState().isActive, false, 'monitor is not active');
+  });
+
+  await test('initialize does NOT duplicate foreground service if already running', async () => {
+    const { deps, storage, getState } = fakeDependencies();
+    storage.set('daily_monitor_enabled', 'true');
+    storage.set('daily_monitor_interval', '15');
+    // Simulate service already running
+    deps.foregroundService!.isRunning = async () => true;
+    const coordinator = new DailyMonitorCoordinator(deps);
+    coordinator.subscribe(() => undefined);
+    await coordinator.initialize();
+    // startForegroundLocationService is idempotent — it checks isRunning first
+    // The adapter's start() should still be called (coordinator always calls it)
+    // but the underlying startForegroundLocationService would return early
+    assertEqual(getState().foregroundServiceStartCalls, 1, 'start adapter called once');
+    assertEqual(coordinator.getState().isActive, true, 'monitor is active');
   });
 
   await test('warning lifecycle callers remain separate from daily coordinator', async () => {
