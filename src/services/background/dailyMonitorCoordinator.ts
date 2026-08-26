@@ -38,11 +38,18 @@ export type BackgroundTaskAdapter = {
   unregister: () => Promise<void>;
 };
 
+export type ForegroundServiceAdapter = {
+  start: (intervalMinutes: number) => Promise<{ success: boolean; error?: string }>;
+  stop: () => Promise<void>;
+  isRunning: () => Promise<boolean>;
+};
+
 export type DailyMonitorCoordinatorDependencies = {
   runCollection: () => Promise<DailyCollectionResult>;
   storage: AsyncMap;
   scheduler: DailyMonitorScheduler;
   background: BackgroundTaskAdapter;
+  foregroundService?: ForegroundServiceAdapter;
   now?: () => number;
   getNextDelayMs?: (intervalMinutes: number) => number;
 };
@@ -138,6 +145,7 @@ export class DailyMonitorCoordinator {
 
     this.scheduleNext();
     await this.registerBackground(interval);
+    await this.startForegroundService(interval);
   }
 
   async stopMonitor(): Promise<void> {
@@ -145,6 +153,7 @@ export class DailyMonitorCoordinator {
     this.patchState({ isActive: false });
     this.stopForegroundScheduler();
     await this.unregisterBackground();
+    await this.stopForegroundService();
   }
 
   async setIntervalMinutes(minutes: number): Promise<void> {
@@ -156,6 +165,7 @@ export class DailyMonitorCoordinator {
     this.stopForegroundScheduler();
     this.scheduleNext();
     await this.registerBackground(interval);
+    await this.startForegroundService(interval);
   }
 
   async collectManual(): Promise<DailyCollectionResult> {
@@ -210,6 +220,29 @@ export class DailyMonitorCoordinator {
 
     this.registrationChain = operation.catch(() => undefined);
     await operation;
+  }
+
+  private async startForegroundService(intervalMinutes: number): Promise<void> {
+    const fs = this.dependencies.foregroundService;
+    if (!fs) return;
+    try {
+      const result = await fs.start(intervalMinutes);
+      if (!result.success) {
+        console.warn('[Coordinator] Foreground service start failed:', result.error);
+      }
+    } catch (err: any) {
+      console.warn('[Coordinator] Foreground service start error:', err?.message || String(err));
+    }
+  }
+
+  private async stopForegroundService(): Promise<void> {
+    const fs = this.dependencies.foregroundService;
+    if (!fs) return;
+    try {
+      await fs.stop();
+    } catch (err: any) {
+      console.warn('[Coordinator] Foreground service stop error:', err?.message || String(err));
+    }
   }
 
   private scheduleNext(): void {

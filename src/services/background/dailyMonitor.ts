@@ -15,6 +15,13 @@ import { dispatchWarningNotification } from '../stormLogs/warningNotificationDec
 import { expireDueAutomaticWarnings } from '../../database/warningEvents';
 import { getLocalDateString, formatLocalDateTime } from '../../util/dateUtils';
 import {
+  startForegroundLocationService,
+  stopForegroundLocationService,
+  isForegroundLocationServiceRunning,
+  registerForegroundLocationTask,
+  DAILY_FOREGROUND_LOCATION_TASK,
+} from './dailyMonitorForegroundService';
+import {
   DailyMonitorCoordinator,
   DAILY_MONITOR_ENABLED_EXPORT,
   DAILY_MONITOR_INTERVAL_EXPORT,
@@ -30,6 +37,7 @@ export const DAILY_MONITOR_ENABLED_KEY = 'daily_monitor_enabled';
 export const LAST_COLLECTION_KEY = 'daily_monitor_last_collection';
 export const LAST_ERROR_KEY = 'daily_monitor_last_error';
 export const LAST_COLLECTION_DATE_KEY = 'daily_monitor_last_collection_date';
+export { DAILY_FOREGROUND_LOCATION_TASK };
 export const CACHED_LOCATION_LAT_KEY = 'daily_monitor_cached_location_lat';
 export const CACHED_LOCATION_LON_KEY = 'daily_monitor_cached_location_lon';
 export const CACHED_LOCATION_TIMESTAMP_KEY = 'daily_monitor_cached_location_timestamp';
@@ -52,7 +60,17 @@ const dailyMonitorCoordinator = new DailyMonitorCoordinator({
     },
     unregister: () => BackgroundFetch.unregisterTaskAsync(DAILY_MONITOR_TASK),
   },
+  foregroundService: {
+    start: (intervalMinutes) => startForegroundLocationService(intervalMinutes),
+    stop: () => stopForegroundLocationService(),
+    isRunning: () => isForegroundLocationServiceRunning(),
+  },
 });
+
+// ============================================================
+// Register foreground location task callback — delegates to coordinator
+// ============================================================
+registerForegroundLocationTask(() => dailyMonitorCoordinator.collectAutomatic());
 
 // ============================================================
 // Background task definition — must be at module top level
