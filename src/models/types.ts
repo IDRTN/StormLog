@@ -206,3 +206,25 @@ export interface AnalysisSnapshot {
   availableObservationCount: number;
   confidence: number;
 }
+
+export interface LightningEvent {
+  id: number;
+  stormEventId: number | null;
+  providerName: string;
+  providerEventId: string | null;
+  timestamp: number;
+  eventLatitude: number;
+  eventLongitude: number;
+  providerTerminology: string;
+  classification: string | null;
+  polarity: string | null;
+  peakCurrentAmperes: number | null;
+  multiplicity: number | null;
+  sensorCount: number | null;
+  accuracyKm: number | null;
+  distanceToObserverKm: number;
+  observerLatitude: number;
+  observerLongitude: number;
+  ingestedAt: number;
+  rawProviderPayload: string | null;
+}
