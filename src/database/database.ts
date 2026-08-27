@@ -257,7 +257,41 @@ async function migrateDatabase(database: SQLite.SQLiteDatabase): Promise<void> {
     });
   }
 
+  if (version < 9) {
+    await database.withTransactionAsync(async () => {
+      await database.execAsync(`
+        CREATE TABLE IF NOT EXISTS lightning_validation_records (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          stormEventId INTEGER,
+          recordedAtMs INTEGER NOT NULL,
+          observerLatitude REAL NOT NULL,
+          observerLongitude REAL NOT NULL,
+          comparisonRadiusKm REAL NOT NULL,
+          timeWindowSinceMs INTEGER NOT NULL,
+          timeWindowUntilMs INTEGER NOT NULL,
+          independentSourceEventCount INTEGER,
+          independentSourceNearestDistanceKm REAL,
+          independentSourceRatePerMinute REAL,
+          independentSourceTrend TEXT,
+          independentSourceTerminology TEXT,
+          humanObservationNotes TEXT,
+          stormlogEventCount INTEGER NOT NULL,
+          stormlogNearestDistanceKm REAL,
+          stormlogRatePerMinute REAL NOT NULL,
+          stormlogTrend TEXT NOT NULL,
+          eventCountDifference INTEGER NOT NULL,
+          eventCountPctDifference REAL,
+          notes TEXT,
+          FOREIGN KEY (stormEventId) REFERENCES storm_events(id) ON DELETE SET NULL
+        );
+      `);
 
+      await database.execAsync(`
+        CREATE INDEX IF NOT EXISTS idx_lightning_validation_storm
+          ON lightning_validation_records(stormEventId, recordedAtMs);
+      `);
+    });
+  }
 
   await database.execAsync(`PRAGMA user_version = ${CURRENT_VERSION}`);
 }
