@@ -684,5 +684,6 @@ export function analyzeStorm(
     timestamp: now,
     latitude: input.latitude,
     longitude: input.longitude,
+    lightningTrend: input.lightning?.trend ?? 'NONE',
   };
 }

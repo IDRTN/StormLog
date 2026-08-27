@@ -137,6 +137,42 @@ export function analyzeTornadicEvidence(
 
   if (!rotationAssessment.velocityDataAvailable) {
     const radarConnected = rotationAssessment.radarAvailable;
+
+    // Lightning context is independent of radar velocity availability
+    if (input.lightning) {
+      const l = input.lightning;
+      if (l.totalCount > 0) {
+        const earlyFactors: string[] = [
+          'Radar velocity data required for tornadic evidence assessment',
+          'Surface observations alone cannot determine if circulation is tornadic',
+          'Refer to NWS warnings for official tornado information',
+          `Lightning: ${l.totalCount} events, ${l.ratePerMinute.toFixed(1)}/min, trend: ${l.trend}`,
+        ];
+        if (l.nearestDistanceKm != null && l.nearestDistanceKm < 20) {
+          earlyFactors.push(`Lightning nearby: ${l.nearestDistanceKm.toFixed(1)} km from observer`);
+        }
+        if (l.cgCount > 0) {
+          earlyFactors.push(`CG lightning: ${l.cgCount} cloud-to-ground events`);
+        }
+        return {
+          level: 'UNKNOWN',
+          debrisSignature: false,
+          debrisConfidence: null,
+          strongCouplet: false,
+          persistentRotation: false,
+          intensifyingRotation: false,
+          lowLevelMesocyclone: false,
+          dualPolAvailable: false,
+          correlationCoefficient: null,
+          differentialReflectivity: null,
+          description: radarConnected
+            ? 'Radar connected but Doppler velocity unavailable — tornadic evidence cannot be assessed'
+            : 'Radar unavailable — tornadic evidence cannot be assessed',
+          factors: earlyFactors,
+        };
+      }
+    }
+
     return {
       level: 'UNKNOWN',
       debrisSignature: false,
@@ -218,6 +254,22 @@ export function analyzeTornadicEvidence(
   }
   if (!coupletResult.detected) {
     factors.push(coupletResult.description);
+  }
+
+  // Lightning context (supporting evidence only - does not change level)
+  if (input.lightning) {
+    const l = input.lightning;
+    if (l.totalCount > 0) {
+      factors.push(
+        `Lightning: ${l.totalCount} events, ${l.ratePerMinute.toFixed(1)}/min, trend: ${l.trend}`
+      );
+      if (l.nearestDistanceKm != null && l.nearestDistanceKm < 20) {
+        factors.push(`Lightning nearby: ${l.nearestDistanceKm.toFixed(1)} km from observer`);
+      }
+      if (l.cgCount > 0) {
+        factors.push(`CG lightning: ${l.cgCount} cloud-to-ground events`);
+      }
+    }
   }
 
   return {

@@ -170,6 +170,7 @@ export interface StormAnalysisResult {
   timestamp: number;
   latitude: number;
   longitude: number;
+  lightningTrend: LightningTrend;
 }
 
 // ---- Input data ----
@@ -204,6 +205,16 @@ export interface AnalysisInput {
   nwsAlerts: { event: string; severity: string | null; headline: string | null }[];
 
   radarData?: RadarAnalysisInput;
+
+  lightning?: {
+    totalCount: number;
+    recentCount5Min: number;
+    nearestDistanceKm: number | null;
+    ratePerMinute: number;
+    trend: LightningTrend;
+    cgCount: number;
+    icCount: number;
+  };
 }
 
 export interface RadarAnalysisInput {
