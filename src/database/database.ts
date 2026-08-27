@@ -212,5 +212,52 @@ async function migrateDatabase(database: SQLite.SQLiteDatabase): Promise<void> {
     });
   }
 
+  if (version < 8) {
+    await database.withTransactionAsync(async () => {
+      await database.execAsync(`
+        CREATE TABLE IF NOT EXISTS lightning_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          stormEventId INTEGER,
+          providerName TEXT NOT NULL,
+          providerEventId TEXT,
+          timestamp INTEGER NOT NULL,
+          eventLatitude REAL NOT NULL,
+          eventLongitude REAL NOT NULL,
+          providerTerminology TEXT NOT NULL,
+          classification TEXT,
+          polarity TEXT,
+          peakCurrentAmperes REAL,
+          multiplicity INTEGER,
+          sensorCount INTEGER,
+          accuracyKm REAL,
+          distanceToObserverKm REAL NOT NULL,
+          observerLatitude REAL NOT NULL,
+          observerLongitude REAL NOT NULL,
+          ingestedAt INTEGER NOT NULL,
+          rawProviderPayload TEXT,
+          FOREIGN KEY (stormEventId) REFERENCES storm_events(id) ON DELETE SET NULL
+        );
+      `);
+
+      await database.execAsync(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_lightning_events_provider_id
+          ON lightning_events(providerName, providerEventId)
+          WHERE providerEventId IS NOT NULL;
+      `);
+
+      await database.execAsync(`
+        CREATE INDEX IF NOT EXISTS idx_lightning_events_storm
+          ON lightning_events(stormEventId, timestamp);
+      `);
+
+      await database.execAsync(`
+        CREATE INDEX IF NOT EXISTS idx_lightning_events_timestamp
+          ON lightning_events(timestamp);
+      `);
+    });
+  }
+
+
+
   await database.execAsync(`PRAGMA user_version = ${CURRENT_VERSION}`);
 }

@@ -16,6 +16,8 @@ import { useLocation } from '../../src/hooks/useLocation';
 import { useStormLogger } from '../../src/hooks/useStormLogger';
 import { useDailyMonitor } from '../../src/hooks/useDailyMonitor';
 import { useTornadoAnalysis } from '../../src/hooks/useTornadoAnalysis';
+import { useLightningSummary } from '../../src/hooks/useLightningSummary';
+import { LightningActivityCard } from '../../src/components/LightningActivityCard';
 import { fetchWeather } from '../../src/services/weather';
 import { getRecentObservations } from '../../src/database/observations';
 import { getActiveAlertTypes } from '../../src/services/nws/alerts';
@@ -39,6 +41,7 @@ export default function HomeScreen() {
   const automaticWarningDisplay = automaticWarning ? getWarningEventDisplay(automaticWarning) : null;
   const dailyMonitor = useDailyMonitor();
   const { result: analysisResult, analyze, loading: analysisLoading, radarStatus } = useTornadoAnalysis();
+  const lightningSummary = useLightningSummary(activeEventId);
 
   const [weather, setWeather] = useState<WeatherData | null>(null);
   const [weatherLoading, setWeatherLoading] = useState(false);
@@ -118,6 +121,17 @@ export default function HomeScreen() {
         recentObservations: recentObs,
         nearbyStations: [], // No radar/station network yet
         nwsAlerts,
+        lightning: lightningSummary.summary
+          ? {
+              totalCount: lightningSummary.summary.totalCount,
+              recentCount5Min: lightningSummary.summary.recentCount5Min,
+              nearestDistanceKm: lightningSummary.summary.nearestDistanceKm,
+              ratePerMinute: lightningSummary.summary.ratePerMinute,
+              trend: lightningSummary.summary.trend,
+              cgCount: lightningSummary.summary.cgCount,
+              icCount: lightningSummary.summary.icCount,
+            }
+          : undefined,
       };
 
       await analyze(input);
@@ -262,6 +276,27 @@ export default function HomeScreen() {
       <View style={{ width: '100%', marginTop: SPACING.md }}>
         <TornadoAnalysisCard result={analysisResult} loading={analysisLoading} radarStatus={radarStatus} />
       </View>
+
+      {/* Lightning Activity */}
+      {isLogging && activeEventId && lightningSummary.summary && (
+        <View style={{ width: '100%', marginTop: SPACING.md }}>
+          <LightningActivityCard
+            totalCount={lightningSummary.summary.totalCount}
+            flashCount={lightningSummary.summary.flashCount}
+            strikeCount={lightningSummary.summary.strikeCount}
+            cgCount={lightningSummary.summary.cgCount}
+            icCount={lightningSummary.summary.icCount}
+            nearbyCount={lightningSummary.summary.nearbyCount}
+            nearestDistanceKm={lightningSummary.summary.nearestDistanceKm}
+            recentCount1Min={lightningSummary.summary.recentCount1Min}
+            recentCount5Min={lightningSummary.summary.recentCount5Min}
+            ratePerMinute={lightningSummary.summary.ratePerMinute}
+            trend={lightningSummary.summary.trend}
+            isCollecting={lightningSummary.loading}
+            error={lightningSummary.error}
+          />
+        </View>
+      )}
 
       {automaticWarning && automaticWarningDisplay ? (
         <View

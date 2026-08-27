@@ -17,12 +17,16 @@ import type { WeatherObservation, AnalysisSnapshot } from '../../src/models/type
 import type { StormEventWithWarningMetadata } from '../../src/database/stormEvents';
 import { getWarningEventDisplay } from '../../src/services/stormLogs/warningDisplay';
 import { getAssessmentColor as getLevelColor, getAssessmentEmoji as getLevelEmoji } from '../../src/services/analysis/tornadoAnalysis';
+import { LightningActivityCard } from '../../src/components/LightningActivityCard';
+import { getLightningSummary } from '../../src/services/lightning/lightningSummaries';
+import type { LightningSummary } from '../../src/services/lightning/lightningSummaries';
 
 export default function EventDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const [event, setEvent] = useState<StormEventWithWarningMetadata | null>(null);
   const [observations, setObservations] = useState<WeatherObservation[]>([]);
   const [snapshots, setSnapshots] = useState<AnalysisSnapshot[]>([]);
+  const [lightning, setLightning] = useState<LightningSummary | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -32,6 +36,10 @@ export default function EventDetailScreen() {
       const ev = await getStormEventById(eventId);
       const obs = await getObservationsByEvent(eventId);
       const snaps = await getAnalysisSnapshotsByEvent(eventId);
+      try {
+        const light = await getLightningSummary(eventId, { nowMs: Date.now() });
+        setLightning(light);
+      } catch {}
       setEvent(ev);
       setObservations(obs);
       setSnapshots(snaps);
@@ -240,6 +248,27 @@ export default function EventDetailScreen() {
               </View>
             </View>
           )}
+        </>
+      )}
+
+      {/* Lightning Activity (historical) */}
+      {lightning && lightning.totalCount > 0 && (
+        <>
+          <Text style={styles.sectionTitle}>Lightning</Text>
+          <LightningActivityCard
+            totalCount={lightning.totalCount}
+            flashCount={lightning.flashCount}
+            strikeCount={lightning.strikeCount}
+            cgCount={lightning.cgCount}
+            icCount={lightning.icCount}
+            nearbyCount={lightning.nearbyCount}
+            nearestDistanceKm={lightning.nearestDistanceKm}
+            recentCount1Min={lightning.recentCount1Min}
+            recentCount5Min={lightning.recentCount5Min}
+            ratePerMinute={lightning.ratePerMinute}
+            trend={lightning.trend}
+            isCollecting={false}
+          />
         </>
       )}
 

@@ -12,6 +12,8 @@ import {
   type NwsAlertProcessingFailure,
 } from '../stormLogs/nwsWarningTrigger';
 import { dispatchWarningNotification } from '../stormLogs/warningNotificationDecision';
+import { getActiveStormEvent } from '../../database/stormEvents';
+import { collectLightningAutomatic } from '../lightning/lightningService';
 import { expireDueAutomaticWarnings } from '../../database/warningEvents';
 import { getLocalDateString, formatLocalDateTime } from '../../util/dateUtils';
 import {
@@ -305,6 +307,17 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
       await notifyWeatherCollected(weatherResult.data.temperature, weatherResult.data.weatherCondition, Date.now());
     } else {
       await notifyCollectionFailed(collectionResult.error || 'NWS warning processing failed');
+    }
+
+    // Lightning collection (optional enrichment — must not fail weather)
+    try {
+      const activeEvent = await getActiveStormEvent();
+      await collectLightningAutomatic({
+        location: { latitude: lat, longitude: lon },
+        stormEventId: activeEvent?.isAutomatic === false ? activeEvent.id : null,
+      });
+    } catch (lightningErr) {
+      console.warn('[DAILY-COLLECT] Lightning collection failed:', lightningErr instanceof Error ? lightningErr.message : String(lightningErr));
     }
 
     return collectionResult;

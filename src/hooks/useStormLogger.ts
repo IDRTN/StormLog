@@ -10,6 +10,7 @@ import { fetchWeather } from '../services/weather';
 import { notifyStormLogStarted, notifyStormLogStopped, notifyCollectionFailed } from '../services/notifications';
 import type { LocationData } from '../models/types';
 import * as Location from 'expo-location';
+import { collectLightning } from '../services/lightning/lightningService';
 
 export interface StormLoggerState {
   isLogging: boolean;
@@ -34,6 +35,7 @@ export function useStormLogger() {
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const eventIdRef = useRef<number | null>(null);
+  const lightningIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -49,9 +51,13 @@ export function useStormLogger() {
         setState(s => ({ ...s, isLogging: true, activeEventId: active.id }));
         eventIdRef.current = active.id;
         startPeriodicFetch(active.id, state.intervalMinutes);
+        startLightningPolling(active.id);
       }
     })();
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+    return () => {
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    if (lightningIntervalRef.current) clearInterval(lightningIntervalRef.current);
+  };
   }, []);
 
   const doWeatherFetch = useCallback(async (eventId: number) => {
@@ -92,6 +98,33 @@ export function useStormLogger() {
     const ms = intervalMinutes * 60 * 1000;
     intervalRef.current = setInterval(() => doWeatherFetch(eventId), ms);
     }, [doWeatherFetch]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+
+  const startLightningPolling = useCallback((eventId: number | null) => {
+    if (lightningIntervalRef.current) clearInterval(lightningIntervalRef.current);
+    const LIGHTNING_INTERVAL_MS = 90_000; // 1.5 minutes
+    lightningIntervalRef.current = setInterval(async () => {
+      try {
+        const { status } = await Location.getForegroundPermissionsAsync();
+        if (status !== 'granted') return;
+        const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        await collectLightning({
+          location: { latitude: loc.coords.latitude, longitude: loc.coords.longitude },
+          stormEventId: eventId,
+          reason: 'foreground',
+        });
+      } catch {
+        // Lightning failure must not affect storm logging
+      }
+    }, LIGHTNING_INTERVAL_MS);
+  }, []);
+
+  const stopLightningPolling = useCallback(() => {
+    if (lightningIntervalRef.current) {
+      clearInterval(lightningIntervalRef.current);
+      lightningIntervalRef.current = null;
+    }
+  }, []);
 
   const refreshActiveStormEvent = useCallback(async () => {
     const active = await getActiveStormEvent();
@@ -120,6 +153,7 @@ export function useStormLogger() {
         activeEvent: active,
       }));
       startPeriodicFetch(active.id, state.intervalMinutes);
+      startLightningPolling(active.id);
       return;
     }
 
@@ -127,6 +161,7 @@ export function useStormLogger() {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
+    stopLightningPolling();
     eventIdRef.current = null;
     setState(s => ({
       ...s,
@@ -148,6 +183,7 @@ export function useStormLogger() {
     // Immediate first observation
     await doWeatherFetch(eventId);
     startPeriodicFetch(eventId, state.intervalMinutes);
+    startLightningPolling(eventId);
 
     // Notify user
     await notifyStormLogStarted();
@@ -155,6 +191,7 @@ export function useStormLogger() {
 
   const stopStormLog = useCallback(async () => {
     if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+    stopLightningPolling();
 
     const eventId = eventIdRef.current;
     const obsCount = state.observationCount;
