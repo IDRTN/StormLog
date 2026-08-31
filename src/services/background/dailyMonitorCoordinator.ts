@@ -17,11 +17,13 @@ export const DAILY_MONITOR_ENABLED_EXPORT = 'daily_monitor_enabled';
 export const DAILY_MONITOR_INTERVAL_EXPORT = 'daily_monitor_interval';
 export const LAST_COLLECTION_KEY_EXPORT = 'daily_monitor_last_collection';
 export const LAST_ERROR_EXPORT = 'daily_monitor_last_error';
+export const REGISTERED_INTERVAL_KEY = 'daily_monitor_registered_interval';
 const VALID_INTERVALS = [5, 10, 15, 30, 60];
 const AUTOMATIC_RETRY_COOLDOWN_MS = 60_000;
 
 function normalizeInterval(minutes: number | null | undefined): number { return VALID_INTERVALS.includes(Number(minutes)) ? Number(minutes) : 15; }
 function parseTimestamp(value: string | null): number { if (!value) return 0; const parsed = Number(value); return Number.isFinite(parsed) ? parsed : 0; }
+function parseInterval(value: string | null): number | null { if (!value) return null; const parsed = Number(value); return VALID_INTERVALS.includes(parsed) ? parsed : null; }
 
 export class DailyMonitorCoordinator {
   private state: DailyMonitorSnapshot = { isActive: false, intervalMinutes: 15, loading: true, lastCollectionTime: null, lastError: null };
@@ -48,16 +50,14 @@ export class DailyMonitorCoordinator {
 
   private async initializeInternal(): Promise<void> {
     if (this.initialized) return;
-    const [enabled, storedInterval, lastCollection, lastError, lastAttemptStr, lastAutomaticCollectionStr] = await Promise.all([
+    const [enabled, storedInterval, lastCollection, lastError, lastAttemptStr, lastAutomaticCollectionStr, registeredIntervalStr] = await Promise.all([
       this.readStorage(DAILY_MONITOR_ENABLED_EXPORT), this.readStorage(DAILY_MONITOR_INTERVAL_EXPORT), this.readStorage(LAST_COLLECTION_KEY_EXPORT),
-      this.readStorage(LAST_ERROR_EXPORT), this.readStorage(LAST_AUTOMATIC_ATTEMPT_KEY), this.readStorage(LAST_AUTOMATIC_COLLECTION_KEY),
+      this.readStorage(LAST_ERROR_EXPORT), this.readStorage(LAST_AUTOMATIC_ATTEMPT_KEY), this.readStorage(LAST_AUTOMATIC_COLLECTION_KEY), this.readStorage(REGISTERED_INTERVAL_KEY),
     ]);
     const interval = normalizeInterval(storedInterval ? Number(storedInterval) : null);
     const isRegistered = await this.dependencies.background.isRegistered();
-    // An explicit disabled value wins over a stale native registration. This
-    // prevents an old Android callback from resurrecting a monitor the user
-    // intentionally stopped.
     const isActive = enabled === 'true' || (enabled !== 'false' && isRegistered);
+    this.registeredInterval = parseInterval(registeredIntervalStr);
     this.lastAutomaticAttemptMs = parseTimestamp(lastAttemptStr);
     this.lastAutomaticCollectionMs = parseTimestamp(lastAutomaticCollectionStr);
     this.patchState({ isActive, intervalMinutes: interval, lastCollectionTime: lastCollection ? Number(lastCollection) : null, lastError, loading: false });
@@ -118,18 +118,21 @@ export class DailyMonitorCoordinator {
     const interval = normalizeInterval(intervalMinutes);
     const operation = this.registrationChain.then(async () => {
       const isRegistered = await this.dependencies.background.isRegistered();
-      // Headless Android callbacks create a fresh JS coordinator. If the native
-      // task is already registered, do not unregister/re-register it merely
-      // because this process has no in-memory registration history. Re-register
-      // only when this process explicitly knows the prior interval differs.
+      // In a fresh headless process, the persisted registered interval lets us
+      // distinguish a healthy existing registration from a genuinely changed
+      // interval. Never reset a healthy task merely because JS was recreated.
+      if (isRegistered && this.registeredInterval === interval) return;
       if (isRegistered && this.registeredInterval == null) {
+        // Legacy installs may not have the new persisted marker. Adopt the
+        // existing native task once rather than resetting its Android schedule.
         this.registeredInterval = interval;
+        await this.writeStorage(REGISTERED_INTERVAL_KEY, interval.toString());
         return;
       }
-      if (isRegistered && this.registeredInterval === interval) return;
       if (isRegistered) await this.dependencies.background.unregister();
       await this.dependencies.background.register(interval);
       this.registeredInterval = interval;
+      await this.writeStorage(REGISTERED_INTERVAL_KEY, interval.toString());
     });
     this.registrationChain = operation.catch(() => undefined);
     await operation;
@@ -139,6 +142,7 @@ export class DailyMonitorCoordinator {
     const operation = this.registrationChain.then(async () => {
       if (await this.dependencies.background.isRegistered()) await this.dependencies.background.unregister();
       this.registeredInterval = null;
+      await this.removeStorage(REGISTERED_INTERVAL_KEY);
     });
     this.registrationChain = operation.catch(() => undefined);
     await operation;
@@ -148,9 +152,6 @@ export class DailyMonitorCoordinator {
     const fs = this.dependencies.foregroundService;
     if (!fs) return;
     try {
-      // The native adapter is idempotent. Always invoke it so a headless JS
-      // process can recover a missing service, while an active service remains
-      // untouched by startForegroundLocationService().
       const result = await fs.start(intervalMinutes);
       if (!result.success) console.warn('[Coordinator] Foreground service start failed:', result.error);
     } catch (err: any) { console.warn('[Coordinator] Foreground service start error:', err?.message || String(err)); }
@@ -166,12 +167,7 @@ export class DailyMonitorCoordinator {
     this.clearForegroundTimer();
     const intervalMs = this.state.intervalMinutes * 60 * 1000;
     const lastAutomaticAt = this.lastAutomaticCollectionMs;
-    // On first start, schedule a full interval from the start time rather than
-    // snapping to a wall-clock boundary. Automatic observations then remain
-    // evenly spaced according to the user's selected interval.
-    const delayMs = lastAutomaticAt > 0
-      ? Math.max(1000, intervalMs - (this.now() - lastAutomaticAt))
-      : intervalMs;
+    const delayMs = lastAutomaticAt > 0 ? Math.max(1000, intervalMs - (this.now() - lastAutomaticAt)) : intervalMs;
     this.foregroundTimer = this.dependencies.scheduler.setTimeout(() => {
       this.foregroundTimer = null;
       void this.runScheduledCollection().then(() => { if (this.state.isActive) this.scheduleNext(); });
