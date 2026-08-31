@@ -5,7 +5,8 @@ export type DailyCollectionMode = 'automatic' | 'manual';
 export type DailyCollectionOutcome =
   | 'completed'
   | 'shared'
-  | 'skipped_recent_automatic';
+  | 'skipped_recent_automatic'
+  | 'skipped_inactive';
 
 export type DailyCollectionResult = {
   success: boolean;
@@ -209,6 +210,13 @@ export class DailyMonitorCoordinator {
     // Hydrate persistent monitor state before applying the automatic gate.
     await this.initialize();
 
+    // A stale Android callback must never restart collection after the user has
+    // explicitly disabled the monitor. Registration state alone is not enough
+    // to establish that the feature is currently enabled.
+    if (!this.state.isActive) {
+      return { success: true, outcome: 'skipped_inactive' };
+    }
+
     if (this.inFlight) {
       return this.inFlight.then((result) => ({
         ...result,
@@ -219,9 +227,9 @@ export class DailyMonitorCoordinator {
     const nowMs = this.now();
     const intervalMs = this.state.intervalMinutes * 60 * 1000;
 
-    // Successful collections define the cadence. A late Android wake therefore
-    // collects as soon as we are actually due instead of using the late attempt
-    // itself to postpone the next observation.
+    // Successful automatic collections define the cadence. Manual "Collect
+    // Now" operations deliberately do not move this clock, so field tests of
+    // the automatic interval remain trustworthy.
     if (
       this.lastAutomaticCollectionMs > 0 &&
       nowMs - this.lastAutomaticCollectionMs < intervalMs
@@ -274,6 +282,11 @@ export class DailyMonitorCoordinator {
     const fs = this.dependencies.foregroundService;
     if (!fs) return;
     try {
+      // Do not restart an already-running Android foreground service during
+      // headless initialization. Repeated stop/start cycles can interrupt the
+      // location task and are especially harmful when Android recreates JS.
+      if (await fs.isRunning()) return;
+
       const result = await fs.start(intervalMinutes);
       if (!result.success) {
         console.warn('[Coordinator] Foreground service start failed:', result.error);
@@ -297,9 +310,12 @@ export class DailyMonitorCoordinator {
     this.clearForegroundTimer();
 
     const intervalMs = this.state.intervalMinutes * 60 * 1000;
-    const lastCollectionAt = this.state.lastCollectionTime ?? this.lastAutomaticCollectionMs;
-    const delayMs = lastCollectionAt > 0
-      ? Math.max(1000, intervalMs - (this.now() - lastCollectionAt))
+    // Only automatic collections establish the automatic cadence. A manual
+    // collection may update lastCollectionTime for the UI, but must not delay
+    // the next scheduled automatic observation.
+    const lastAutomaticAt = this.lastAutomaticCollectionMs;
+    const delayMs = lastAutomaticAt > 0
+      ? Math.max(1000, intervalMs - (this.now() - lastAutomaticAt))
       : Math.max(1000, this.getNextDelay()(this.state.intervalMinutes) - this.now());
 
     this.foregroundTimer = this.dependencies.scheduler.setTimeout(() => {
@@ -377,11 +393,13 @@ export class DailyMonitorCoordinator {
       await this.writeStorage(LAST_COLLECTION_KEY_EXPORT, completedAt.toString());
       await this.removeStorage(LAST_ERROR_EXPORT);
       if (mode === 'automatic') {
-        const automaticCollectionAt = automaticAttemptAt ?? completedAt;
-        this.lastAutomaticCollectionMs = automaticCollectionAt;
+        // Cadence is anchored to the completed collection, not the moment the
+        // OS woke the task. This prevents long GPS/API calls from shortening
+        // the next interval unexpectedly.
+        this.lastAutomaticCollectionMs = completedAt;
         await this.writeStorage(
           LAST_AUTOMATIC_COLLECTION_KEY,
-          automaticCollectionAt.toString(),
+          completedAt.toString(),
         );
       }
       this.patchState({ lastCollectionTime: completedAt, lastError: null });
