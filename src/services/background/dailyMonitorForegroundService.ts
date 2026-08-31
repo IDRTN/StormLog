@@ -1,38 +1,17 @@
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 
-// ============================================================
-// Foreground Location Service for Daily Monitor
-//
-// Uses expo-location's foreground service to produce periodic
-// location updates that trigger the DailyMonitorCoordinator.
-//
-// The coordinator remains the ONE authoritative execution owner.
-// This module is an execution trigger only.
-//
-// IMPORTANT: when StormLog is upgraded/reopened, an existing native
-// location task may belong to the previous app process. We therefore
-// explicitly stop an existing registration before starting a fresh one.
-// ============================================================
-
 export const DAILY_FOREGROUND_LOCATION_TASK = 'STORM_LOG_DAILY_LOCATION';
 
-let collectionCallback: (() => Promise<{ success: boolean; outcome?: string }>) | null = null;
+type CollectionResult = { success: boolean; outcome?: string };
+let collectionCallback: (() => Promise<CollectionResult>) | null = null;
 
 export function registerForegroundLocationTask(
-  callback: () => Promise<{ success: boolean; outcome?: string }>,
+  callback: () => Promise<CollectionResult>,
 ): void {
   collectionCallback = callback;
 }
 
-/**
- * Start/restart the foreground location service.
- * Must be called while the app is in the foreground (Android 12+ restriction).
- *
- * A previously registered task is deliberately stopped first. This is
- * important after an APK upgrade or process restart: Android can retain the
- * native registration while the JavaScript process/callback has changed.
- */
 export async function startForegroundLocationService(
   intervalMinutes: number,
 ): Promise<{ success: boolean; error?: string }> {
@@ -44,8 +23,6 @@ export async function startForegroundLocationService(
       return { success: false, error: 'Location permission not granted' };
     }
 
-    // Always refresh the native registration. This is especially important
-    // after installing a new APK while an older build's service is still registered.
     const isRunning = await isForegroundLocationServiceRunning();
     if (isRunning) {
       console.log(`${TAG} Existing foreground service found — restarting for current app process`);
@@ -57,7 +34,6 @@ export async function startForegroundLocationService(
     }
 
     const timeIntervalMs = Math.max(intervalMinutes * 60 * 1000, 60_000);
-
     await Location.startLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK, {
       accuracy: Location.Accuracy.Low,
       timeInterval: timeIntervalMs,
@@ -91,11 +67,7 @@ export async function stopForegroundLocationService(): Promise<void> {
   const TAG = '[FG-SERVICE]';
   try {
     const isRunning = await isForegroundLocationServiceRunning();
-    if (!isRunning) {
-      console.log(`${TAG} Foreground location service not running`);
-      return;
-    }
-
+    if (!isRunning) return;
     await Location.stopLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
     console.log(`${TAG} Foreground location service stopped`);
   } catch (error: any) {
@@ -111,9 +83,6 @@ export async function isForegroundLocationServiceRunning(): Promise<boolean> {
   }
 }
 
-// ============================================================
-// Task definition — must be at module top level
-// ============================================================
 TaskManager.defineTask(DAILY_FOREGROUND_LOCATION_TASK, async ({ data, error }) => {
   const TAG = '[FG-LOCATION]';
 
@@ -135,18 +104,25 @@ TaskManager.defineTask(DAILY_FOREGROUND_LOCATION_TASK, async ({ data, error }) =
     console.log(`${TAG} Location update: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
   }
 
-  if (collectionCallback) {
-    try {
-      const result = await collectionCallback();
-      if (result.outcome === 'skipped_recent_automatic') {
-        console.log(`${TAG} Collection skipped (recent automatic run)`);
-      } else {
-        console.log(`${TAG} Collection triggered: ${result.success ? 'success' : 'failed'}`);
-      }
-    } catch (error: any) {
-      console.error(`${TAG} Collection failed:`, error?.message || String(error));
+  try {
+    // Headless Android execution may load this task without preserving the
+    // module-level callback. Fall back to the coordinator's public automatic
+    // entry point so the same single execution owner is used.
+    if (!collectionCallback) {
+      console.warn(`${TAG} Collection callback missing — using headless Daily Monitor fallback`);
+      const dailyMonitor = await import('./dailyMonitor');
+      const result = await dailyMonitor.performDailyCollection('automatic');
+      console.log(`${TAG} Headless fallback collection: ${result.success ? 'success' : 'failed'}`);
+      return;
     }
-  } else {
-    console.warn(`${TAG} No collection callback registered`);
+
+    const result = await collectionCallback();
+    if (result.outcome === 'skipped_recent_automatic') {
+      console.log(`${TAG} Collection skipped (recent automatic run)`);
+    } else {
+      console.log(`${TAG} Collection triggered: ${result.success ? 'success' : 'failed'}`);
+    }
+  } catch (collectionError: any) {
+    console.error(`${TAG} Collection failed:`, collectionError?.message || String(collectionError));
   }
 });
