@@ -3,11 +3,10 @@ import * as TaskManager from 'expo-task-manager';
 
 export const DAILY_FOREGROUND_LOCATION_TASK = 'STORM_LOG_DAILY_LOCATION';
 
-// Android location providers may batch low-priority updates for much longer
-// than the Daily Monitor interval. Keep a short foreground-service heartbeat
-// and let the coordinator's persisted cadence gate decide when a real
-// observation is due. This makes the location task a wake/recovery mechanism,
-// not the authoritative scheduler.
+// Android location providers may batch low-priority updates. Keep a short
+// foreground-service heartbeat and let the coordinator's persisted cadence gate
+// decide when a real observation is due. The location task is a wake/recovery
+// mechanism, not the authoritative scheduler.
 const FOREGROUND_HEARTBEAT_MS = 60_000;
 
 type CollectionResult = { success: boolean; outcome?: string };
@@ -30,21 +29,21 @@ export async function startForegroundLocationService(
       return { success: false, error: 'Location permission not granted' };
     }
 
+    // Idempotent start is critical for headless Android execution. A newly
+    // created JS process may discover an already-running native service; do not
+    // stop/restart it because that can interrupt location callbacks and create a
+    // self-inflicted monitoring gap.
     const isRunning = await isForegroundLocationServiceRunning();
     if (isRunning) {
-      console.log(`${TAG} Existing foreground service found — restarting for current app process`);
-      try {
-        await Location.stopLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
-      } catch (stopError: any) {
-        console.warn(`${TAG} Existing service stop warning:`, stopError?.message || String(stopError));
-      }
+      console.log(`${TAG} Existing foreground service already running — keeping it alive`);
+      return { success: true };
     }
 
     // Do not ask Android to deliver location only at the observation interval.
     // A one-minute heartbeat gives the coordinator frequent opportunities to
-    // recover a due collection while its persisted last-attempt gate prevents
-    // duplicate observations. Balanced accuracy reduces battery cost versus
-    // a high-accuracy continuous GPS lock.
+    // recover a due collection while its persisted cadence gate prevents
+    // duplicate observations. Balanced accuracy reduces battery cost versus a
+    // high-accuracy continuous GPS lock.
     await Location.startLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK, {
       accuracy: Location.Accuracy.Balanced,
       timeInterval: FOREGROUND_HEARTBEAT_MS,
@@ -127,8 +126,8 @@ TaskManager.defineTask(DAILY_FOREGROUND_LOCATION_TASK, async ({ data, error }) =
     }
 
     const result = await collectionCallback();
-    if (result.outcome === 'skipped_recent_automatic') {
-      console.log(`${TAG} Collection skipped (not due yet)`);
+    if (result.outcome === 'skipped_recent_automatic' || result.outcome === 'skipped_inactive') {
+      console.log(`${TAG} Collection skipped (${result.outcome})`);
     } else {
       console.log(`${TAG} Collection triggered: ${result.success ? 'success' : 'failed'}`);
     }
