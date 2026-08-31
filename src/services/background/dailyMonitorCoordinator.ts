@@ -89,6 +89,7 @@ export class DailyMonitorCoordinator {
   private registeredInterval: number | null = null;
   private lastAutomaticAttemptMs = 0;
   private initialized = false;
+  private initializationPromise: Promise<void> | null = null;
 
   constructor(private readonly dependencies: DailyMonitorCoordinatorDependencies) {}
 
@@ -106,7 +107,18 @@ export class DailyMonitorCoordinator {
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
-    this.initialized = true;
+    if (this.initializationPromise) return this.initializationPromise;
+
+    this.initializationPromise = this.initializeInternal();
+    try {
+      await this.initializationPromise;
+    } finally {
+      this.initializationPromise = null;
+    }
+  }
+
+  private async initializeInternal(): Promise<void> {
+    if (this.initialized) return;
 
     const [enabled, storedInterval, lastCollection, lastError, lastAttemptStr] =
       await Promise.all([
@@ -118,8 +130,8 @@ export class DailyMonitorCoordinator {
       ]);
 
     const interval = normalizeInterval(storedInterval ? Number(storedInterval) : null);
-    const isActive =
-      enabled === 'true' || (await this.dependencies.background.isRegistered());
+    const isRegistered = await this.dependencies.background.isRegistered();
+    const isActive = enabled === 'true' || isRegistered;
 
     this.lastAutomaticAttemptMs = parseTimestamp(lastAttemptStr);
 
@@ -131,6 +143,11 @@ export class DailyMonitorCoordinator {
       loading: false,
     });
 
+    // Mark initialized only after persistent state has been hydrated. This is
+    // important for Android headless/background execution, where a brand-new
+    // JS process may call collectAutomatic() before the UI ever mounts.
+    this.initialized = true;
+
     if (isActive) {
       this.scheduleNext();
       await this.registerBackground(interval);
@@ -139,6 +156,7 @@ export class DailyMonitorCoordinator {
   }
 
   async startMonitor(intervalMinutes?: number): Promise<void> {
+    await this.initialize();
     const interval = normalizeInterval(intervalMinutes ?? this.state.intervalMinutes);
     await this.writeStorage(DAILY_MONITOR_ENABLED_EXPORT, 'true');
     await this.writeStorage(DAILY_MONITOR_INTERVAL_EXPORT, interval.toString());
@@ -150,6 +168,7 @@ export class DailyMonitorCoordinator {
   }
 
   async stopMonitor(): Promise<void> {
+    await this.initialize();
     await this.writeStorage(DAILY_MONITOR_ENABLED_EXPORT, 'false');
     this.patchState({ isActive: false });
     this.stopForegroundScheduler();
@@ -158,6 +177,7 @@ export class DailyMonitorCoordinator {
   }
 
   async setIntervalMinutes(minutes: number): Promise<void> {
+    await this.initialize();
     const interval = normalizeInterval(minutes);
     await this.writeStorage(DAILY_MONITOR_INTERVAL_EXPORT, interval.toString());
     this.patchState({ intervalMinutes: interval });
@@ -170,10 +190,15 @@ export class DailyMonitorCoordinator {
   }
 
   async collectManual(): Promise<DailyCollectionResult> {
+    await this.initialize();
     return this.runSharedCollection('manual');
   }
 
   async collectAutomatic(): Promise<DailyCollectionResult> {
+    // Android can invoke either task in a brand-new headless JS process.
+    // Hydrate persistent monitor state before applying the automatic gate.
+    await this.initialize();
+
     // If an automatic collection is already running, share it.
     if (this.inFlight) {
       return this.inFlight.then((result) => ({
