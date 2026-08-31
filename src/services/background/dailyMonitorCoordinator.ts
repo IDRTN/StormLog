@@ -62,6 +62,7 @@ export const LAST_COLLECTION_KEY_EXPORT = 'daily_monitor_last_collection';
 export const LAST_ERROR_EXPORT = 'daily_monitor_last_error';
 
 const VALID_INTERVALS = [5, 10, 15, 30, 60];
+const AUTOMATIC_RETRY_COOLDOWN_MS = 60_000;
 
 function normalizeInterval(minutes: number | null | undefined): number {
   return VALID_INTERVALS.includes(Number(minutes)) ? Number(minutes) : 15;
@@ -88,6 +89,7 @@ export class DailyMonitorCoordinator {
   private registrationChain: Promise<unknown> = Promise.resolve();
   private registeredInterval: number | null = null;
   private lastAutomaticAttemptMs = 0;
+  private lastAutomaticCollectionMs = 0;
   private initialized = false;
   private initializationPromise: Promise<void> | null = null;
 
@@ -120,20 +122,28 @@ export class DailyMonitorCoordinator {
   private async initializeInternal(): Promise<void> {
     if (this.initialized) return;
 
-    const [enabled, storedInterval, lastCollection, lastError, lastAttemptStr] =
-      await Promise.all([
-        this.readStorage(DAILY_MONITOR_ENABLED_EXPORT),
-        this.readStorage(DAILY_MONITOR_INTERVAL_EXPORT),
-        this.readStorage(LAST_COLLECTION_KEY_EXPORT),
-        this.readStorage(LAST_ERROR_EXPORT),
-        this.readStorage(LAST_AUTOMATIC_ATTEMPT_KEY),
-      ]);
+    const [
+      enabled,
+      storedInterval,
+      lastCollection,
+      lastError,
+      lastAttemptStr,
+      lastAutomaticCollectionStr,
+    ] = await Promise.all([
+      this.readStorage(DAILY_MONITOR_ENABLED_EXPORT),
+      this.readStorage(DAILY_MONITOR_INTERVAL_EXPORT),
+      this.readStorage(LAST_COLLECTION_KEY_EXPORT),
+      this.readStorage(LAST_ERROR_EXPORT),
+      this.readStorage(LAST_AUTOMATIC_ATTEMPT_KEY),
+      this.readStorage(LAST_AUTOMATIC_COLLECTION_KEY),
+    ]);
 
     const interval = normalizeInterval(storedInterval ? Number(storedInterval) : null);
     const isRegistered = await this.dependencies.background.isRegistered();
     const isActive = enabled === 'true' || isRegistered;
 
     this.lastAutomaticAttemptMs = parseTimestamp(lastAttemptStr);
+    this.lastAutomaticCollectionMs = parseTimestamp(lastAutomaticCollectionStr);
 
     this.patchState({
       isActive,
@@ -199,7 +209,6 @@ export class DailyMonitorCoordinator {
     // Hydrate persistent monitor state before applying the automatic gate.
     await this.initialize();
 
-    // If an automatic collection is already running, share it.
     if (this.inFlight) {
       return this.inFlight.then((result) => ({
         ...result,
@@ -209,9 +218,22 @@ export class DailyMonitorCoordinator {
 
     const nowMs = this.now();
     const intervalMs = this.state.intervalMinutes * 60 * 1000;
+
+    // Successful collections define the cadence. A late Android wake therefore
+    // collects as soon as we are actually due instead of using the late attempt
+    // itself to postpone the next observation.
+    if (
+      this.lastAutomaticCollectionMs > 0 &&
+      nowMs - this.lastAutomaticCollectionMs < intervalMs
+    ) {
+      return { success: true, outcome: 'skipped_recent_automatic' };
+    }
+
+    // If the last attempt failed, allow a short recovery retry rather than
+    // suppressing automatic monitoring for the entire interval.
     if (
       this.lastAutomaticAttemptMs > 0 &&
-      nowMs - this.lastAutomaticAttemptMs < intervalMs
+      nowMs - this.lastAutomaticAttemptMs < AUTOMATIC_RETRY_COOLDOWN_MS
     ) {
       return { success: true, outcome: 'skipped_recent_automatic' };
     }
@@ -273,10 +295,12 @@ export class DailyMonitorCoordinator {
 
   private scheduleNext(): void {
     this.clearForegroundTimer();
-    const delayMs = Math.max(
-      1000,
-      this.getNextDelay()(this.state.intervalMinutes) - this.now(),
-    );
+
+    const intervalMs = this.state.intervalMinutes * 60 * 1000;
+    const lastCollectionAt = this.state.lastCollectionTime ?? this.lastAutomaticCollectionMs;
+    const delayMs = lastCollectionAt > 0
+      ? Math.max(1000, intervalMs - (this.now() - lastCollectionAt))
+      : Math.max(1000, this.getNextDelay()(this.state.intervalMinutes) - this.now());
 
     this.foregroundTimer = this.dependencies.scheduler.setTimeout(() => {
       this.foregroundTimer = null;
@@ -353,9 +377,11 @@ export class DailyMonitorCoordinator {
       await this.writeStorage(LAST_COLLECTION_KEY_EXPORT, completedAt.toString());
       await this.removeStorage(LAST_ERROR_EXPORT);
       if (mode === 'automatic') {
+        const automaticCollectionAt = automaticAttemptAt ?? completedAt;
+        this.lastAutomaticCollectionMs = automaticCollectionAt;
         await this.writeStorage(
           LAST_AUTOMATIC_COLLECTION_KEY,
-          (automaticAttemptAt ?? completedAt).toString(),
+          automaticCollectionAt.toString(),
         );
       }
       this.patchState({ lastCollectionTime: completedAt, lastError: null });
