@@ -9,16 +9,14 @@ import * as TaskManager from 'expo-task-manager';
 //
 // The coordinator remains the ONE authoritative execution owner.
 // This module is an execution trigger only.
+//
+// IMPORTANT: when StormLog is upgraded/reopened, an existing native
+// location task may belong to the previous app process. We therefore
+// explicitly stop an existing registration before starting a fresh one.
 // ============================================================
 
 export const DAILY_FOREGROUND_LOCATION_TASK = 'STORM_LOG_DAILY_LOCATION';
 
-/**
- * Register the foreground location task.
- * Must be called at module top level (same pattern as BackgroundFetch task).
- * Accepts a collection callback that will be invoked on each location update.
- * The callback should call dailyMonitorCoordinator.collectAutomatic().
- */
 let collectionCallback: (() => Promise<{ success: boolean; outcome?: string }>) | null = null;
 
 export function registerForegroundLocationTask(
@@ -28,32 +26,37 @@ export function registerForegroundLocationTask(
 }
 
 /**
- * Start the foreground location service.
+ * Start/restart the foreground location service.
  * Must be called while the app is in the foreground (Android 12+ restriction).
  *
- * @param intervalMinutes - Collection interval (e.g. 15)
+ * A previously registered task is deliberately stopped first. This is
+ * important after an APK upgrade or process restart: Android can retain the
+ * native registration while the JavaScript process/callback has changed.
  */
 export async function startForegroundLocationService(
   intervalMinutes: number,
 ): Promise<{ success: boolean; error?: string }> {
   const TAG = '[FG-SERVICE]';
   try {
-    // Check foreground location permission
     const { status } = await Location.getForegroundPermissionsAsync();
     if (status !== 'granted') {
       console.warn(`${TAG} Location permission not granted — cannot start foreground service`);
       return { success: false, error: 'Location permission not granted' };
     }
 
-    // Check if already running
+    // Always refresh the native registration. This is especially important
+    // after installing a new APK while an older build's service is still registered.
     const isRunning = await isForegroundLocationServiceRunning();
     if (isRunning) {
-      console.log(`${TAG} Foreground location service already running`);
-      return { success: true };
+      console.log(`${TAG} Existing foreground service found — restarting for current app process`);
+      try {
+        await Location.stopLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
+      } catch (stopError: any) {
+        console.warn(`${TAG} Existing service stop warning:`, stopError?.message || String(stopError));
+      }
     }
 
-    // Start location updates with foreground service
-    const timeIntervalMs = Math.max(intervalMinutes * 60 * 1000, 60_000); // minimum 60 seconds
+    const timeIntervalMs = Math.max(intervalMinutes * 60 * 1000, 60_000);
 
     await Location.startLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK, {
       accuracy: Location.Accuracy.Low,
@@ -70,7 +73,12 @@ export async function startForegroundLocationService(
       },
     });
 
-    console.log(`${TAG} Foreground location service started (interval: ${intervalMinutes} min)`);
+    const registered = await isForegroundLocationServiceRunning();
+    if (!registered) {
+      return { success: false, error: 'Foreground location service registration could not be verified' };
+    }
+
+    console.log(`${TAG} Foreground location service started and verified (interval: ${intervalMinutes} min)`);
     return { success: true };
   } catch (error: any) {
     const msg = error?.message || String(error);
@@ -79,9 +87,6 @@ export async function startForegroundLocationService(
   }
 }
 
-/**
- * Stop the foreground location service.
- */
 export async function stopForegroundLocationService(): Promise<void> {
   const TAG = '[FG-SERVICE]';
   try {
@@ -98,9 +103,6 @@ export async function stopForegroundLocationService(): Promise<void> {
   }
 }
 
-/**
- * Check if the foreground location service is currently registered.
- */
 export async function isForegroundLocationServiceRunning(): Promise<boolean> {
   try {
     return await Location.hasStartedLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
@@ -112,8 +114,14 @@ export async function isForegroundLocationServiceRunning(): Promise<boolean> {
 // ============================================================
 // Task definition — must be at module top level
 // ============================================================
-TaskManager.defineTask(DAILY_FOREGROUND_LOCATION_TASK, async ({ data }) => {
+TaskManager.defineTask(DAILY_FOREGROUND_LOCATION_TASK, async ({ data, error }) => {
   const TAG = '[FG-LOCATION]';
+
+  if (error) {
+    console.error(`${TAG} Location task error:`, error.message || String(error));
+    return;
+  }
+
   const locations = (data as any)?.locations;
   if (!locations || locations.length === 0) {
     console.log(`${TAG} No location data received`);
@@ -127,7 +135,6 @@ TaskManager.defineTask(DAILY_FOREGROUND_LOCATION_TASK, async ({ data }) => {
     console.log(`${TAG} Location update: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
   }
 
-  // Delegate to the coordinator — the ONE authoritative execution owner.
   if (collectionCallback) {
     try {
       const result = await collectionCallback();
