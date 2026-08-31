@@ -9,7 +9,7 @@ type AsyncMap = { getItem: (key: string) => Promise<string | null>; setItem: (ke
 export type DailyMonitorScheduler = { setTimeout: (callback: () => void, delayMs: number) => unknown; clearTimeout: (timerId: unknown) => void };
 export type BackgroundTaskAdapter = { isRegistered: () => Promise<boolean>; register: (intervalMinutes: number) => Promise<void>; unregister: () => Promise<void> };
 export type ForegroundServiceAdapter = { start: (intervalMinutes: number) => Promise<{ success: boolean; error?: string }>; stop: () => Promise<void>; isRunning: () => Promise<boolean> };
-export type DailyMonitorCoordinatorDependencies = { runCollection: () => Promise<DailyCollectionResult>; storage: AsyncMap; scheduler: DailyMonitorScheduler; background: BackgroundTaskAdapter; foregroundService?: ForegroundServiceAdapter; now?: () => number; getNextDelayMs?: (intervalMinutes: number) => number };
+export type DailyMonitorCoordinatorDependencies = { runCollection: () => Promise<DailyCollectionResult>; storage: AsyncMap; scheduler: DailyMonitorScheduler; background: BackgroundTaskAdapter; foregroundService?: ForegroundServiceAdapter; now?: () => number };
 
 export const LAST_AUTOMATIC_COLLECTION_KEY = 'daily_monitor_last_automatic_collection';
 export const LAST_AUTOMATIC_ATTEMPT_KEY = 'daily_monitor_last_automatic_attempt';
@@ -118,13 +118,8 @@ export class DailyMonitorCoordinator {
     const interval = normalizeInterval(intervalMinutes);
     const operation = this.registrationChain.then(async () => {
       const isRegistered = await this.dependencies.background.isRegistered();
-      // In a fresh headless process, the persisted registered interval lets us
-      // distinguish a healthy existing registration from a genuinely changed
-      // interval. Never reset a healthy task merely because JS was recreated.
       if (isRegistered && this.registeredInterval === interval) return;
       if (isRegistered && this.registeredInterval == null) {
-        // Legacy installs may not have the new persisted marker. Adopt the
-        // existing native task once rather than resetting its Android schedule.
         this.registeredInterval = interval;
         await this.writeStorage(REGISTERED_INTERVAL_KEY, interval.toString());
         return;
@@ -166,8 +161,18 @@ export class DailyMonitorCoordinator {
   private scheduleNext(): void {
     this.clearForegroundTimer();
     const intervalMs = this.state.intervalMinutes * 60 * 1000;
-    const lastAutomaticAt = this.lastAutomaticCollectionMs;
-    const delayMs = lastAutomaticAt > 0 ? Math.max(1000, intervalMs - (this.now() - lastAutomaticAt)) : intervalMs;
+    const nowMs = this.now();
+    const dueAfterCollection = this.lastAutomaticCollectionMs > 0
+      ? this.lastAutomaticCollectionMs + intervalMs
+      : nowMs + intervalMs;
+    // A failed attempt must not cause a tight 1-second timer loop while the
+    // retry cooldown is active. Schedule the next wake at the later of the
+    // normal cadence boundary and the retry boundary.
+    const dueAfterAttempt = this.lastAutomaticAttemptMs > 0
+      ? this.lastAutomaticAttemptMs + AUTOMATIC_RETRY_COOLDOWN_MS
+      : nowMs;
+    const nextDueMs = Math.max(nowMs + 1000, dueAfterCollection, dueAfterAttempt);
+    const delayMs = nextDueMs - nowMs;
     this.foregroundTimer = this.dependencies.scheduler.setTimeout(() => {
       this.foregroundTimer = null;
       void this.runScheduledCollection().then(() => { if (this.state.isActive) this.scheduleNext(); });
@@ -212,8 +217,6 @@ export class DailyMonitorCoordinator {
     this.patchState({ lastError: error });
   }
 
-  private getNextDelayMsDefault(intervalMinutes: number): number { return getNextIntervalBoundary(intervalMinutes * 60 * 1000) - Date.now(); }
-  private getNextDelay() { return this.dependencies.getNextDelayMs ?? ((intervalMinutes: number) => this.getNextDelayMsDefault(intervalMinutes)); }
   private now(): number { return (this.dependencies.now ?? Date.now)(); }
   private patchState(changes: Partial<DailyMonitorSnapshot>): void { this.state = { ...this.state, ...changes }; for (const listener of [...this.listeners]) listener(this.state); }
   private async readStorage(key: string): Promise<string | null> { try { return await this.dependencies.storage.getItem(key); } catch { return null; } }
