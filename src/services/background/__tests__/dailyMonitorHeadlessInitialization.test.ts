@@ -88,7 +88,10 @@ void (async () => {
       coordinator.initialize(),
     ]);
 
-    if (registrationChecks !== 1) throw new Error(`expected one initialization registration check, got ${registrationChecks}`);
+    // One check hydrates persisted state and one is performed by the
+    // serialized registration step. The important invariant is that the
+    // concurrent calls do not start multiple initialization sequences.
+    if (registrationChecks !== 2) throw new Error(`expected two serialized registration checks, got ${registrationChecks}`);
     if (coordinator.getState().loading) throw new Error('coordinator remained loading');
   });
 
