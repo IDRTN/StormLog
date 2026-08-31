@@ -3,6 +3,13 @@ import * as TaskManager from 'expo-task-manager';
 
 export const DAILY_FOREGROUND_LOCATION_TASK = 'STORM_LOG_DAILY_LOCATION';
 
+// Android location providers may batch low-priority updates for much longer
+// than the Daily Monitor interval. Keep a short foreground-service heartbeat
+// and let the coordinator's persisted cadence gate decide when a real
+// observation is due. This makes the location task a wake/recovery mechanism,
+// not the authoritative scheduler.
+const FOREGROUND_HEARTBEAT_MS = 60_000;
+
 type CollectionResult = { success: boolean; outcome?: string };
 let collectionCallback: (() => Promise<CollectionResult>) | null = null;
 
@@ -33,10 +40,14 @@ export async function startForegroundLocationService(
       }
     }
 
-    const timeIntervalMs = Math.max(intervalMinutes * 60 * 1000, 60_000);
+    // Do not ask Android to deliver location only at the observation interval.
+    // A one-minute heartbeat gives the coordinator frequent opportunities to
+    // recover a due collection while its persisted last-attempt gate prevents
+    // duplicate observations. Balanced accuracy reduces battery cost versus
+    // a high-accuracy continuous GPS lock.
     await Location.startLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK, {
-      accuracy: Location.Accuracy.Low,
-      timeInterval: timeIntervalMs,
+      accuracy: Location.Accuracy.Balanced,
+      timeInterval: FOREGROUND_HEARTBEAT_MS,
       distanceInterval: 0,
       deferredUpdatesDistance: 0,
       deferredUpdatesInterval: 0,
@@ -54,7 +65,7 @@ export async function startForegroundLocationService(
       return { success: false, error: 'Foreground location service registration could not be verified' };
     }
 
-    console.log(`${TAG} Foreground location service started and verified (interval: ${intervalMinutes} min)`);
+    console.log(`${TAG} Foreground service started and verified (heartbeat: 1 min, collection interval: ${intervalMinutes} min)`);
     return { success: true };
   } catch (error: any) {
     const msg = error?.message || String(error);
@@ -92,16 +103,15 @@ TaskManager.defineTask(DAILY_FOREGROUND_LOCATION_TASK, async ({ data, error }) =
   }
 
   const locations = (data as any)?.locations;
-  if (!locations || locations.length === 0) {
-    console.log(`${TAG} No location data received`);
-    return;
-  }
-
-  const location = locations[0];
-  const lat = location?.coords?.latitude;
-  const lon = location?.coords?.longitude;
-  if (lat != null && lon != null) {
-    console.log(`${TAG} Location update: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
+  if (locations?.length) {
+    const location = locations[0];
+    const lat = location?.coords?.latitude;
+    const lon = location?.coords?.longitude;
+    if (lat != null && lon != null) {
+      console.log(`${TAG} Location heartbeat: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
+    }
+  } else {
+    console.log(`${TAG} Heartbeat received without location payload`);
   }
 
   try {
@@ -118,7 +128,7 @@ TaskManager.defineTask(DAILY_FOREGROUND_LOCATION_TASK, async ({ data, error }) =
 
     const result = await collectionCallback();
     if (result.outcome === 'skipped_recent_automatic') {
-      console.log(`${TAG} Collection skipped (recent automatic run)`);
+      console.log(`${TAG} Collection skipped (not due yet)`);
     } else {
       console.log(`${TAG} Collection triggered: ${result.success ? 'success' : 'failed'}`);
     }
