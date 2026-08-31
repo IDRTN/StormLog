@@ -5,6 +5,9 @@ import * as Notifications from 'expo-notifications';
 import type { EventSubscription } from 'expo-modules-core';
 import { Colors } from '../src/constants/theme';
 import { ensureNotificationChannels, requestNotificationPermission } from '../src/services/notifications';
+// Keep background task definitions in the root module graph so Android can
+// initialize them when a headless/background task starts without opening a route.
+import '../src/services/background/dailyMonitor';
 
 export default function RootLayout() {
   const notificationListener = useRef<EventSubscription | null>(null);
