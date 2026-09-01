@@ -10,7 +10,8 @@ function assert(condition: boolean, message: string): asserts condition {
 async function main() {
   let now = 1_000_000;
   const storage = new Map<string, string>();
-  const timers: Array<{ delayMs: number; callback: () => void }> = [];
+  const timers = new Map<number, { delayMs: number; callback: () => void }>();
+  let nextTimerId = 0;
   let executions = 0;
   let failOnce = true;
 
@@ -23,10 +24,13 @@ async function main() {
     },
     scheduler: {
       setTimeout: (callback, delayMs) => {
-        timers.push({ callback, delayMs });
-        return timers.length;
+        const id = ++nextTimerId;
+        timers.set(id, { callback, delayMs });
+        return id;
       },
-      clearTimeout: () => undefined,
+      clearTimeout: (timerId) => {
+        timers.delete(timerId as number);
+      },
     },
     background: {
       isRegistered: async () => true,
@@ -49,16 +53,25 @@ async function main() {
 
   // First scheduled attempt fails. The next timer must respect the 60-second
   // retry boundary rather than entering a tight 1-second loop.
-  timers.shift()!.callback();
+  const firstTimerId = [...timers.keys()][0];
+  const firstTimer = timers.get(firstTimerId);
+  assert(firstTimer != null, 'initial scheduler timer should exist');
+  timers.delete(firstTimerId);
+  firstTimer.callback();
   await new Promise((resolve) => setTimeout(resolve, 0));
   const executionsAfterFirstAttempt = executions;
   assert(executionsAfterFirstAttempt === 1, 'first scheduled attempt should execute once');
-  assert(timers.length === 1, 'exactly one retry timer should remain');
-  assert(timers[0].delayMs >= 60_000, `retry timer too early: ${timers[0].delayMs}ms`);
+  assert(timers.size === 1, 'exactly one retry timer should remain');
+  const retryTimer = [...timers.values()][0];
+  assert(retryTimer.delayMs >= 60_000, `retry timer too early: ${retryTimer.delayMs}ms`);
 
   // After the retry cooldown, the failed attempt is retried and succeeds.
   now += 61_000;
-  timers.shift()!.callback();
+  const retryTimerId = [...timers.keys()][0];
+  const retryTimerEntry = timers.get(retryTimerId);
+  assert(retryTimerEntry != null, 'retry timer should exist');
+  timers.delete(retryTimerId);
+  retryTimerEntry.callback();
   await new Promise((resolve) => setTimeout(resolve, 0));
   const executionsAfterRetry = executions;
   assert(executionsAfterRetry === 2, 'retry should execute once after cooldown');
