@@ -158,7 +158,6 @@ void (async function main() {
 
   await test('foreground service adapter failure does not break startMonitor', async () => {
     const { deps, getState } = fakeDependenciesWithForegroundService();
-    // Override foreground service start to fail
     deps.foregroundService = {
       start: async () => ({ success: false, error: 'Permission denied' }),
       stop: async () => {},
@@ -167,7 +166,6 @@ void (async function main() {
     const coordinator = new DailyMonitorCoordinator(deps);
     coordinator.subscribe(() => undefined);
     await coordinator.initialize();
-    // Should not throw
     await coordinator.startMonitor(15);
     assert(typeof getState().activeRegistrationInterval === 'number', 'background still registered');
   });
@@ -183,7 +181,6 @@ void (async function main() {
     coordinator.subscribe(() => undefined);
     await coordinator.initialize();
     await coordinator.startMonitor(15);
-    // Should not throw
     await coordinator.stopMonitor();
     assertEqual(getState().activeRegistrationInterval, null, 'background unregistered');
   });
@@ -194,7 +191,6 @@ void (async function main() {
     const coordinator = new DailyMonitorCoordinator(deps);
     coordinator.subscribe(() => undefined);
     await coordinator.initialize();
-    // Should not throw
     await coordinator.startMonitor(15);
     assert(typeof getState().activeRegistrationInterval === 'number', 'background registered');
   });
@@ -210,12 +206,10 @@ void (async function main() {
     await coordinator.initialize();
     await coordinator.startMonitor(15);
 
-    // Simulate what the foreground location task callback does
     const result = await coordinator.collectAutomatic();
     assertEqual(getState().executionCount, 1, 'collection executed via collectAutomatic');
     assertEqual(result.outcome, 'completed', 'collection completed');
 
-    // Second call within interval is gated
     const result2 = await coordinator.collectAutomatic();
     assertEqual(getState().executionCount, 1, 'second call gated');
     assertEqual(result2.outcome, 'skipped_recent_automatic', 'skipped as recent');
@@ -238,12 +232,16 @@ void (async function main() {
     await coordinator.initialize();
     await coordinator.startMonitor(15);
 
-    // Start two concurrent automatic collections (simulating foreground service + background fetch)
     const p1 = coordinator.collectAutomatic();
     const p2 = coordinator.collectAutomatic();
 
-    // Resolve the in-flight collection
-    resolveCollection!();
+    // collectAutomatic() resumes through an async initialization boundary.
+    // Yield so the shared pipeline has actually entered runCollection before
+    // resolving its gate; otherwise the test can race its own fixture.
+    await Promise.resolve();
+    await Promise.resolve();
+    assert(resolveCollection !== null, 'collection pipeline should be in flight before resolving');
+    resolveCollection();
     const [r1, r2] = await Promise.all([p1, p2]);
 
     assertEqual(execCount, 1, 'only one actual execution');
@@ -270,15 +268,11 @@ void (async function main() {
     await coordinator.initialize();
     await coordinator.startMonitor(15);
 
-    // Verify only one runCollection path exists by checking execution count
-    // matches the number of collectAutomatic/collectManual calls
     await coordinator.collectAutomatic();
     await coordinator.collectManual();
-    await coordinator.collectAutomatic(); // gated
+    await coordinator.collectAutomatic();
     assertEqual(getState().executionCount, 2, 'exactly two executions from two explicit calls');
   });
-
-  // ── Summary ──
 
   console.log(`\nPhase 9 foreground service tests: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exitCode = 1;
