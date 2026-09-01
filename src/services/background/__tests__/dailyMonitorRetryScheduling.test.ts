@@ -51,7 +51,8 @@ async function main() {
   // retry boundary rather than entering a tight 1-second loop.
   timers.shift()!.callback();
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert(executions === 1, 'first scheduled attempt should execute once');
+  const executionsAfterFirstAttempt = executions;
+  assert(executionsAfterFirstAttempt === 1, 'first scheduled attempt should execute once');
   assert(timers.length === 1, 'exactly one retry timer should remain');
   assert(timers[0].delayMs >= 60_000, `retry timer too early: ${timers[0].delayMs}ms`);
 
@@ -59,7 +60,8 @@ async function main() {
   now += 61_000;
   timers.shift()!.callback();
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert(executions === 2, 'retry should execute once after cooldown');
+  const executionsAfterRetry = executions;
+  assert(executionsAfterRetry === 2, 'retry should execute once after cooldown');
 
   console.log('PASS: failed automatic collection schedules bounded retry without timer spin');
 }
