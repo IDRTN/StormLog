@@ -8,6 +8,7 @@ import { ensureNotificationChannels, requestNotificationPermission } from '../sr
 // Keep background task definitions in the root module graph so Android can
 // initialize them when a headless/background task starts without opening a route.
 import '../src/services/background/dailyMonitor';
+import { repairDailyMonitorAfterStartup } from '../src/services/background/dailyMonitorStartupRepair';
 
 export default function RootLayout() {
   const notificationListener = useRef<EventSubscription | null>(null);
@@ -17,6 +18,17 @@ export default function RootLayout() {
     (async () => {
       await ensureNotificationChannels();
       await requestNotificationPermission();
+
+      // A fresh JS process can follow an Android package-update restore where
+      // expo-location reports the persisted foreground task as running even
+      // though its native foreground-service consumer is half-initialized.
+      // Repair it once, while the app is definitely foregrounded. This keeps
+      // background/headless execution owned by the Daily Monitor coordinator.
+      try {
+        await repairDailyMonitorAfterStartup();
+      } catch (error) {
+        console.warn('[ROOT] Daily Monitor startup repair failed:', error);
+      }
     })();
 
     notificationListener.current = Notifications.addNotificationReceivedListener(notification => {
