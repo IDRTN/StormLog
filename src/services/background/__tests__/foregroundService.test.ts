@@ -105,15 +105,12 @@ function fakeDependenciesWithForegroundService() {
 }
 
 void (async function main() {
-  // ── Foreground service delegation tests ──
-
   await test('startMonitor requests foreground service start with correct interval', async () => {
     const { deps, getState } = fakeDependenciesWithForegroundService();
     const coordinator = new DailyMonitorCoordinator(deps);
     coordinator.subscribe(() => undefined);
     await coordinator.initialize();
     await coordinator.startMonitor(15);
-
     const state = getState();
     assertEqual(state.fgServiceStartCalls.length, 1, 'foreground service start called once');
     assertEqual(state.fgServiceStartCalls[0], 15, 'foreground service started with 15 min interval');
@@ -126,8 +123,6 @@ void (async function main() {
     coordinator.subscribe(() => undefined);
     await coordinator.initialize();
     await coordinator.startMonitor(15);
-    assertEqual(getState().fgServiceRunning, true, 'service running after start');
-
     await coordinator.stopMonitor();
     assertEqual(getState().fgServiceStopCalls, 1, 'foreground service stop called once');
     assertEqual(getState().fgServiceRunning, false, 'foreground service not running after stop');
@@ -139,8 +134,6 @@ void (async function main() {
     coordinator.subscribe(() => undefined);
     await coordinator.initialize();
     await coordinator.startMonitor(15);
-    assertEqual(getState().fgServiceStartCalls.length, 1, 'one start call');
-
     await coordinator.setIntervalMinutes(30);
     assertEqual(getState().fgServiceStartCalls.length, 2, 'two start calls after interval change');
     assertEqual(getState().fgServiceStartCalls[1], 30, 'second start with 30 min interval');
@@ -151,7 +144,6 @@ void (async function main() {
     const coordinator = new DailyMonitorCoordinator(deps);
     coordinator.subscribe(() => undefined);
     await coordinator.initialize();
-
     assertEqual(getState().fgServiceStartCalls.length, 0, 'no foreground service start on init');
     assertEqual(getState().fgServiceRunning, false, 'foreground service not running after init');
   });
@@ -195,8 +187,6 @@ void (async function main() {
     assert(typeof getState().activeRegistrationInterval === 'number', 'background registered');
   });
 
-  // ── Collection convergence tests ──
-
   await test('foreground service callback reaches collectAutomatic via in-flight guard', async () => {
     let now = 1_000_000;
     const { deps, getState } = fakeDependenciesWithForegroundService();
@@ -205,11 +195,9 @@ void (async function main() {
     coordinator.subscribe(() => undefined);
     await coordinator.initialize();
     await coordinator.startMonitor(15);
-
     const result = await coordinator.collectAutomatic();
     assertEqual(getState().executionCount, 1, 'collection executed via collectAutomatic');
     assertEqual(result.outcome, 'completed', 'collection completed');
-
     const result2 = await coordinator.collectAutomatic();
     assertEqual(getState().executionCount, 1, 'second call gated');
     assertEqual(result2.outcome, 'skipped_recent_automatic', 'skipped as recent');
@@ -220,10 +208,13 @@ void (async function main() {
     const { deps, getState } = fakeDependenciesWithForegroundService();
     deps.now = () => now;
     let execCount = 0;
-    let resolveCollection: (() => void) | null = null;
+    const resolveHolder: { resolve: (() => void) | null } = { resolve: null };
+    let collectionStarted: (() => void) | null = null;
+    const started = new Promise<void>((resolve) => { collectionStarted = resolve; });
     deps.runCollection = async () => {
       execCount += 1;
-      await new Promise<void>((resolve) => { resolveCollection = resolve; });
+      collectionStarted?.();
+      await new Promise<void>((resolve) => { resolveHolder.resolve = resolve; });
       return { success: true, outcome: 'completed' };
     };
 
@@ -233,17 +224,11 @@ void (async function main() {
     await coordinator.startMonitor(15);
 
     const p1 = coordinator.collectAutomatic();
+    await started;
     const p2 = coordinator.collectAutomatic();
-
-    // collectAutomatic() resumes through an async initialization boundary.
-    // Yield so the shared pipeline has actually entered runCollection before
-    // resolving its gate; otherwise the test can race its own fixture.
-    await Promise.resolve();
-    await Promise.resolve();
-    assert(resolveCollection !== null, 'collection pipeline should be in flight before resolving');
-    resolveCollection();
+    assert(typeof resolveHolder.resolve === 'function', 'first collection is in flight');
+    resolveHolder.resolve();
     const [r1, r2] = await Promise.all([p1, p2]);
-
     assertEqual(execCount, 1, 'only one actual execution');
     assertEqual(r1.outcome, 'completed', 'first completed');
     assertEqual(r2.outcome, 'shared', 'second shared');
@@ -255,7 +240,6 @@ void (async function main() {
     coordinator.subscribe(() => undefined);
     await coordinator.initialize();
     await coordinator.startMonitor(15);
-
     await coordinator.collectManual();
     assertEqual(getState().executionCount, 1, 'manual collection ran');
     assertEqual(getState().fgServiceRunning, true, 'foreground service still running');
@@ -267,7 +251,6 @@ void (async function main() {
     coordinator.subscribe(() => undefined);
     await coordinator.initialize();
     await coordinator.startMonitor(15);
-
     await coordinator.collectAutomatic();
     await coordinator.collectManual();
     await coordinator.collectAutomatic();
