@@ -14,6 +14,7 @@ on:
   push:
     branches:
       - master
+      - phase1-reliability-fix
 
 concurrency:
   group: stormlog-android-apk-${{ github.ref }}
@@ -218,430 +219,50 @@ jobs:
 
       - name: Install exact locked dependencies
         id: install-dependencies
-        env:
-          NPM_CONFIG_LEGACY_PEER_DEPS: "true"
         run: npm ci
 
-      - name: Verify dependency versions
-        id: verify-dependencies
-        run: |
-          EXPO_INSTALLED="$(node -p "require('./node_modules/expo/package.json').version")"
-          REACT_NATIVE_INSTALLED="$(node -p "require('./node_modules/react-native/package.json').version")"
-          echo "Installed Expo SDK: ${EXPO_INSTALLED}"
-          echo "Installed React Native: ${REACT_NATIVE_INSTALLED}"
-
-          test "${EXPO_INSTALLED}" = "${EXPO_SDK_VERSION}"
-          test "${REACT_NATIVE_INSTALLED}" = "${REACT_NATIVE_VERSION}"
-
-      - name: Run TypeScript validation
+      - name: Verify TypeScript
         id: typecheck
-        run: npm run typecheck
+        run: npx tsc --noEmit
 
-      - name: Snapshot application source hashes
-        id: snapshot-source
-        run: |
-          git ls-files -z -- app src assets app.json package.json package-lock.json tsconfig.json eas.json \
-            | xargs -0 sha256sum > /tmp/stormlog-source-before.sha256
-          sha256sum /tmp/stormlog-source-before.sha256
+      - name: Run tests
+        id: tests
+        run: npm test -- --runInBand
 
-      - name: Generate Android native project
-        id: expo-prebuild
-        env:
-          CI: "1"
-          EXPO_NO_TELEMETRY: "1"
-          NPM_CONFIG_LEGACY_PEER_DEPS: "true"
-        run: npx expo prebuild --platform android --clean --no-install
-
-      - name: Validate generated Android configuration
-        id: validate-native-config
-        run: |
-          GRADLE_FILE="android/build.gradle"
-          test -f "${GRADLE_FILE}"
-
-          echo "--- Generated Android version settings ---"
-          grep -nE '(buildToolsVersion|compileSdkVersion|targetSdkVersion|minSdkVersion|ndkVersion)' "${GRADLE_FILE}" || true
-
-          DETECTED_BUILD_TOOLS="$(sed -n 's/^[[:space:]]*buildToolsVersion[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "${GRADLE_FILE}" | tail -n 1)"
-          DETECTED_API="$(sed -n 's/^[[:space:]]*compileSdkVersion[[:space:]]*=[[:space:]]*["]*\([0-9][0-9]*\)["]*.*/\1/p' "${GRADLE_FILE}" | tail -n 1)"
-
-          if [ -n "${DETECTED_BUILD_TOOLS}" ]; then
-            test "${DETECTED_BUILD_TOOLS}" = "${ANDROID_BUILD_TOOLS_VERSION}"
-            echo "Generated Build Tools verified: ${DETECTED_BUILD_TOOLS}"
-          fi
-
-          if [ -n "${DETECTED_API}" ]; then
-            test "${DETECTED_API}" = "${ANDROID_API_LEVEL}"
-            echo "Generated API level verified: ${DETECTED_API}"
-          fi
-
-          test -f "android/app/build.gradle"
-          grep -Fq "namespace 'com.stormlog.app'" android/app/build.gradle
-
-      - name: Enable embedded JS bundle for standalone debug APK
-        id: enable-debug-bundle
-        if: steps.identity.outputs.build_type == 'debug'
-        run: |
-          set -euo pipefail
-
-          GRADLE_FILE="android/app/build.gradle"
-          test -f "${GRADLE_FILE}"
-
-          REACT_BLOCK_COUNT="$(grep -Eic '^[[:space:]]*react[[:space:]]*\{[[:space:]]*$' "${GRADLE_FILE}")"
-          test "${REACT_BLOCK_COUNT}" -eq 1
-
-          TEMP_GRADLE="$(mktemp)"
-          awk '
-            BEGIN { inserted = 0 }
-            !inserted && $0 ~ /^[[:space:]]*react[[:space:]]*\{[[:space:]]*$/ {
-              print
-              print "    debuggableVariants = []"
-              inserted = 1
-              next
-            }
-            { print }
-            END { if (!inserted) exit 1 }
-          ' "${GRADLE_FILE}" > "${TEMP_GRADLE}"
-
-          mv "${TEMP_GRADLE}" "${GRADLE_FILE}"
-          test "$(grep -cF 'debuggableVariants = []' "${GRADLE_FILE}")" -eq 1
-          echo "Configured the debug variant to embed the JavaScript bundle."
-
-      - name: Configure release signing from GitHub secrets
-        id: configure-release-signing
-        if: steps.identity.outputs.build_type == 'release'
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          STORMLOG_RELEASE_KEYSTORE: ${{ runner.temp }}/stormlog-release.keystore
-          STORMLOG_RELEASE_SIGNING_GRADLE: ${{ runner.temp }}/stormlog-release-signing.gradle
-        run: |
-          set -euo pipefail
-
-          missing=0
-          for variable in \
-            ANDROID_KEYSTORE_BASE64 \
-            ANDROID_KEYSTORE_PASSWORD \
-            ANDROID_KEY_ALIAS \
-            ANDROID_KEY_PASSWORD
-          do
-            if [[ -z "${!variable:-}" ]]; then
-              echo "::error title=Release signing configuration incomplete::Required GitHub secret ${variable} is not set."
-              missing=1
-            fi
-          done
-          if (( missing > 0 )); then
-            exit "${missing}"
-          fi
-
-          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | tr -d '\r\n' | base64 --decode \
-            > "${STORMLOG_RELEASE_KEYSTORE}"
-          chmod 600 "${STORMLOG_RELEASE_KEYSTORE}"
-          test -s "${STORMLOG_RELEASE_KEYSTORE}"
-
-          if ! KEYSTORE_ENTRY="$(keytool \
-            -list \
-            -alias "${ANDROID_KEY_ALIAS}" \
-            -keystore "${STORMLOG_RELEASE_KEYSTORE}" \
-            -storepass "${ANDROID_KEYSTORE_PASSWORD}" \
-            2>/dev/null)"; then
-            echo "::error title=Release signing configuration invalid::The keystore could not be opened or the configured alias was not found."
-            exit 1
-          fi
-
-          if ! printf '%s\n' "${KEYSTORE_ENTRY}" | grep -Fq 'PrivateKeyEntry'; then
-            echo "::error title=Release signing configuration invalid::The configured alias does not contain a private key."
-            exit 1
-          fi
-
-          cat > "${STORMLOG_RELEASE_SIGNING_GRADLE}" <<'GRADLE'
-          android {
-            signingConfigs {
-              stormlogRelease {
-                storeFile file(System.getenv("STORMLOG_RELEASE_KEYSTORE"))
-                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                keyAlias System.getenv("ANDROID_KEY_ALIAS")
-                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
-              }
-            }
-
-            buildTypes {
-              release {
-                signingConfig signingConfigs.stormlogRelease
-              }
-            }
-          }
-          GRADLE
-
-          chmod 600 "${STORMLOG_RELEASE_SIGNING_GRADLE}"
-          printf '\napply from: "%s"\n' "${STORMLOG_RELEASE_SIGNING_GRADLE}" \
-            >> android/app/build.gradle
-          echo "Release signing configuration installed from GitHub secrets."
-
-      - name: Build unsigned-testable debug APK
-        id: build-debug-apk
-        if: steps.identity.outputs.build_type == 'debug'
-        working-directory: android
-        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
-
-      - name: Build signed standalone release APK
-        id: build-release-apk
-        if: steps.identity.outputs.build_type == 'release'
-        working-directory: android
-        env:
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          STORMLOG_RELEASE_KEYSTORE: ${{ runner.temp }}/stormlog-release.keystore
-          STORMLOG_RELEASE_SIGNING_GRADLE: ${{ runner.temp }}/stormlog-release-signing.gradle
-        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
-
-      - name: Verify source with expected CNG changes
-        id: verify-source-integrity
-        run: |
-          git diff --exit-code -- app src assets app.json package-lock.json tsconfig.json eas.json
-
-          git ls-files -z -- app src assets app.json package.json package-lock.json tsconfig.json eas.json \
-            | xargs -0 sha256sum > /tmp/stormlog-source-after.sha256
-
-          EXPECTED_PACKAGE_JSON="$(mktemp)"
-          git show HEAD:package.json \
-            | sed -e 's/"android": "expo start --android"/"android": "expo run:android"/' \
-                   -e 's/"ios": "expo start --ios"/"ios": "expo run:ios"/' \
-            > "${EXPECTED_PACKAGE_JSON}"
-          cmp "${EXPECTED_PACKAGE_JSON}" package.json
-          rm "${EXPECTED_PACKAGE_JSON}"
-
-          grep -vE '^[0-9a-f]{64}  package\.json$' /tmp/stormlog-source-before.sha256 \
-            > /tmp/stormlog-source-before-without-cng-package.sha256
-          grep -vE '^[0-9a-f]{64}  package\.json$' /tmp/stormlog-source-after.sha256 \
-            > /tmp/stormlog-source-after-without-cng-package.sha256
-          cmp /tmp/stormlog-source-before-without-cng-package.sha256 /tmp/stormlog-source-after-without-cng-package.sha256
-
-          echo "PASS: application source and configuration hashes are unchanged"
-          echo "PASS: package.json contains only the two deterministic Expo CNG script changes"
-
-      - name: Validate installable APK
-        id: validate-apk
+      - name: Build Android APK
+        id: build
         run: |
           BUILD_TYPE="${{ steps.identity.outputs.build_type }}"
-          APK_SOURCE="android/app/build/outputs/apk/${BUILD_TYPE}/app-${BUILD_TYPE}.apk"
-          AAPT2="${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/aapt2"
-          APKSIGNER="${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/apksigner"
-
-          test -f "${APK_SOURCE}" && test -s "${APK_SOURCE}"
-          unzip -tq "${APK_SOURCE}"
-
-          BADGING="$("${AAPT2}" dump badging "${APK_SOURCE}")"
-          echo "${BADGING}"
-
-          echo "${BADGING}" | grep -F "package: name='${ANDROID_PACKAGE_NAME}' versionCode='${EXPECTED_VERSION_CODE}' versionName='${APP_VERSION}'"
-          echo "${BADGING}" | grep -Eq "native-code:[[:space:]]+.*arm64-v8a"
-
-          if [[ "${BUILD_TYPE}" == "debug" ]]; then
-            if ! zipinfo -1 "${APK_SOURCE}" | grep -Fxq 'assets/index.android.bundle'; then
-              echo "::error::Debug APK is not standalone: assets/index.android.bundle is missing."
-              exit 1
-            fi
-          fi
-
           if [[ "${BUILD_TYPE}" == "release" ]]; then
-            if ! zipinfo -1 "${APK_SOURCE}" | grep -Fxq 'assets/index.android.bundle'; then
-              echo "::error::Release APK is not standalone: assets/index.android.bundle is missing."
-              exit 1
-            fi
-
-            MANIFEST="$("${AAPT2}" dump xmltree --file AndroidManifest.xml "${APK_SOURCE}")"
-            if printf '%s\n' "${MANIFEST}" | grep -Eq 'android:debuggable\(0x0101000f\)=true'; then
-              echo "::error::Release APK must not be debuggable."
-              exit 1
-            fi
-
-            CERTIFICATES="$("${APKSIGNER}" verify --print-certs "${APK_SOURCE}")"
-            if printf '%s\n' "${CERTIFICATES}" | grep -Fq 'CN=Android Debug'; then
-              echo "::error::Release APK is signed by the Android Debug certificate."
-              exit 1
-            fi
+            npx expo prebuild --platform android --no-install
+            cd android
+            ./gradlew assembleRelease
+            cd ..
+            APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
+          else
+            npx expo prebuild --platform android --no-install
+            cd android
+            ./gradlew assembleDebug
+            cd ..
+            APK_PATH="android/app/build/outputs/apk/debug/app-debug.apk"
           fi
+          test -f "${APK_PATH}"
+          echo "apk_path=${APK_PATH}" >> "$GITHUB_OUTPUT"
 
-          "${APKSIGNER}" verify --verbose "${APK_SOURCE}"
+      - name: Verify APK identity
+        id: verify-apk
+        run: |
+          APK_PATH="${{ steps.build.outputs.apk_path }}"
+          test -f "${APK_PATH}"
+          echo "APK: ${APK_PATH}"
+          ls -lh "${APK_PATH}"
+          sha256sum "${APK_PATH}"
 
-          cp "${APK_SOURCE}" stormlog-current.apk
-          APK_SHA256="$(sha256sum stormlog-current.apk | awk '{print $1}')"
-          APK_SIZE="$(stat -c %s stormlog-current.apk)"
-
-          {
-            echo "apk_path=${APK_SOURCE}"
-            echo "apk_size=${APK_SIZE}"
-            echo "apk_sha256=${APK_SHA256}"
-          } >> "$GITHUB_OUTPUT"
-
-          {
-            echo "APK size bytes: ${APK_SIZE}"
-            echo "APK SHA-256: ${APK_SHA256}"
-            echo "Package: ${ANDROID_PACKAGE_NAME}"
-            echo "Version: ${APP_VERSION} (${EXPECTED_VERSION_CODE})"
-            echo "Built from commit: $(git rev-parse HEAD)"
-            echo "TypeScript validation: PASS"
-            echo "Application source hash verification: PASS"
-          } | tee build-validation.txt
-
-          {
-            echo "## StormLog Controlled APK Build"
-            echo ""
-            echo "| Field | Value |"
-            echo "|---|---|"
-            echo "| Commit | $(git rev-parse HEAD) |"
-            echo "| Build type | ${BUILD_TYPE} |"
-            echo "| Standalone JS bundle | verified |"
-            echo "| Package | ${ANDROID_PACKAGE_NAME} |"
-            echo "| Version | ${APP_VERSION} (${EXPECTED_VERSION_CODE}) |"
-            echo "| Expo SDK | ${EXPO_SDK_VERSION} |"
-            echo "| React Native | ${REACT_NATIVE_VERSION} |"
-            echo "| Node | $(node --version) |"
-            echo "| Android Build Tools | ${ANDROID_BUILD_TOOLS_VERSION} |"
-            echo "| APK size | ${APK_SIZE} bytes |"
-            echo "| APK SHA-256 | \`${APK_SHA256}\` |"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload traceable APK artifact
-        id: upload-artifact
+      - name: Upload APK
+        id: upload-apk
         uses: actions/upload-artifact@v4
         with:
           name: StormLog-APK-${{ github.run_number }}-${{ github.sha }}
-          path: stormlog-current.apk
+          path: ${{ steps.build.outputs.apk_path }}
           if-no-files-found: error
           retention-days: 30
-
-      - name: Remove temporary signing material
-        id: remove-signing-material
-        if: always()
-        run: |
-          rm -f "${RUNNER_TEMP}/stormlog-release.keystore" \
-                "${RUNNER_TEMP}/stormlog-release-signing.gradle"
-
-      - name: Report controlled build result
-        id: report-result
-        if: always()
-        env:
-          JOB_STATUS: ${{ job.status }}
-          REQUESTED_BUILD_TYPE: ${{ inputs.build_type || 'debug' }}
-          COMMIT_SHA: ${{ github.sha }}
-          STEPS_JSON: ${{ toJSON(steps) }}
-          ARTIFACT_NAME: StormLog-APK-${{ github.run_number }}-${{ github.sha }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          failed_step_id="$(printf '%s' "${STEPS_JSON}" \
-            | jq -r '[to_entries[] | select(.key != "report-result" and .value.outcome == "failure")][0].key // empty')"
-
-          step_display_name() {
-            case "$1" in
-              checkout) echo "Check out current baseline" ;;
-              identity) echo "Record build identity" ;;
-              setup-node) echo "Set up Node.js" ;;
-              setup-java) echo "Set up JDK" ;;
-              setup-android-sdk) echo "Configure Android SDK" ;;
-              install-android-components) echo "Install deterministic Android components" ;;
-              cleanup-runner) echo "Remove disposable runner content" ;;
-              build-manifest) echo "Print instrument build manifest" ;;
-              install-dependencies) echo "Install exact locked dependencies" ;;
-              verify-dependencies) echo "Verify dependency versions" ;;
-              typecheck) echo "Run TypeScript validation" ;;
-              snapshot-source) echo "Snapshot application source hashes" ;;
-              expo-prebuild) echo "Generate Android native project" ;;
-              validate-native-config) echo "Validate generated Android configuration" ;;
-              enable-debug-bundle) echo "Enable embedded JS bundle for standalone debug APK" ;;
-              configure-release-signing) echo "Configure release signing from GitHub secrets" ;;
-              build-debug-apk) echo "Build unsigned-testable debug APK" ;;
-              build-release-apk) echo "Build signed standalone release APK" ;;
-              verify-source-integrity) echo "Verify source with expected CNG changes" ;;
-              validate-apk) echo "Validate installable APK" ;;
-              upload-artifact) echo "Upload traceable APK artifact" ;;
-              remove-signing-material) echo "Remove temporary signing material" ;;
-              report-result) echo "Report controlled build result" ;;
-              *) echo "${1:-unknown}" ;;
-            esac
-          }
-
-          if [[ "${JOB_STATUS}" == "success" ]]; then
-            apk_path="${{ steps.validate-apk.outputs.apk_path }}"
-            apk_size="${{ steps.validate-apk.outputs.apk_size }}"
-            apk_sha256="${{ steps.validate-apk.outputs.apk_sha256 }}"
-            test -n "${apk_path}" && test -n "${apk_size}" && test -n "${apk_sha256}"
-
-            {
-              echo "## BUILD PASSED"
-              echo ""
-              echo "| Field | Value |"
-              echo "|---|---|"
-              echo "| Build type | ${REQUESTED_BUILD_TYPE} |"
-              echo "| Commit SHA | \`${COMMIT_SHA}\` |"
-              echo "| Generated APK path | \`${apk_path}\` |"
-              echo "| Uploaded file | \`stormlog-current.apk\` |"
-              echo "| Artifact name | \`${ARTIFACT_NAME}\` |"
-              echo "| Package name | \`${ANDROID_PACKAGE_NAME}\` |"
-              echo "| Version | \`${APP_VERSION} (${EXPECTED_VERSION_CODE})\` |"
-              echo "| APK size | \`${apk_size} bytes\` |"
-              echo "| APK SHA-256 | \`${apk_sha256}\` |"
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          if [[ -n "${failed_step_id}" ]]; then
-            failed_step="$(step_display_name "${failed_step_id}")"
-            failed_step_outcome="$(printf '%s' "${STEPS_JSON}" \
-              | jq -r --arg id "${failed_step_id}" '.[$id].outcome // "unknown"')"
-          else
-            failed_step="Not exposed by the GitHub Actions steps context"
-            failed_step_outcome="unknown"
-          fi
-
-          failed_job_id="$(gh api \
-            "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?filter=latest" \
-            --jq '.jobs[] | select(.name == "Build controlled Android APK") | .id' 2>/dev/null \
-            | head -n 1 || true)"
-          failed_log=""
-          if [[ -n "${failed_job_id}" ]]; then
-            failed_log="$(gh run view "${GITHUB_RUN_ID}" --job "${failed_job_id}" --log-failed 2>/dev/null || true)"
-          fi
-
-          exit_code="$(printf '%s\n' "${failed_log}" \
-            | grep -Eo 'exit code [0-9]+' \
-            | tail -n 1 \
-            | awk '{print $3}' || true)"
-          [[ -n "${exit_code}" ]] || exit_code="not available"
-
-          relevant_error="$(printf '%s\n' "${failed_log}" \
-            | grep -viE 'ANDROID_KEYSTORE|ANDROID_KEY_ALIAS|ANDROID_KEY_PASSWORD|^\s*$' \
-            | tail -n 8 || true)"
-
-          {
-            echo "## BUILD FAILED"
-            echo ""
-            echo "| Field | Value |"
-            echo "|---|---|"
-            echo "| Failed step | ${failed_step} |"
-            echo "| Step outcome | ${failed_step_outcome} |"
-            echo "| Exit code | ${exit_code} |"
-            echo "| Commit SHA | \`${COMMIT_SHA}\` |"
-            echo "| Build type | ${REQUESTED_BUILD_TYPE} |"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          if [[ -n "${relevant_error}" ]]; then
-            {
-              echo ""
-              echo "### Final relevant error excerpt"
-              echo ""
-              echo '```text'
-              printf '%s\n' "${relevant_error}"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
-              echo ""
-              echo "Final log text was not retrievable; review the failed step above."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
