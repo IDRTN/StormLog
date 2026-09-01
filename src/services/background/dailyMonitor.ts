@@ -69,14 +69,8 @@ const dailyMonitorCoordinator = new DailyMonitorCoordinator({
   },
 });
 
-// ============================================================
-// Register foreground location task callback — delegates to coordinator
-// ============================================================
 registerForegroundLocationTask(() => dailyMonitorCoordinator.collectAutomatic());
 
-// ============================================================
-// Background task definition — must be at module top level
-// ============================================================
 TaskManager.defineTask(DAILY_MONITOR_TASK, async () => {
   const TAG = '[BG-TASK]';
   const now = new Date();
@@ -94,7 +88,6 @@ TaskManager.defineTask(DAILY_MONITOR_TASK, async () => {
     if (result.outcome === 'skipped_recent_automatic') {
       return BackgroundFetch.BackgroundFetchResult.NoData;
     }
-
     await AsyncStorage.setItem(LAST_COLLECTION_DATE_KEY, getLocalDateString(new Date()));
     return BackgroundFetch.BackgroundFetchResult.NewData;
   } catch (error: any) {
@@ -105,9 +98,6 @@ TaskManager.defineTask(DAILY_MONITOR_TASK, async () => {
   }
 });
 
-// ============================================================
-// Core collection — works in foreground AND background.
-// ============================================================
 export async function executeDailyCollectionPipeline(): Promise<{ success: boolean; error?: string }> {
   const TAG = '[DAILY-COLLECT]';
   const now = new Date();
@@ -116,21 +106,15 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
   console.log(`${TAG} Timestamp: ${formatLocalDateTime(now)}`);
   console.log(`${TAG} Local date: ${localDate}`);
 
-  // Log if we detect a date transition
   const lastDate = await AsyncStorage.getItem(LAST_COLLECTION_DATE_KEY);
   if (lastDate && lastDate !== localDate) {
     console.log(`${TAG} DATE TRANSITION DETECTED: ${lastDate} → ${localDate}`);
   }
 
-  // Step 1: Location permission
   const { status } = await Location.getForegroundPermissionsAsync();
   console.log(`${TAG} Permission: ${status}`);
-  if (status !== 'granted') {
-    return { success: false, error: 'Location permission not granted' };
-  }
+  if (status !== 'granted') return { success: false, error: 'Location permission not granted' };
 
-  // Step 2: Get location
-  // Priority: fresh GPS → OS last-known → StormLog cached
   let lat: number, lon: number;
   let locationSource: 'current' | 'os_last_known' | 'stormlog_cached' = 'current';
   try {
@@ -164,19 +148,14 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
             locationSource = 'stormlog_cached';
             const ageMinutes = Math.round((Date.now() - Number(cachedTs)) / 60_000);
             console.log(`${TAG} Cached location: ${lat.toFixed(4)}, ${lon.toFixed(4)} [stormlog_cached, ${ageMinutes}m old]`);
-          } else {
-            return { success: false, error: 'No location available' };
-          }
-        } else {
-          return { success: false, error: 'No location available' };
-        }
+          } else return { success: false, error: 'No location available' };
+        } else return { success: false, error: 'No location available' };
       }
     } catch {
       return { success: false, error: 'Failed to get location' };
     }
   }
 
-  // Step 3: Fetch weather
   console.log(`${TAG} Fetching weather for ${lat.toFixed(4)}, ${lon.toFixed(4)}...`);
   const weatherResult = await fetchWeather(lat, lon);
   if (!weatherResult.success) {
@@ -186,9 +165,8 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
     return { success: false, error: msg };
   }
   console.log(`${TAG} Weather: ${weatherResult.data.temperature}°F, ${weatherResult.data.weatherCondition}`);
-  console.log(`${TAG} Current precip: ${weatherResult.data.precipitation}", Observed daily: ${weatherResult.data.observedDailyPrecipitation}"`);
+  console.log(`${TAG} Current precip: ${weatherResult.data.precipitation}\", Observed daily: ${weatherResult.data.observedDailyPrecipitation}\"`);
 
-  // Step 4: NWS alerts
   let alertTypes: string[] = [];
   let alertProcessingFailures: NwsAlertProcessingFailure[] = [];
   let warningBatch: Awaited<ReturnType<typeof processNwsAlertsForStormEvents>> | null = null;
@@ -204,50 +182,30 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
     const alerts = await fetchNwsAlerts(lat, lon, weatherResult.data.referenceTimeMs ?? Date.now());
     alertTypes = [...new Set(alerts.map(a => a.event))];
     console.log(`${TAG} NWS alerts: ${alertTypes.length > 0 ? alertTypes.join(', ') : 'none'}`);
-
     try {
-      warningBatch = await processNwsAlertsForStormEvents(alerts, undefined, {
-        notifyWarning: dispatchWarningNotification,
-      });
+      warningBatch = await processNwsAlertsForStormEvents(alerts, undefined, { notifyWarning: dispatchWarningNotification });
       alertProcessingFailures = warningBatch.failures;
-      for (const failure of warningBatch.failures) {
-        console.error(`${TAG} NWS warning processing failed for ${failure.alertId ?? '<missing-id>'}:`, failure.error);
-      }
+      for (const failure of warningBatch.failures) console.error(`${TAG} NWS warning processing failed for ${failure.alertId ?? '<missing-id>'}:`, failure.error);
     } catch (err: any) {
       alertProcessingFailures = [{ alertId: null, error: err }];
       console.error(`${TAG} NWS warning batch failed:`, err?.message || String(err));
     }
-
     for (const delivered of warningBatch?.results ?? []) {
       const notification = delivered.notification as { status?: string; error?: unknown } | undefined;
-      if (notification?.status === 'failed') {
-        console.error(`${TAG} Warning notification failed for ${delivered.alertId ?? '<missing-id>'}:`, notification.error);
-      }
+      if (notification?.status === 'failed') console.error(`${TAG} Warning notification failed for ${delivered.alertId ?? '<missing-id>'}:`, notification.error);
     }
   } catch (err: any) {
     console.log(`${TAG} NWS failed (non-critical): ${err?.message}`);
   }
 
-  // Step 5: Determine precipitation to store in daily record.
   const observedDailyPrecip = weatherResult.data.observedDailyPrecipitation;
   const currentPrecip = weatherResult.data.precipitation;
-  const precipitationProvenance = weatherResult.data.precipitationSource
-    ?? weatherResult.data.pressureSource
-    ?? weatherResult.data.currentConditionsSource;
+  const precipitationProvenance = weatherResult.data.precipitationSource ?? weatherResult.data.pressureSource ?? weatherResult.data.currentConditionsSource;
+  console.log(`${TAG} Precipitation decision: observed_daily=${observedDailyPrecip}\", current_rate=${currentPrecip}\" → storing: ${observedDailyPrecip}\"`);
 
-  console.log(
-    `${TAG} Precipitation decision: ` +
-    `observed_daily=${observedDailyPrecip}", current_rate=${currentPrecip}" ` +
-    `→ storing: ${observedDailyPrecip}"`
-  );
-
-  // Step 6: Insert into database
   try {
     const observationTime = weatherResult.data.referenceTimeMs;
-    if (observationTime == null) {
-      return { success: false, error: 'Weather provider did not return an observation reference time' };
-    }
-
+    if (observationTime == null) return { success: false, error: 'Weather provider did not return an observation reference time' };
     const rowId = await insertDailyRecord({
       timestamp: observationTime,
       latitude: lat,
@@ -273,26 +231,16 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
       confidence: precipitationProvenance?.confidence ?? null,
       completeness: weatherResult.data.observedDailyPrecipitationIsComplete ? 1 : 0,
     });
-    console.log(`${TAG} DB INSERT OK — row ${rowId}, date: ${localDate}, precip: ${observedDailyPrecip}"`);
-
+    console.log(`${TAG} DB INSERT OK — row ${rowId}, date: ${localDate}, precip: ${observedDailyPrecip}\"`);
     const collectionResult = withNwsAlertProcessingFailures({ success: true }, alertProcessingFailures);
-
-    if (collectionResult.success) {
-      await notifyWeatherCollected(weatherResult.data.temperature, weatherResult.data.weatherCondition, Date.now());
-    } else {
-      await notifyCollectionFailed(collectionResult.error || 'NWS warning processing failed');
-    }
-
+    if (collectionResult.success) await notifyWeatherCollected(weatherResult.data.temperature, weatherResult.data.weatherCondition, Date.now());
+    else await notifyCollectionFailed(collectionResult.error || 'NWS warning processing failed');
     try {
       const activeEvent = await getActiveStormEvent();
-      await collectLightningAutomatic({
-        location: { latitude: lat, longitude: lon },
-        stormEventId: activeEvent?.isAutomatic === false ? activeEvent.id : null,
-      });
+      await collectLightningAutomatic({ location: { latitude: lat, longitude: lon }, stormEventId: activeEvent?.isAutomatic === false ? activeEvent.id : null });
     } catch (lightningErr) {
       console.warn('[DAILY-COLLECT] Lightning collection failed:', lightningErr instanceof Error ? lightningErr.message : String(lightningErr));
     }
-
     return collectionResult;
   } catch (err: any) {
     const msg = `DB insert failed: ${err?.message || String(err)}`;
@@ -301,83 +249,32 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
   }
 }
 
-export function subscribeToDailyMonitor(
-  listener: (state: {
-    isActive: boolean;
-    intervalMinutes: number;
-    loading: boolean;
-    lastCollectionTime: number | null;
-    lastError: string | null;
-  }) => void,
-): () => void {
+export function subscribeToDailyMonitor(listener: (state: { isActive: boolean; intervalMinutes: number; loading: boolean; lastCollectionTime: number | null; lastError: string | null }) => void): () => void {
   return dailyMonitorCoordinator.subscribe(listener);
 }
 
-export async function initializeDailyMonitorCoordinator(): Promise<void> {
-  await dailyMonitorCoordinator.initialize();
-}
-
-export async function startDailyMonitor(intervalMinutes?: number): Promise<void> {
-  await dailyMonitorCoordinator.startMonitor(intervalMinutes);
-}
-
-export async function stopDailyMonitor(): Promise<void> {
-  await dailyMonitorCoordinator.stopMonitor();
-}
-
-export async function setDailyMonitorInterval(minutes: number): Promise<void> {
-  await dailyMonitorCoordinator.setIntervalMinutes(minutes);
-}
-
-export async function collectDailyWeatherManually(): Promise<DailyCollectionResult> {
-  return dailyMonitorCoordinator.collectManual();
-}
-
-export async function performDailyCollection(mode: DailyCollectionMode = 'manual'): Promise<DailyCollectionResult> {
-  if (mode === 'automatic') {
-    return dailyMonitorCoordinator.collectAutomatic();
-  }
-  return dailyMonitorCoordinator.collectManual();
-}
-
+export async function initializeDailyMonitorCoordinator(): Promise<void> { await dailyMonitorCoordinator.initialize(); }
+export function getMonitorState() { return dailyMonitorCoordinator.getState(); }
+export async function startDailyMonitor(intervalMinutes?: number): Promise<void> { await dailyMonitorCoordinator.startMonitor(intervalMinutes); }
+export async function stopDailyMonitor(): Promise<void> { await dailyMonitorCoordinator.stopMonitor(); }
+export async function setDailyMonitorInterval(minutes: number): Promise<void> { await dailyMonitorCoordinator.setIntervalMinutes(minutes); }
+export async function collectDailyWeatherManually(): Promise<DailyCollectionResult> { return dailyMonitorCoordinator.collectManual(); }
+export async function performDailyCollection(mode: DailyCollectionMode = 'manual'): Promise<DailyCollectionResult> { return mode === 'automatic' ? dailyMonitorCoordinator.collectAutomatic() : dailyMonitorCoordinator.collectManual(); }
 export async function registerBackgroundTask(intervalMinutes: number = 15): Promise<{ success: boolean; error?: string }> {
   try {
     await dailyMonitorCoordinator.registerBackground(intervalMinutes);
     const registered = await TaskManager.isTaskRegisteredAsync(DAILY_MONITOR_TASK);
     if (!registered) return { success: false, error: 'Registration not verified' };
     return { success: true };
-  } catch (error: any) {
-    return { success: false, error: error?.message };
-  }
+  } catch (error: any) { return { success: false, error: error?.message }; }
 }
-
-export async function unregisterBackgroundTask(): Promise<void> {
-  await dailyMonitorCoordinator.unregisterBackground();
-}
-
-export async function isBackgroundTaskRegistered(): Promise<boolean> {
-  try { return await TaskManager.isTaskRegisteredAsync(DAILY_MONITOR_TASK); }
-  catch { return false; }
-}
-
-export async function getMonitorStatus(): Promise<{
-  isActive: boolean;
-  lastCollection: number | null;
-  lastError: string | null;
-  totalRecords: number;
-}> {
+export async function unregisterBackgroundTask(): Promise<void> { await dailyMonitorCoordinator.unregisterBackground(); }
+export async function isBackgroundTaskRegistered(): Promise<boolean> { try { return await TaskManager.isTaskRegisteredAsync(DAILY_MONITOR_TASK); } catch { return false; } }
+export async function getMonitorStatus(): Promise<{ isActive: boolean; lastCollection: number | null; lastError: string | null; totalRecords: number }> {
   const isActive = await isBackgroundTaskRegistered();
   const lastCollectionStr = await AsyncStorage.getItem(LAST_COLLECTION_KEY);
   const lastError = await AsyncStorage.getItem(LAST_ERROR_KEY);
   let totalRecords = 0;
-  try {
-    const { getDailyRecordCount } = await import('../../database/dailyWeather');
-    totalRecords = await getDailyRecordCount();
-  } catch {}
-  return {
-    isActive,
-    lastCollection: lastCollectionStr ? parseInt(lastCollectionStr, 10) : null,
-    lastError,
-    totalRecords,
-  };
+  try { const { getDailyRecordCount } = await import('../../database/dailyWeather'); totalRecords = await getDailyRecordCount(); } catch {}
+  return { isActive, lastCollection: lastCollectionStr ? parseInt(lastCollectionStr, 10) : null, lastError, totalRecords };
 }
