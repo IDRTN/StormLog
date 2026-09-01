@@ -9,7 +9,16 @@ type AsyncMap = { getItem: (key: string) => Promise<string | null>; setItem: (ke
 export type DailyMonitorScheduler = { setTimeout: (callback: () => void, delayMs: number) => unknown; clearTimeout: (timerId: unknown) => void };
 export type BackgroundTaskAdapter = { isRegistered: () => Promise<boolean>; register: (intervalMinutes: number) => Promise<void>; unregister: () => Promise<void> };
 export type ForegroundServiceAdapter = { start: (intervalMinutes: number) => Promise<{ success: boolean; error?: string }>; stop: () => Promise<void>; isRunning: () => Promise<boolean> };
-export type DailyMonitorCoordinatorDependencies = { runCollection: () => Promise<DailyCollectionResult>; storage: AsyncMap; scheduler: DailyMonitorScheduler; background: BackgroundTaskAdapter; foregroundService?: ForegroundServiceAdapter; now?: () => number };
+export type DailyMonitorCoordinatorDependencies = {
+  runCollection: () => Promise<DailyCollectionResult>;
+  storage: AsyncMap;
+  scheduler: DailyMonitorScheduler;
+  background: BackgroundTaskAdapter;
+  foregroundService?: ForegroundServiceAdapter;
+  now?: () => number;
+  /** Returns the next absolute epoch-ms cadence boundary for the interval. */
+  getNextDelayMs?: (intervalMinutes: number) => number;
+};
 
 export const LAST_AUTOMATIC_COLLECTION_KEY = 'daily_monitor_last_automatic_collection';
 export const LAST_AUTOMATIC_ATTEMPT_KEY = 'daily_monitor_last_automatic_attempt';
@@ -162,9 +171,12 @@ export class DailyMonitorCoordinator {
     this.clearForegroundTimer();
     const intervalMs = this.state.intervalMinutes * 60 * 1000;
     const nowMs = this.now();
+    const nextCadenceMs = this.dependencies.getNextDelayMs
+      ? this.dependencies.getNextDelayMs(this.state.intervalMinutes)
+      : getNextIntervalBoundary(intervalMs);
     const dueAfterCollection = this.lastAutomaticCollectionMs > 0
-      ? this.lastAutomaticCollectionMs + intervalMs
-      : nowMs + intervalMs;
+      ? Math.max(nextCadenceMs, this.lastAutomaticCollectionMs + intervalMs)
+      : nextCadenceMs;
     // A failed attempt must not cause a tight 1-second timer loop while the
     // retry cooldown is active. Schedule the next wake at the later of the
     // normal cadence boundary and the retry boundary.
