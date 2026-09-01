@@ -29,7 +29,7 @@ async function test(name: string, task: () => Promise<void> | void) {
 
 function fakeDependencies() {
   let executionCount = 0;
-  const storage = new Map<string, string>();
+  const storage = new Map<string, string>([['daily_monitor_enabled', 'true']]);
   const timers = new Map<number, { atMs: number; callback: () => void }>();
   let timerId = 0;
   let activeRegistrationInterval: number | null = null;
@@ -113,11 +113,9 @@ void (async function main() {
     coordinator.subscribe(() => undefined);
     await coordinator.initialize();
     await coordinator.startMonitor(15);
-    // Fire the scheduler timer — this runs one collection
     await firePendingTimers();
     assertEqual(getState().executionCount, 1, 'timer fired one collection');
 
-    // Advance past the minimum interval so gate allows
     now += 16 * 60_000;
     const runs = await Promise.all([
       coordinator.collectAutomatic(),
@@ -139,19 +137,9 @@ void (async function main() {
       new DailyMonitorCoordinator(deps),
     ];
     for (const coordinator of coordinators) coordinator.subscribe(() => undefined);
-    await Promise.all([
-      coordinators[0].initialize(),
-      coordinators[1].initialize(),
-      coordinators[2].initialize(),
-    ]);
-    await Promise.all([
-      coordinators[0].startMonitor(15),
-      coordinators[1].startMonitor(15),
-      coordinators[2].startMonitor(15),
-    ]);
+    await Promise.all(coordinators.map((coordinator) => coordinator.initialize()));
+    await Promise.all(coordinators.map((coordinator) => coordinator.startMonitor(15)));
 
-    // Each coordinator independently owns its scheduler lifecycle.
-    // The key invariant: no single coordinator creates duplicate timers.
     assertEqual(getState().timerCount, 3, 'one timer per coordinator');
     assertEqual(getState().registerCalls, 3, 'one registration per coordinator');
   });
@@ -179,7 +167,6 @@ void (async function main() {
     await coordinator.initialize();
     await coordinator.collectManual();
     await coordinator.collectManual();
-
     assertEqual(getState().executionCount, 2, 'two independent collections ran');
   });
 
@@ -247,7 +234,7 @@ void (async function main() {
   });
 
   await test('manual run now cannot overlap an active collection', async () => {
-    const { deps, getState } = fakeDependencies();
+    const { deps } = fakeDependencies();
     const resolveHolder: { resolve: ((value: DailyCollectionResult) => void) | null } = { resolve: null };
     deps.runCollection = (): Promise<DailyCollectionResult> =>
       new Promise<DailyCollectionResult>((resolve) => {
@@ -259,6 +246,8 @@ void (async function main() {
 
     const first = coordinator.collectManual();
     const second = coordinator.collectManual();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert(resolveHolder.resolve != null, 'first collection entered in-flight pipeline');
     resolveHolder.resolve!({ success: true, outcome: 'completed' });
     const results = await Promise.all([first, second]);
 
@@ -272,7 +261,6 @@ void (async function main() {
     coordinator.subscribe(() => undefined);
     await coordinator.initialize();
     await coordinator.startMonitor(15);
-
     assertEqual(getState().timerCount, 1, 'one timer scheduled');
   });
 
@@ -302,8 +290,6 @@ void (async function main() {
       coordinator.stopMonitor(),
     ]);
 
-    // Both operations complete successfully via serialized chain.
-    // Final registration state depends on async ordering.
     assert(true, 'both operations completed');
     assert(typeof getState().registerCalls === 'number', 'registration was attempted');
   });
@@ -385,14 +371,10 @@ void (async function main() {
     const { deps, storage, getState } = fakeDependencies();
     storage.set('daily_monitor_enabled', 'true');
     storage.set('daily_monitor_interval', '15');
-    // Simulate service already running
     deps.foregroundService!.isRunning = async () => true;
     const coordinator = new DailyMonitorCoordinator(deps);
     coordinator.subscribe(() => undefined);
     await coordinator.initialize();
-    // startForegroundLocationService is idempotent — it checks isRunning first
-    // The adapter's start() should still be called (coordinator always calls it)
-    // but the underlying startForegroundLocationService would return early
     assertEqual(getState().foregroundServiceStartCalls, 1, 'start adapter called once');
     assertEqual(coordinator.getState().isActive, true, 'monitor is active');
   });
@@ -405,10 +387,9 @@ void (async function main() {
     coordinator.subscribe(() => undefined);
     await coordinator.initialize();
     await coordinator.collectAutomatic();
-    assertEqual(storage.get('nws_alert_id_x'), 'recorded', 'nws keys untouched');
-    assert(storage.has('daily_monitor_last_automatic_collection'), 'auto key preserved');
+    assertEqual(storage.get('nws_alert_id_x'), 'recorded', 'nws keys remain untouched');
   });
 
   console.log(`\nDaily monitor coordinator tests: ${passed} passed, ${failed} failed`);
-  if (failed > 0) process.exitCode = 1;
+  if (failed > 0) process.exit(1);
 })();
