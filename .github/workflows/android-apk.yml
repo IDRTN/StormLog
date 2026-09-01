@@ -42,10 +42,8 @@ jobs:
     name: Build controlled Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 90
-
     steps:
       - name: Check out current baseline
-        id: checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -61,36 +59,29 @@ jobs:
           echo "Git commit SHA: ${COMMIT_SHA}"
           echo "Workflow event SHA: ${WORKFLOW_SHA}"
           test "${COMMIT_SHA}" = "${WORKFLOW_SHA}"
-          case "${BUILD_TYPE}" in
-            debug|release) ;;
-            *) echo "::error::Unsupported build type: ${BUILD_TYPE}"; exit 1 ;;
-          esac
+          case "${BUILD_TYPE}" in debug|release) ;; *) exit 1 ;; esac
           echo "commit_sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
           echo "build_type=${BUILD_TYPE}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node.js
-        id: setup-node
         uses: actions/setup-node@v4
         with:
           node-version: "${{ env.NODE_VERSION }}"
           cache: npm
 
       - name: Set up JDK
-        id: setup-java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "${{ env.JAVA_VERSION }}"
 
       - name: Configure Android SDK
-        id: setup-android-sdk
         uses: android-actions/setup-android@v3
 
       - name: Install deterministic Android components
-        id: install-android-components
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses > /dev/null
+          sdkmanager --licenses < /dev/null || true
           sdkmanager \
             "platform-tools" \
             "platforms;android-${ANDROID_API_LEVEL}" \
@@ -99,40 +90,28 @@ jobs:
             "cmake;${CMAKE_VERSION}"
 
       - name: Install exact locked dependencies
-        id: install-dependencies
         env:
           NPM_CONFIG_LEGACY_PEER_DEPS: "true"
         run: npm ci
 
       - name: Verify dependency versions
-        id: verify-dependencies
         run: |
           set -euo pipefail
-          EXPO_INSTALLED="$(node -p "require('./node_modules/expo/package.json').version")"
-          REACT_NATIVE_INSTALLED="$(node -p "require('./node_modules/react-native/package.json').version")"
-          echo "Installed Expo SDK: ${EXPO_INSTALLED}"
-          echo "Installed React Native: ${REACT_NATIVE_INSTALLED}"
-          test "${EXPO_INSTALLED}" = "${EXPO_SDK_VERSION}"
-          test "${REACT_NATIVE_INSTALLED}" = "${REACT_NATIVE_VERSION}"
+          test "$(node -p "require('./node_modules/expo/package.json').version")" = "${EXPO_SDK_VERSION}"
+          test "$(node -p "require('./node_modules/react-native/package.json').version")" = "${REACT_NATIVE_VERSION}"
 
       - name: Verify TypeScript
-        id: typecheck
         run: npx tsc --noEmit
 
       - name: Install pinned test runner
-        id: install-test-runner
         run: npm install --no-save --no-package-lock tsx@4.23.12
 
       - name: Run deterministic TypeScript test suite
-        id: tests
         shell: bash
         run: |
           set -euo pipefail
           mapfile -d '' TEST_FILES < <(find src -type f -path '*/__tests__/*.test.ts' -print0 | sort -z)
-          if [ "${#TEST_FILES[@]}" -eq 0 ]; then
-            echo "::error::No TypeScript test files were found under src/**/__tests__/*.test.ts"
-            exit 1
-          fi
+          test "${#TEST_FILES[@]}" -gt 0
           echo "Discovered ${#TEST_FILES[@]} TypeScript test files."
           for test_file in "${TEST_FILES[@]}"; do
             echo "=== Running ${test_file} ==="
@@ -140,7 +119,6 @@ jobs:
           done
 
       - name: Generate Android native project
-        id: expo-prebuild
         env:
           CI: "1"
           EXPO_NO_TELEMETRY: "1"
@@ -148,40 +126,23 @@ jobs:
         run: npx expo prebuild --platform android --clean --no-install
 
       - name: Validate generated Android configuration
-        id: validate-native-config
         run: |
           set -euo pipefail
           test -f android/app/build.gradle
           grep -Fq "namespace 'com.stormlog.app'" android/app/build.gradle
-          test -d android
 
       - name: Enable embedded JS bundle for standalone debug APK
-        id: enable-debug-bundle
         if: steps.identity.outputs.build_type == 'debug'
         run: |
           set -euo pipefail
           GRADLE_FILE="android/app/build.gradle"
-          test -f "${GRADLE_FILE}"
-          REACT_BLOCK_COUNT="$(grep -Eic '^[[:space:]]*react[[:space:]]*\{[[:space:]]*$' "${GRADLE_FILE}")"
-          test "${REACT_BLOCK_COUNT}" -eq 1
+          test "$(grep -Eic '^[[:space:]]*react[[:space:]]*\{[[:space:]]*$' "${GRADLE_FILE}")" -eq 1
           TEMP_GRADLE="$(mktemp)"
-          awk '
-            BEGIN { inserted = 0 }
-            !inserted && $0 ~ /^[[:space:]]*react[[:space:]]*\{[[:space:]]*$/ {
-              print
-              print "    debuggableVariants = []"
-              inserted = 1
-              next
-            }
-            { print }
-            END { if (!inserted) exit 1 }
-          ' "${GRADLE_FILE}" > "${TEMP_GRADLE}"
+          awk 'BEGIN { inserted=0 } !inserted && $0 ~ /^[[:space:]]*react[[:space:]]*\{[[:space:]]*$/ { print; print "    debuggableVariants = []"; inserted=1; next } { print } END { if (!inserted) exit 1 }' "${GRADLE_FILE}" > "${TEMP_GRADLE}"
           mv "${TEMP_GRADLE}" "${GRADLE_FILE}"
           test "$(grep -cF 'debuggableVariants = []' "${GRADLE_FILE}")" -eq 1
-          echo "Configured standalone debug APK to embed the JavaScript bundle."
 
       - name: Configure release signing from GitHub secrets
-        id: configure-release-signing
         if: steps.identity.outputs.build_type == 'release'
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -194,10 +155,7 @@ jobs:
           set -euo pipefail
           missing=0
           for variable in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
-            if [[ -z "${!variable:-}" ]]; then
-              echo "::error::Required release signing secret ${variable} is not set."
-              missing=1
-            fi
+            if [[ -z "${!variable:-}" ]]; then echo "::error::Required release signing secret ${variable} is not set."; missing=1; fi
           done
           if (( missing > 0 )); then exit "${missing}"; fi
           printf '%s' "${ANDROID_KEYSTORE_BASE64}" | tr -d '\r\n' | base64 --decode > "${STORMLOG_RELEASE_KEYSTORE}"
@@ -213,11 +171,7 @@ jobs:
                 keyPassword System.getenv("ANDROID_KEY_PASSWORD")
               }
             }
-            buildTypes {
-              release {
-                signingConfig signingConfigs.stormlogRelease
-              }
-            }
+            buildTypes { release { signingConfig signingConfigs.stormlogRelease } }
           }
           GRADLE
           chmod 600 "${STORMLOG_RELEASE_SIGNING_GRADLE}"
@@ -229,21 +183,16 @@ jobs:
           set -euo pipefail
           BUILD_TYPE="${{ steps.identity.outputs.build_type }}"
           if [[ "${BUILD_TYPE}" == "release" ]]; then
-            cd android
-            ./gradlew assembleRelease --no-daemon
-            cd ..
+            (cd android && ./gradlew assembleRelease --no-daemon)
             APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
           else
-            cd android
-            ./gradlew assembleDebug --no-daemon
-            cd ..
+            (cd android && ./gradlew assembleDebug --no-daemon)
             APK_PATH="android/app/build/outputs/apk/debug/app-debug.apk"
           fi
           test -s "${APK_PATH}"
           echo "apk_path=${APK_PATH}" >> "$GITHUB_OUTPUT"
 
       - name: Verify APK identity and embedded JS bundle
-        id: verify-apk
         run: |
           set -euo pipefail
           APK_PATH="${{ steps.build.outputs.apk_path }}"
@@ -252,13 +201,11 @@ jobs:
           ls -lh "${APK_PATH}"
           sha256sum "${APK_PATH}"
           if [[ "${{ steps.identity.outputs.build_type }}" == "debug" ]]; then
-            echo "Checking standalone debug APK for embedded React Native bundle..."
             unzip -l "${APK_PATH}" | grep -E 'assets/(index\.android\.bundle|index\.android\.bundle\.map)$'
             echo "Embedded JavaScript bundle verified."
           fi
 
       - name: Upload APK
-        id: upload-apk
         uses: actions/upload-artifact@v4
         with:
           name: StormLog-APK-${{ github.run_number }}-${{ github.sha }}
