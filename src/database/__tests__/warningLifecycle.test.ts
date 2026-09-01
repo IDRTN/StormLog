@@ -232,7 +232,7 @@ function warningInput(overrides: WarningInputOverrides): WarningStormEventInput 
 
 async function main() {
   await test('schema version targets warning lifecycle support', () => {
-    assertEqual(CURRENT_SCHEMA_VERSION, 7);
+    assertEqual(CURRENT_SCHEMA_VERSION, 9);
   });
 
   await test('normalizes actual NWS lifecycle fields', () => {
