@@ -54,34 +54,19 @@ jobs:
       - name: Record build identity
         id: identity
         run: |
+          set -euo pipefail
           COMMIT_SHA="$(git rev-parse HEAD)"
           WORKFLOW_SHA="${{ github.sha }}"
           BUILD_TYPE="${{ inputs.build_type || 'debug' }}"
           echo "Git commit SHA: ${COMMIT_SHA}"
           echo "Workflow event SHA: ${WORKFLOW_SHA}"
           test "${COMMIT_SHA}" = "${WORKFLOW_SHA}"
-
           case "${BUILD_TYPE}" in
             debug|release) ;;
             *) echo "::error::Unsupported build type: ${BUILD_TYPE}"; exit 1 ;;
           esac
-
-          ACTUAL_EXPO_SDK="$(node -p "require('./node_modules/expo/package.json').version" 2>/dev/null || true)"
-          ACTUAL_REACT_NATIVE="$(node -p "require('./react-native/package.json').version" 2>/dev/null || true)"
-
-          {
-            echo "commit_sha=${COMMIT_SHA}"
-            echo "build_type=${BUILD_TYPE}"
-            echo "expo_sdk=${ACTUAL_EXPO_SDK:-not-installed-yet}"
-            echo "react_native=${ACTUAL_REACT_NATIVE:-not-installed-yet}"
-            echo "node_version=${NODE_VERSION}"
-            echo "java_version=${JAVA_VERSION}"
-            echo "android_package=${ANDROID_PACKAGE_NAME}"
-            echo "app_version=${APP_VERSION}"
-            echo "android_api=${ANDROID_API_LEVEL}"
-            echo "build_tools=${ANDROID_BUILD_TOOLS_VERSION}"
-            echo "ndk_version=${ANDROID_NDK_VERSION}"
-          } >> "$GITHUB_OUTPUT"
+          echo "commit_sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_type=${BUILD_TYPE}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node.js
         id: setup-node
@@ -104,7 +89,7 @@ jobs:
       - name: Install deterministic Android components
         id: install-android-components
         run: |
-          echo "Android home: ${ANDROID_HOME}"
+          set -euo pipefail
           yes | sdkmanager --licenses > /dev/null
           sdkmanager \
             "platform-tools" \
@@ -112,114 +97,23 @@ jobs:
             "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" \
             "ndk;${ANDROID_NDK_VERSION}" \
             "cmake;${CMAKE_VERSION}"
-          sdkmanager --list_installed
-
-      - name: Remove disposable runner content
-        id: cleanup-runner
-        run: |
-          set -euo pipefail
-
-          echo "=== Disk audit before cleanup ==="
-          df -h /
-          for directory in \
-            /usr/share/dotnet \
-            /usr/share/swift \
-            /opt/ghc \
-            /usr/local/.ghcup \
-            /opt/hostedtoolcache/CodeQL \
-            /usr/local/share/boost \
-            "${ANDROID_HOME}/emulator" \
-            "${ANDROID_HOME}/system-images"
-          do
-            if [ -e "${directory}" ]; then
-              du -sh "${directory}"
-            else
-              echo "not present: ${directory}"
-            fi
-          done
-
-          remove_path() {
-            local path="$1"
-            if [ -e "${path}" ]; then
-              echo "Removing disposable path: ${path} ($(du -sh "${path}" | cut -f1))"
-              sudo rm -rf --one-file-system "${path}"
-            fi
-          }
-
-          remove_children_except() {
-            local parent="$1"
-            local preserved_name="$2"
-
-            if [ ! -d "${parent}" ]; then
-              return
-            fi
-
-            local removable_bytes
-            removable_bytes="$(find "${parent}" -mindepth 1 -maxdepth 1 -type d ! -name "${preserved_name}" -print0 \
-              | xargs -0 -r du -sb --total \
-              | awk '$NF == "total" {print $1}')"
-
-            if [ -n "${removable_bytes}" ] && [ "${removable_bytes}" -gt 0 ]; then
-              printf 'Removing %s entries other than %s (%d bytes)\n' \
-                "${parent}" "${preserved_name}" "${removable_bytes}"
-              find "${parent}" -mindepth 1 -maxdepth 1 -type d ! -name "${preserved_name}" -exec rm -rf -- {} +
-            fi
-          }
-
-          remove_path /usr/share/dotnet
-          remove_path /usr/share/swift
-          remove_path /opt/ghc
-          remove_path /usr/local/.ghcup
-          remove_path /opt/hostedtoolcache/CodeQL
-          remove_path /usr/local/share/boost
-          remove_path "${ANDROID_HOME}/emulator"
-          remove_path "${ANDROID_HOME}/system-images"
-
-          remove_children_except "${ANDROID_HOME}/platforms" "android-${ANDROID_API_LEVEL}"
-          remove_children_except "${ANDROID_HOME}/build-tools" "${ANDROID_BUILD_TOOLS_VERSION}"
-          remove_children_except "${ANDROID_HOME}/ndk" "${ANDROID_NDK_VERSION}"
-          remove_children_except "${ANDROID_HOME}/cmake" "${CMAKE_VERSION}"
-
-          docker system prune -af --volumes >/dev/null
-          sudo apt-get clean
-
-          test -d "${ANDROID_HOME}/cmdline-tools"
-          test -d "${ANDROID_HOME}/platform-tools"
-          test -d "${ANDROID_HOME}/licenses"
-          test -d "${ANDROID_HOME}/platforms/android-${ANDROID_API_LEVEL}"
-          test -d "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}"
-          test -d "${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
-          test -d "${ANDROID_HOME}/cmake/${CMAKE_VERSION}"
-
-          echo "=== Disk space after cleanup ==="
-          df -h /
-
-      - name: Print instrument build manifest
-        id: build-manifest
-        run: |
-          JAVA_ACTUAL="$(java -version 2>&1 | head -n 1)"
-          printf '%s\n' "=== StormLog controlled build manifest ==="
-          printf '%s\n' "Commit SHA:                 $(git rev-parse HEAD)"
-          printf '%s\n' "Expo SDK requested:         ${EXPO_SDK_VERSION}"
-          printf '%s\n' "React Native requested:     ${REACT_NATIVE_VERSION}"
-          printf '%s\n' "Android package requested:  ${ANDROID_PACKAGE_NAME}"
-          printf '%s\n' "Application version:        ${APP_VERSION} (${EXPECTED_VERSION_CODE})"
-          printf '%s\n' "Node requested/actual:      ${NODE_VERSION} / $(node --version)"
-          printf '%s\n' "Java requested/actual:      ${JAVA_VERSION} / ${JAVA_ACTUAL}"
-          printf '%s\n' "Android API level:          ${ANDROID_API_LEVEL}"
-          printf '%s\n' "Android Build Tools:        ${ANDROID_BUILD_TOOLS_VERSION}"
-          printf '%s\n' "Android NDK:                ${ANDROID_NDK_VERSION}"
-          printf '%s\n' "CMake:                      ${CMAKE_VERSION}"
-          if [[ "${{ steps.identity.outputs.build_type }}" == "release" ]]; then
-            printf '%s\n' "Build type:                 release"
-          else
-            printf '%s\n' "Build type:                 debug"
-          fi
-          printf '%s\n' "==========================================="
 
       - name: Install exact locked dependencies
         id: install-dependencies
+        env:
+          NPM_CONFIG_LEGACY_PEER_DEPS: "true"
         run: npm ci
+
+      - name: Verify dependency versions
+        id: verify-dependencies
+        run: |
+          set -euo pipefail
+          EXPO_INSTALLED="$(node -p "require('./node_modules/expo/package.json').version")"
+          REACT_NATIVE_INSTALLED="$(node -p "require('./node_modules/react-native/package.json').version")"
+          echo "Installed Expo SDK: ${EXPO_INSTALLED}"
+          echo "Installed React Native: ${REACT_NATIVE_INSTALLED}"
+          test "${EXPO_INSTALLED}" = "${EXPO_SDK_VERSION}"
+          test "${REACT_NATIVE_INSTALLED}" = "${REACT_NATIVE_VERSION}"
 
       - name: Verify TypeScript
         id: typecheck
@@ -245,34 +139,123 @@ jobs:
             npx --no-install tsx "${test_file}"
           done
 
+      - name: Generate Android native project
+        id: expo-prebuild
+        env:
+          CI: "1"
+          EXPO_NO_TELEMETRY: "1"
+          NPM_CONFIG_LEGACY_PEER_DEPS: "true"
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Validate generated Android configuration
+        id: validate-native-config
+        run: |
+          set -euo pipefail
+          test -f android/app/build.gradle
+          grep -Fq "namespace 'com.stormlog.app'" android/app/build.gradle
+          test -d android
+
+      - name: Enable embedded JS bundle for standalone debug APK
+        id: enable-debug-bundle
+        if: steps.identity.outputs.build_type == 'debug'
+        run: |
+          set -euo pipefail
+          GRADLE_FILE="android/app/build.gradle"
+          test -f "${GRADLE_FILE}"
+          REACT_BLOCK_COUNT="$(grep -Eic '^[[:space:]]*react[[:space:]]*\{[[:space:]]*$' "${GRADLE_FILE}")"
+          test "${REACT_BLOCK_COUNT}" -eq 1
+          TEMP_GRADLE="$(mktemp)"
+          awk '
+            BEGIN { inserted = 0 }
+            !inserted && $0 ~ /^[[:space:]]*react[[:space:]]*\{[[:space:]]*$/ {
+              print
+              print "    debuggableVariants = []"
+              inserted = 1
+              next
+            }
+            { print }
+            END { if (!inserted) exit 1 }
+          ' "${GRADLE_FILE}" > "${TEMP_GRADLE}"
+          mv "${TEMP_GRADLE}" "${GRADLE_FILE}"
+          test "$(grep -cF 'debuggableVariants = []' "${GRADLE_FILE}")" -eq 1
+          echo "Configured standalone debug APK to embed the JavaScript bundle."
+
+      - name: Configure release signing from GitHub secrets
+        id: configure-release-signing
+        if: steps.identity.outputs.build_type == 'release'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          STORMLOG_RELEASE_KEYSTORE: ${{ runner.temp }}/stormlog-release.keystore
+          STORMLOG_RELEASE_SIGNING_GRADLE: ${{ runner.temp }}/stormlog-release-signing.gradle
+        run: |
+          set -euo pipefail
+          missing=0
+          for variable in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [[ -z "${!variable:-}" ]]; then
+              echo "::error::Required release signing secret ${variable} is not set."
+              missing=1
+            fi
+          done
+          if (( missing > 0 )); then exit "${missing}"; fi
+          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | tr -d '\r\n' | base64 --decode > "${STORMLOG_RELEASE_KEYSTORE}"
+          chmod 600 "${STORMLOG_RELEASE_KEYSTORE}"
+          keytool -list -alias "${ANDROID_KEY_ALIAS}" -keystore "${STORMLOG_RELEASE_KEYSTORE}" -storepass "${ANDROID_KEYSTORE_PASSWORD}" >/dev/null
+          cat > "${STORMLOG_RELEASE_SIGNING_GRADLE}" <<'GRADLE'
+          android {
+            signingConfigs {
+              stormlogRelease {
+                storeFile file(System.getenv("STORMLOG_RELEASE_KEYSTORE"))
+                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+              }
+            }
+            buildTypes {
+              release {
+                signingConfig signingConfigs.stormlogRelease
+              }
+            }
+          }
+          GRADLE
+          chmod 600 "${STORMLOG_RELEASE_SIGNING_GRADLE}"
+          printf '\napply from: "%s"\n' "${STORMLOG_RELEASE_SIGNING_GRADLE}" >> android/app/build.gradle
+
       - name: Build Android APK
         id: build
         run: |
+          set -euo pipefail
           BUILD_TYPE="${{ steps.identity.outputs.build_type }}"
           if [[ "${BUILD_TYPE}" == "release" ]]; then
-            npx expo prebuild --platform android --no-install
             cd android
-            ./gradlew assembleRelease
+            ./gradlew assembleRelease --no-daemon
             cd ..
             APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
           else
-            npx expo prebuild --platform android --no-install
             cd android
-            ./gradlew assembleDebug
+            ./gradlew assembleDebug --no-daemon
             cd ..
             APK_PATH="android/app/build/outputs/apk/debug/app-debug.apk"
           fi
-          test -f "${APK_PATH}"
+          test -s "${APK_PATH}"
           echo "apk_path=${APK_PATH}" >> "$GITHUB_OUTPUT"
 
-      - name: Verify APK identity
+      - name: Verify APK identity and embedded JS bundle
         id: verify-apk
         run: |
+          set -euo pipefail
           APK_PATH="${{ steps.build.outputs.apk_path }}"
-          test -f "${APK_PATH}"
+          test -s "${APK_PATH}"
           echo "APK: ${APK_PATH}"
           ls -lh "${APK_PATH}"
           sha256sum "${APK_PATH}"
+          if [[ "${{ steps.identity.outputs.build_type }}" == "debug" ]]; then
+            echo "Checking standalone debug APK for embedded React Native bundle..."
+            unzip -l "${APK_PATH}" | grep -E 'assets/(index\.android\.bundle|index\.android\.bundle\.map)$'
+            echo "Embedded JavaScript bundle verified."
+          fi
 
       - name: Upload APK
         id: upload-apk
