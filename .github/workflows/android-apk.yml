@@ -225,9 +225,25 @@ jobs:
         id: typecheck
         run: npx tsc --noEmit
 
-      - name: Run tests
+      - name: Install pinned test runner
+        id: install-test-runner
+        run: npm install --no-save --no-package-lock tsx@4.23.12
+
+      - name: Run deterministic TypeScript test suite
         id: tests
-        run: npm test -- --runInBand
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' TEST_FILES < <(find src -type f -path '*/__tests__/*.test.ts' -print0 | sort -z)
+          if [ "${#TEST_FILES[@]}" -eq 0 ]; then
+            echo "::error::No TypeScript test files were found under src/**/__tests__/*.test.ts"
+            exit 1
+          fi
+          echo "Discovered ${#TEST_FILES[@]} TypeScript test files."
+          for test_file in "${TEST_FILES[@]}"; do
+            echo "=== Running ${test_file} ==="
+            npx --no-install tsx "${test_file}"
+          done
 
       - name: Build Android APK
         id: build
