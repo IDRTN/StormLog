@@ -143,7 +143,7 @@ async function main() {
   });
 
   await test('schema targets the warning identity foundation', async () => {
-    assertEqual(CURRENT_SCHEMA_VERSION, 7);
+    assertEqual(CURRENT_SCHEMA_VERSION, 9);
   });
 
   await test('records a new NWS alert ID once', async () => {
