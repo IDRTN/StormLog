@@ -114,14 +114,12 @@ TaskManager.defineTask(DAILY_FOREGROUND_LOCATION_TASK, async ({ data, error }) =
   }
 
   try {
-    // Headless Android execution may load this task without preserving the
-    // module-level callback. Fall back to the coordinator's public automatic
-    // entry point so the same single execution owner is used.
+    // The Daily Monitor coordinator is the single authoritative execution
+    // owner. The callback is registered when dailyMonitor.ts initializes the
+    // module graph. Never perform a second, independent collection here: doing
+    // so would bypass the coordinator's persisted cadence and in-flight guard.
     if (!collectionCallback) {
-      console.warn(`${TAG} Collection callback missing — using headless Daily Monitor fallback`);
-      const dailyMonitor = await import('./dailyMonitor');
-      const result = await dailyMonitor.performDailyCollection('automatic');
-      console.log(`${TAG} Headless fallback collection: ${result.success ? 'success' : 'failed'}`);
+      console.error(`${TAG} Collection callback missing — refusing independent fallback collection`);
       return;
     }
 
