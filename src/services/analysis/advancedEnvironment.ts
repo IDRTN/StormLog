@@ -186,7 +186,6 @@ function deriveCompositeParameters(
   shear06: number | null,
   lclM: number | null,
 ): { stp: number | null; scp: number | null } {
-  // Fixed-layer STP requires CAPE, 0–1 km SRH, deep-layer shear, LCL and CIN.
   if (capeJkg == null || srh01 == null || shear06 == null || lclM == null) {
     return { stp: null, scp: null };
   }
@@ -201,7 +200,6 @@ function deriveCompositeParameters(
     ? null
     : clamp(capeTerm * srhTerm * shearTerm * lclTerm * cinTerm, -10, 10);
 
-  // SCP uses 0–3 km SRH, not 0–1 km SRH.
   const scp = srh03 == null
     ? null
     : clamp((capeJkg / 1000) * (shear06 / 20) * Math.max(0, srh03 / 50), 0, 20);
@@ -228,8 +226,6 @@ export function analyzeAdvancedEnvironment(input: AdvancedEnvironmentInput): Adv
     limitations.push('Storm motion unavailable — SRH cannot be calculated');
   }
 
-  // LCL must use the actual surface thermodynamic observation. Do not use an
-  // elevated first level as a substitute for the surface.
   const surface = levels.find(level => level.heightM === 0) ?? null;
   const lclHeightM = surface
     ? calculateLclHeightM(surface.temperatureC, surface.dewPointC)
@@ -241,20 +237,8 @@ export function analyzeAdvancedEnvironment(input: AdvancedEnvironmentInput): Adv
   const lowLevelShear01KmKt = bulkShear(levels, 1);
   const lowLevelShear03KmKt = bulkShear(levels, 3);
   const deepLayerShear06KmKt = bulkShear(levels, 6);
-  const srh01M2s2 = stormRelativeHelicity(
-    levels,
-    0,
-    1000,
-    input.stormMotionDirectionDeg ?? null,
-    input.stormMotionSpeedKt ?? null,
-  );
-  const srh03M2s2 = stormRelativeHelicity(
-    levels,
-    0,
-    3000,
-    input.stormMotionDirectionDeg ?? null,
-    input.stormMotionSpeedKt ?? null,
-  );
+  const srh01M2s2 = stormRelativeHelicity(levels, 0, 1000, input.stormMotionDirectionDeg ?? null, input.stormMotionSpeedKt ?? null);
+  const srh03M2s2 = stormRelativeHelicity(levels, 0, 3000, input.stormMotionDirectionDeg ?? null, input.stormMotionSpeedKt ?? null);
   const { stp, scp } = deriveCompositeParameters(
     input.capeJkg ?? null,
     input.cinJkg ?? null,
@@ -280,7 +264,6 @@ export function analyzeAdvancedEnvironment(input: AdvancedEnvironmentInput): Adv
   return {
     sourceLevelCount: levels.length,
     lowLevelShear01KmKt,
-    lowLevelShear03KmKmKt: undefined as never,
     lowLevelShear03KmKt,
     deepLayerShear06KmKt,
     srh01M2s2,
