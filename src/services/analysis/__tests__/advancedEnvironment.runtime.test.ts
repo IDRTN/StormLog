@@ -1,5 +1,8 @@
-import { strict as assert } from 'node:assert';
 import { analyzeAdvancedEnvironment } from '../advancedEnvironment';
+
+function assert(condition: boolean, message: string): void {
+  if (!condition) throw new Error(`Assertion failed: ${message}`);
+}
 
 const profile = [
   { pressureHpa: 1000, heightM: 0, temperatureC: 28, dewPointC: 20, windSpeedKt: 10, windDirectionDeg: 170 },
@@ -18,24 +21,24 @@ const result = analyzeAdvancedEnvironment({
   stormMotionSpeedKt: 25,
 });
 
-assert.equal(result.sourceLevelCount, 6);
-assert.equal(result.availability, 'AVAILABLE');
-assert.ok((result.lowLevelShear01KmKt ?? 0) > 0);
-assert.ok((result.lowLevelShear03KmKt ?? 0) > (result.lowLevelShear01KmKt ?? 0));
-assert.ok((result.deepLayerShear06KmKt ?? 0) > 0);
-assert.ok(result.lclHeightM != null && result.lclHeightM > 0);
-assert.ok(result.srh01M2s2 != null);
-assert.ok(result.srh03M2s2 != null);
-assert.ok(result.significantTornadoParameter != null);
-assert.ok(result.supercellCompositeParameter != null);
+assert(result.sourceLevelCount === 6, 'source level count');
+assert(result.availability === 'AVAILABLE', 'complete profile availability');
+assert((result.lowLevelShear01KmKt ?? 0) > 0, '0–1 km shear');
+assert((result.lowLevelShear03KmKt ?? 0) > (result.lowLevelShear01KmKt ?? 0), '0–3 km shear');
+assert((result.deepLayerShear06KmKt ?? 0) > 0, '0–6 km shear');
+assert(result.lclHeightM != null && result.lclHeightM > 0, 'LCL');
+assert(result.srh01M2s2 != null, '0–1 km SRH');
+assert(result.srh03M2s2 != null, '0–3 km SRH');
+assert(result.significantTornadoParameter != null, 'STP');
+assert(result.supercellCompositeParameter != null, 'SCP');
 
 const missingMotion = analyzeAdvancedEnvironment({ levels: profile, capeJkg: 1000, cinJkg: -25 });
-assert.equal(missingMotion.srh01M2s2, null);
-assert.ok(missingMotion.limitations.some(item => item.includes('Storm motion unavailable')));
+assert(missingMotion.srh01M2s2 === null, 'SRH requires storm motion');
+assert(missingMotion.limitations.some(item => item.includes('Storm motion unavailable')), 'missing-motion limitation');
 
 const empty = analyzeAdvancedEnvironment({ levels: [] });
-assert.equal(empty.availability, 'UNAVAILABLE');
-assert.equal(empty.lowLevelShear01KmKt, null);
-assert.ok(empty.limitations.includes('No vertical wind profile supplied'));
+assert(empty.availability === 'UNAVAILABLE', 'empty profile availability');
+assert(empty.lowLevelShear01KmKt === null, 'empty profile shear');
+assert(empty.limitations.includes('No vertical wind profile supplied'), 'empty profile limitation');
 
 console.log('advancedEnvironment.runtime.test.ts: PASS');
