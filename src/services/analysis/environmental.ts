@@ -7,6 +7,7 @@
 
 import type { AnalysisInput, EnvironmentalAssessment, AssessmentLevel, DataAvailability, PressureTrendDirection } from './types';
 import { calculateDirectionalShear, calculateWindShift } from './windVector';
+import { calculateHeatIndex } from './heatIndex';
 
 function assessCape(cape: number | null): { level: AssessmentLevel; availability: DataAvailability; description: string } {
   if (cape == null || !Number.isFinite(cape)) return { level: 'UNKNOWN', availability: 'UNAVAILABLE', description: 'CAPE data not available' };
@@ -109,6 +110,7 @@ export function analyzeEnvironment(input: AnalysisInput): EnvironmentalAssessmen
   const advanced = input.advancedEnvironment;
   const effectiveCape = advanced?.capeJkg ?? input.cape;
   const capeResult = assessCape(effectiveCape);
+  const heatIndex = calculateHeatIndex(input.temperature, input.humidity);
   const factors: string[] = [];
   let overallScore = 0, scoreCount = 0;
 
@@ -127,6 +129,7 @@ export function analyzeEnvironment(input: AnalysisInput): EnvironmentalAssessmen
     overallScore += (winds.speedShearScore + (winds.directionalShear.level === 'STRONG' ? 0.8 : winds.directionalShear.level === 'MODERATE' ? 0.5 : winds.directionalShear.level === 'WEAK' ? 0.2 : 0)) / 2;
     scoreCount++; factors.push(winds.description);
   }
+  if (heatIndex.heatIndexF != null) factors.push(`Heat index: ${heatIndex.heatIndexF.toFixed(1)}°F — ${heatIndex.category?.replace('_', ' ').toLowerCase() ?? 'available'}`);
 
   let level: AssessmentLevel;
   const advancedIsUsable = advanced != null && advanced.availability !== 'UNAVAILABLE';
@@ -170,6 +173,8 @@ export function analyzeEnvironment(input: AnalysisInput): EnvironmentalAssessmen
     surfaceTempF: input.temperature,
     surfaceDewPointF: input.dewPoint,
     surfaceHumidity: input.humidity,
+    heatIndexF: heatIndex.heatIndexF,
+    heatIndexCategory: heatIndex.category,
     surfaceWindSpeed: input.windSpeed,
     surfaceWindDirection: input.windDirection,
     pressureTrend: pressure.trend,
