@@ -2,24 +2,9 @@
 // Progressive Storm Development Assessment Engine
 // ============================================================
 //
-// Combines four analysis layers into a progressive assessment:
-//   Layer A — Environmental Tornado Potential
-//   Layer B — Storm Structure (from real NEXRAD reflectivity)
-//   Layer C — Rotation Analysis (surface + radar when available)
-//   Layer D — Tornadic Evidence
-//
-// PROGRESSIVE RULES:
-//   Environment alone → LOW (never higher)
-//   Environment + organized storm → MODERATE
-//   Environment + storm + rotation → HIGH
-//   Environment + strong rotation + couplet → VERY HIGH
-//   Debris signature → VERY HIGH with explicit evidence text
-//
-// CRITICAL:
-//   - Missing data is NEVER treated as zero
-//   - NWS warnings displayed SEPARATELY
-//   - Safe language throughout
-//   - No fake probability percentages
+// Safety rule: this layer may only claim what the supplied data can
+// actually support. Missing/unsupported radar products remain unknown.
+// NWS watches/warnings are displayed separately from StormLog analysis.
 
 import type {
   AnalysisInput,
@@ -32,42 +17,23 @@ import type {
   StormMotion,
 } from './types';
 import { haversineDistance } from './windVector';
-
 import { analyzeEnvironment } from './environmental';
 import { analyzeStormStructure } from './stormStructure';
 import { analyzeRotation } from './rotation';
 import { analyzeTornadicEvidence } from './tornadicEvidence';
 
-// ---- Level ordering ----
-
 const LEVEL_ORDER: Record<AssessmentLevel, number> = {
-  'VERY_LOW': 0,
-  'LOW': 1,
-  'MARGINAL': 2,
-  'MODERATE': 3,
-  'HIGH': 4,
-  'VERY_HIGH': 5,
-  'UNKNOWN': -1,
+  VERY_LOW: 0, LOW: 1, MARGINAL: 2, MODERATE: 3, HIGH: 4, VERY_HIGH: 5, UNKNOWN: -1,
 };
 
-function levelValue(level: AssessmentLevel): number {
-  return LEVEL_ORDER[level] ?? -1;
-}
-
-function maxLevel(a: AssessmentLevel, b: AssessmentLevel): AssessmentLevel {
-  return levelValue(a) >= levelValue(b) ? a : b;
-}
-
-// ---- Display Helpers ----
+function levelValue(level: AssessmentLevel): number { return LEVEL_ORDER[level] ?? -1; }
 
 export function getAssessmentEmoji(level: AssessmentLevel): string {
   switch (level) {
     case 'VERY_HIGH': return '🔴';
     case 'HIGH': return '🟠';
-    case 'MODERATE': return '🟡';
-    case 'MARGINAL': return '🟡';
-    case 'LOW': return '🟢';
-    case 'VERY_LOW': return '🟢';
+    case 'MODERATE': case 'MARGINAL': return '🟡';
+    case 'LOW': case 'VERY_LOW': return '🟢';
     case 'UNKNOWN': return '⚪';
   }
 }
@@ -96,579 +62,290 @@ export function getAssessmentLabel(level: AssessmentLevel): string {
   }
 }
 
-// ---- NWS Status ----
-
 function buildNwsStatus(input: AnalysisInput): NwsWarningStatus {
   const alerts = input.nwsAlerts ?? [];
-
   const tornadoWarning = alerts.some(a => a.event?.includes('Tornado Warning'));
   const tornadoWatch = alerts.some(a => a.event?.includes('Tornado Watch'));
   const severeWarning = alerts.some(a => a.event?.includes('Severe Thunderstorm Warning'));
   const severeWatch = alerts.some(a => a.event?.includes('Severe Thunderstorm Watch'));
-
-  const activeAlerts = alerts.map(a => ({
-    event: a.event,
-    severity: a.severity,
-    headline: a.headline,
-  }));
-
+  const activeAlerts = alerts.map(a => ({ event: a.event, severity: a.severity, headline: a.headline }));
   const parts: string[] = [];
   if (tornadoWarning) parts.push('Tornado Warning');
   else if (tornadoWatch) parts.push('Tornado Watch');
   if (severeWarning) parts.push('Severe Thunderstorm Warning');
   else if (severeWatch && !tornadoWatch) parts.push('Severe Thunderstorm Watch');
-  if (parts.length === 0) parts.push('No active NWS watch/warning');
-
-  return {
-    tornadoWarning,
-    tornadoWatch,
-    severeWarning,
-    severeWatch,
-    activeAlerts,
-    description: parts.join(' · '),
-  };
+  if (!parts.length) parts.push('No active NWS watch/warning');
+  return { tornadoWarning, tornadoWatch, severeWarning, severeWatch, activeAlerts, description: parts.join(' · ') };
 }
 
-// ---- Storm Motion & Distance ----
-
-/**
- * Calculate initial bearing from point A to point B using proper
- * geographic formula (accounts for latitude convergence).
- */
-function calculateBearing(
-  lat1: number, lon1: number,
-  lat2: number, lon2: number
-): number {
-  const φ1 = lat1 * Math.PI / 180;
-  const φ2 = lat2 * Math.PI / 180;
-  const Δλ = (lon2 - lon1) * Math.PI / 180;
-
-  const y = Math.sin(Δλ) * Math.cos(φ2);
-  const x = Math.cos(φ1) * Math.sin(φ2) -
-            Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
-  let bearing = Math.atan2(y, x) * 180 / Math.PI;
-  return (bearing + 360) % 360;
+function calculateBearing(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const p1 = lat1 * Math.PI / 180;
+  const p2 = lat2 * Math.PI / 180;
+  const dl = (lon2 - lon1) * Math.PI / 180;
+  const y = Math.sin(dl) * Math.cos(p2);
+  const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
-function buildStormMotion(
-  input: AnalysisInput,
-  stormCells?: any[]
-): StormMotion | null {
-  // Only use radar cell data — do NOT use user GPS movement as storm motion
-  if (!stormCells || stormCells.length === 0) return null;
-
-  let closestCell = stormCells[0];
-  let minDist = Infinity;
-
+function buildStormMotion(input: AnalysisInput, stormCells: any[] | undefined): StormMotion | null {
+  // Storm motion is only valid when an actual tracked cell supplies motion.
+  if (!stormCells?.length) return null;
+  let closest: any = null;
+  let minDistance = Infinity;
   for (const cell of stormCells) {
-    if (cell.latitude != null && cell.longitude != null) {
-      const dist = haversineDistance(input.latitude, input.longitude, cell.latitude, cell.longitude);
-      if (dist < minDist) {
-        minDist = dist;
-        closestCell = cell;
-      }
-    }
+    if (!Number.isFinite(cell?.latitude) || !Number.isFinite(cell?.longitude)) continue;
+    const distance = haversineDistance(input.latitude, input.longitude, cell.latitude, cell.longitude);
+    if (distance < minDistance) { minDistance = distance; closest = cell; }
   }
+  if (!closest) return null;
 
-  if (closestCell.latitude == null || closestCell.longitude == null) return null;
-
-  // Proper geographic bearing from user to storm
-  const bearingToStorm = calculateBearing(
-    input.latitude, input.longitude,
-    closestCell.latitude, closestCell.longitude
-  );
-
-  const distanceKm = haversineDistance(
-    input.latitude, input.longitude,
-    closestCell.latitude, closestCell.longitude
-  );
-  const speedMph = closestCell.speed ?? null;
-  const motionDeg = closestCell.movement ?? null;
-
-  // Determine if approaching: storm motion direction should be roughly
-  // opposite to the bearing from user to storm (i.e., storm moving toward user)
+  const bearing = calculateBearing(input.latitude, input.longitude, closest.latitude, closest.longitude);
+  const motion = Number.isFinite(closest.movement) ? closest.movement : null;
+  const speed = Number.isFinite(closest.speed) ? closest.speed : null;
   let approaching: boolean | null = null;
-  if (motionDeg != null) {
-    // The direction FROM storm TO user is roughly bearingToStorm + 180°
-    const towardUserBearing = (bearingToStorm + 180) % 360;
-    // Check if storm's motion is within ±90° of the toward-user direction
-    let angleDiff = Math.abs(motionDeg - towardUserBearing) % 360;
-    if (angleDiff > 180) angleDiff = 360 - angleDiff;
-    approaching = angleDiff < 90;
+  if (motion != null) {
+    const towardUser = (bearing + 180) % 360;
+    let diff = Math.abs(motion - towardUser) % 360;
+    if (diff > 180) diff = 360 - diff;
+    approaching = diff < 90;
   }
-
-  let description: string;
-  if (approaching === true) description = 'Toward user';
-  else if (approaching === false) description = 'Away or crossing';
-  else description = 'Direction unknown';
-
-  if (speedMph != null) description += ` · ${speedMph.toFixed(0)} mph`;
-
+  let description = approaching === true ? 'Toward user' : approaching === false ? 'Away or crossing' : 'Direction unknown';
+  if (speed != null) description += ` · ${speed.toFixed(0)} mph`;
   return {
-    distanceMiles: distanceKm * 0.621371,
-    bearingDegrees: bearingToStorm,
-    speedMph,
-    directionDegrees: motionDeg,
-    approaching: approaching ?? false,
+    distanceMiles: minDistance * 0.621371,
+    bearingDegrees: bearing,
+    speedMph: speed,
+    directionDegrees: motion,
+    approaching,
     description,
   };
 }
 
-// ---- Data Quality Assessment ----
-
 function assessDataQuality(input: AnalysisInput, hasVelocity: boolean, scanCount: number): DataQuality {
   const limitations: string[] = [];
+  const hasRadar = input.radarData?.available === true;
+  const radarCoverage: DataAvailability = hasRadar ? 'AVAILABLE' : 'UNAVAILABLE';
+  if (!hasRadar) limitations.push('Quantitative radar data unavailable');
 
-  // Radar coverage
-  const hasRadarData = input.radarData?.available === true;
-  const radarCoverage: DataAvailability = hasRadarData ? 'AVAILABLE' : 'UNAVAILABLE';
-
-  if (!hasRadarData) {
-    limitations.push('Radar not connected');
-  }
-
-  // Velocity availability — critical for rotation assessment
   const velocityData: DataAvailability = hasVelocity ? 'AVAILABLE' : 'UNAVAILABLE';
-  if (!hasVelocity && hasRadarData) {
-    limitations.push('Doppler velocity unavailable through public REST APIs');
-    limitations.push('Rotation assessment limited to surface observations');
+  if (!hasVelocity) {
+    limitations.push(hasRadar
+      ? 'Doppler velocity unavailable from the current radar provider'
+      : 'Doppler velocity unavailable because radar data is unavailable');
   }
 
-  // Environmental data
-  const hasCape = input.cape != null;
+  const advanced = input.advancedEnvironment;
+  const hasCape = advanced?.capeJkg != null || input.cape != null;
   const hasPressure = input.pressure != null;
   const hasWind = input.windSpeed != null;
-  const envScore = (hasCape ? 1 : 0) + (hasPressure ? 1 : 0) + (hasWind ? 1 : 0);
-  const environmentalData: DataAvailability =
-    envScore >= 2 ? 'AVAILABLE' : envScore >= 1 ? 'PARTIAL' : 'UNAVAILABLE';
-
+  const envScore = Number(hasCape) + Number(hasPressure) + Number(hasWind);
+  const environmentalData: DataAvailability = advanced?.availability === 'AVAILABLE'
+    ? 'AVAILABLE'
+    : envScore >= 2 ? 'PARTIAL' : envScore >= 1 ? 'PARTIAL' : 'UNAVAILABLE';
   if (!hasCape) limitations.push('CAPE unavailable — instability assessment limited');
+  if (advanced?.availability === 'PARTIAL') limitations.push(...advanced.limitations);
 
-  // Surface stations
   const stationCount = input.nearbyStations?.length ?? 0;
-  const surfaceStations: DataAvailability =
-    stationCount >= 4 ? 'AVAILABLE' : stationCount >= 2 ? 'PARTIAL' : 'UNAVAILABLE';
+  const surfaceStations: DataAvailability = stationCount >= 4 ? 'AVAILABLE' : stationCount >= 2 ? 'PARTIAL' : 'UNAVAILABLE';
+  if (stationCount < 4) limitations.push(`Only ${stationCount} nearby surface station${stationCount === 1 ? '' : 's'} available`);
 
-  if (stationCount < 4) {
-    limitations.push(`Only \${stationCount} nearby surface station\${stationCount === 1 ? '' : 's'} available`);
-  }
+  if (scanCount <= 1 && hasRadar) limitations.push('Insufficient independent radar scans to establish persistence/trend');
 
-  // Scan count for vertical continuity / trend
-  if (scanCount <= 1) {
-    limitations.push('Single radar scan — trend and persistence cannot be determined');
-  }
-
-  // Dual-pol availability
   const radarAny = input.radarData as any;
-  const hasDualPol = radarAny?.correlationCoefficient != null || radarAny?.cc != null;
-  if (!hasDualPol) {
-    limitations.push('Dual-pol data unavailable — debris signature cannot be assessed');
-  }
+  const hasDualPol = Number.isFinite(radarAny?.correlationCoefficient) || Number.isFinite(radarAny?.cc);
+  if (!hasDualPol) limitations.push('Dual-pol correlation data unavailable — debris signature cannot be verified');
 
-  // NWS data
-  const nwsAvailable = (input.nwsAlerts?.length ?? 0) > 0 ||
-    input.nwsAlerts != null; // Even empty array means we checked
-
-  // ---- Calculate overall confidence ----
   let score = 0;
-
-  // Radar reflectivity: +1
-  if (radarCoverage === 'AVAILABLE') score += 1;
-
-  // Velocity: +2 (most critical)
-  if (velocityData === 'AVAILABLE') score += 2;
-
-  // Multiple scans: +1
+  if (hasRadar) score += 1;
+  if (hasVelocity) score += 2;
   if (scanCount >= 3) score += 1;
-
-  // Environmental data: +1
-  if (environmentalData === 'AVAILABLE') score += 1;
-
-  // Surface stations: +0.5
+  if (environmentalData !== 'UNAVAILABLE') score += 1;
   if (surfaceStations !== 'UNAVAILABLE') score += 0.5;
-
-  // Dual-pol: +0.5
   if (hasDualPol) score += 0.5;
-
-  let level: ConfidenceLevel;
-  if (score >= 5) level = 'HIGH';
-  else if (score >= 3) level = 'MODERATE';
-  else if (score >= 1.5) level = 'LOW';
-  else level = 'UNKNOWN';
-
+  const level: ConfidenceLevel = score >= 5 ? 'HIGH' : score >= 3 ? 'MODERATE' : score >= 1.5 ? 'LOW' : 'UNKNOWN';
   return {
     level,
     radarCoverage,
     environmentalData,
     surfaceStations,
     velocityData,
-    description: `\${level} confidence — \${hasVelocity ? 'radar velocity available' : 'no radar velocity'}`,
+    description: `${level} confidence — ${hasVelocity ? 'radar velocity available' : 'radar velocity unavailable'}`,
     limitations,
   };
 }
 
-// ---- Progressive Overall Assessment ----
-
-interface OverallResult {
-  level: AssessmentLevel;
-  text: string;
-  why: string;
-}
+interface OverallResult { level: AssessmentLevel; text: string; why: string; }
 
 function calculateProgressiveAssessment(
   environment: AssessmentLevel,
-  stormStructure: AssessmentLevel,
+  structure: AssessmentLevel,
   rotation: AssessmentLevel,
-  tornadicEvidence: AssessmentLevel,
-  hasRadar: boolean,
+  evidence: AssessmentLevel,
   hasVelocity: boolean,
   hasPrecipitation: boolean,
-  debrisSignature: boolean,
+  debris: boolean,
   hasCouplet: boolean,
-  hasStrongRotation: boolean,
   scanCount: number,
-  envFavorable: boolean,
 ): OverallResult {
-  const envVal = levelValue(environment);
-  const structVal = levelValue(stormStructure);
-  const rotVal = levelValue(rotation);
-  const evidVal = levelValue(tornadicEvidence);
-
-  const increasingFactors: string[] = [];
-  const limitingFactors: string[] = [];
-
+  const env = levelValue(environment), str = levelValue(structure), rot = levelValue(rotation), evid = levelValue(evidence);
+  const increasing: string[] = [];
+  const limiting: string[] = [];
   let score = 0;
 
-  // Factor 1: Environment (max contribution: 2)
-  if (envVal >= levelValue('VERY_HIGH')) {
-    score += 2;
-    increasingFactors.push('Highly favorable tornado environment');
-  } else if (envVal >= levelValue('MODERATE')) {
-    score += 1.5;
-    increasingFactors.push('Favorable environment for tornado development');
-  } else if (envVal >= levelValue('MARGINAL')) {
-    score += 0.5;
-    increasingFactors.push('Marginally favorable environment');
-  } else if (envVal >= 0) {
-    limitingFactors.push('Environment not particularly favorable for tornadoes');
-  }
+  if (env >= levelValue('VERY_HIGH')) { score += 2; increasing.push('Highly favorable tornado environment'); }
+  else if (env >= levelValue('MODERATE')) { score += 1.5; increasing.push('Favorable environment for tornado development'); }
+  else if (env >= levelValue('MARGINAL')) { score += 0.5; increasing.push('Marginally favorable environment'); }
+  else if (env >= 0) limiting.push('Environment not particularly favorable for tornadoes');
 
-  // Factor 2: Storm presence/structure (max contribution: 2)
-  if (structVal >= levelValue('HIGH')) {
-    score += 2;
-    increasingFactors.push('Organized storm structure detected');
-  } else if (structVal >= levelValue('MODERATE')) {
-    score += 1.5;
-    increasingFactors.push('Strong storm present');
-  } else if (structVal >= levelValue('MARGINAL')) {
-    score += 1;
-    increasingFactors.push('Convective activity detected');
-  } else if (hasPrecipitation) {
-    score += 0.5;
-    increasingFactors.push('Precipitation shown on radar');
-  } else {
-    limitingFactors.push('No organized storm detected on radar');
-  }
+  if (str >= levelValue('HIGH')) { score += 2; increasing.push('Organized storm structure detected'); }
+  else if (str >= levelValue('MODERATE')) { score += 1.5; increasing.push('Strong storm signal detected'); }
+  else if (str >= levelValue('MARGINAL')) { score += 1; increasing.push('Convective activity detected'); }
+  else if (hasPrecipitation) { score += 0.5; increasing.push('Radar precipitation imagery available'); }
+  else limiting.push('No quantitative storm-structure signal available');
 
-  // Factor 3: Rotation (max contribution: 2) — HARD GATE: requires velocity
   if (!hasVelocity) {
-    // Without velocity, surface observations contribute very little
-    if (rotVal >= levelValue('MODERATE')) {
-      score += 0.5; // Surface-only evidence is weak supporting signal
-      increasingFactors.push('Surface convergence pattern noted (not radar-confirmed)');
-    }
-    limitingFactors.push('Doppler velocity unavailable — rotation cannot be verified');
-  } else if (rotVal >= levelValue('VERY_HIGH')) {
-    score += 2;
-    increasingFactors.push('Extreme rotation detected in radar velocity data');
-  } else if (rotVal >= levelValue('HIGH')) {
-    score += 1.5;
-    increasingFactors.push('Strong rotation signals in radar velocity');
-  } else if (rotVal >= levelValue('MODERATE')) {
-    score += 1;
-    increasingFactors.push('Moderate rotation indicators');
-  } else if (rotVal >= levelValue('MARGINAL')) {
-    score += 0.5;
-    increasingFactors.push('Weak rotation indicators');
-  } else {
-    limitingFactors.push('No significant rotation detected in radar data');
-  }
+    if (rot >= levelValue('MODERATE')) { score += 0.5; increasing.push('Surface convergence pattern noted (not radar-confirmed)'); }
+    limiting.push('Doppler velocity unavailable — rotation cannot be verified');
+  } else if (rot >= levelValue('VERY_HIGH')) { score += 2; increasing.push('Extreme rotation detected in radar velocity data'); }
+  else if (rot >= levelValue('HIGH')) { score += 1.5; increasing.push('Strong rotation signals in radar velocity'); }
+  else if (rot >= levelValue('MODERATE')) { score += 1; increasing.push('Moderate rotation indicators'); }
+  else if (rot >= levelValue('MARGINAL')) { score += 0.5; increasing.push('Weak rotation indicators'); }
+  else limiting.push('No significant rotation detected in available data');
 
-  // Factor 4: Tornadic evidence — HARD GATE: requires velocity + dual-pol for debris
-  if (!hasVelocity) {
-    limitingFactors.push('Tornadic evidence not assessable without radar velocity');
-  } else if (debrisSignature) {
-    score += 2;
-    increasingFactors.push('Debris signature consistent with tornadic circulation');
-  } else if (evidVal >= levelValue('HIGH')) {
-    score += 1.5;
-    increasingFactors.push('Strong tornadic evidence in radar data');
-  } else if (evidVal >= levelValue('MODERATE')) {
-    score += 1;
-    increasingFactors.push('Moderate tornadic indicators');
-  }
+  if (!hasVelocity) limiting.push('Tornadic radar evidence cannot be verified without Doppler velocity');
+  else if (debris) { score += 2; increasing.push('Dual-pol/velocity evidence consistent with a debris signature'); }
+  else if (evid >= levelValue('HIGH')) { score += 1.5; increasing.push('Strong tornadic indicators in radar data'); }
+  else if (evid >= levelValue('MODERATE')) { score += 1; increasing.push('Moderate tornadic indicators'); }
 
-  // ---- HARD GATING RULES ----
+  if (str < levelValue('LOW') && !hasPrecipitation) { score = Math.min(score, 1); limiting.push('GATE: No quantitative storm signal — assessment capped at LOW'); }
+  if (!hasVelocity) { score = Math.min(score, 2.5); limiting.push('GATE: Velocity unavailable — assessment capped at MODERATE'); }
+  if (scanCount <= 1 && hasCouplet) limiting.push('Single radar scan — persistence cannot be determined');
 
-  // GATE 1: No organized storm → cap at MARGINAL
-  if (structVal < levelValue('LOW') && !hasPrecipitation) {
-    score = Math.min(score, 1.0);
-    limitingFactors.push('GATE: No organized storm — assessment capped at LOW/MARGINAL');
-  }
-
-  // GATE 2: Environment alone (no storm, no rotation) → cap at LOW
-  if (structVal < levelValue('LOW') && rotVal < levelValue('MARGINAL') && !debrisSignature) {
-    score = Math.min(score, 0.8);
-  }
-
-  // GATE 3: Radar velocity unavailable → cap at MODERATE
-  if (!hasVelocity) {
-    score = Math.min(score, 2.5);
-    limitingFactors.push('GATE: Velocity unavailable — assessment capped at MODERATE');
-  }
-
-  // GATE 4: Single scan → cannot claim persistence/strengthening bonus
-  if (scanCount <= 1 && hasCouplet) {
-    limitingFactors.push('Only one radar scan — trend/persistence cannot be determined');
-  }
-
-  // GATE 5: No dual-pol → debris signature already false from evidence layer
-
-  // Determine level from score
-  let level: AssessmentLevel;
-  if (score >= 6) level = 'VERY_HIGH';
-  else if (score >= 4.5) level = 'HIGH';
-  else if (score >= 3) level = 'MODERATE';
-  else if (score >= 1.5) level = 'MARGINAL';
-  else if (score >= 0.5) level = 'LOW';
-  else level = 'VERY_LOW';
-
-  // Build assessment text with specific details
-  let text: string;
-  if (debrisSignature) {
-    text = 'Strong radar evidence consistent with tornadic circulation. Possible debris signature detected.';
-  } else if (level === 'VERY_HIGH') {
-    text = 'Highly favorable environment combined with organized storm and strong verified rotation.';
-  } else if (level === 'HIGH') {
-    text = 'Favorable environment with developing rotation. Tornadic development possible.';
-  } else if (level === 'MODERATE') {
-    text = hasVelocity
-      ? 'Organized storm in favorable environment. Monitor for rotation development.'
-      : 'Organized storm in favorable environment. Doppler velocity unavailable — rotation cannot be verified.';
-  } else if (level === 'MARGINAL') {
-    text = 'Some favorable factors present but insufficient evidence for elevated concern.';
-  } else if (level === 'LOW') {
-    text = 'Limited tornado-favorable signals in current data.';
-  } else {
-    text = 'Conditions not currently supportive of tornado development.';
-  }
-
-  // Build WHY explanation with specific data references
-  const whyParts: string[] = [];
-  if (increasingFactors.length > 0) {
-    whyParts.push(`Factors increasing concern:\n${increasingFactors.map(f => `• \${f}`).join('\n')}`);
-  }
-  if (limitingFactors.length > 0) {
-    whyParts.push(`Limiting factors:\n${limitingFactors.map(f => `• \${f}`).join('\n')}`);
-  }
-  whyParts.push('This is an analytical estimate and NOT an official tornado warning.');
-
-  return { level, text, why: whyParts.join('\n\n') };
+  const level: AssessmentLevel = score >= 6 ? 'VERY_HIGH' : score >= 4.5 ? 'HIGH' : score >= 3 ? 'MODERATE' : score >= 1.5 ? 'MARGINAL' : score >= 0.5 ? 'LOW' : 'VERY_LOW';
+  const text = debris
+    ? 'Radar evidence is consistent with tornadic circulation; a debris signature is indicated by the available dual-pol/velocity data.'
+    : level === 'VERY_HIGH' ? 'Highly favorable environment combined with organized storm and strong verified rotation.'
+    : level === 'HIGH' ? 'Favorable environment with developing verified rotation. Tornadic development is possible.'
+    : level === 'MODERATE' ? hasVelocity ? 'Organized storm in a favorable environment. Monitor for verified rotation development.' : 'Organized storm/environmental signals present, but Doppler velocity is unavailable and rotation cannot be verified.'
+    : level === 'MARGINAL' ? 'Some favorable factors are present, but evidence remains insufficient for elevated concern.'
+    : level === 'LOW' ? 'Limited tornado-favorable signals in current available data.'
+    : 'Insufficient evidence to assess meaningful tornado potential.';
+  const why: string[] = [];
+  if (increasing.length) why.push(`Factors increasing concern:\n${increasing.map(f => `• ${f}`).join('\n')}`);
+  if (limiting.length) why.push(`Limiting factors:\n${limiting.map(f => `• ${f}`).join('\n')}`);
+  why.push('This is a StormLog analytical assessment and NOT an official tornado warning. Follow NWS warnings and field safety procedures.');
+  return { level, text, why: why.join('\n\n') };
 }
 
-// ---- What Would Increase Concern ----
-
-function buildWhatWouldIncreaseConcern(
-  hasVelocity: boolean,
-  hasPrecipitation: boolean,
-  scanCount: number,
-  debrisSignature: boolean,
-): string[] {
-  const suggestions: string[] = [];
-
-  if (!hasPrecipitation) {
-    suggestions.push('Organized storm develops in your area');
+function buildWhatWouldIncreaseConcern(hasVelocity: boolean, hasPrecipitation: boolean, scanCount: number, debris: boolean): string[] {
+  const out: string[] = [];
+  if (!hasPrecipitation) out.push('Quantitative storm/radar signal becomes available');
+  if (!hasVelocity) { out.push('A real Doppler velocity product becomes available'); out.push('A low-level velocity couplet becomes measurable'); }
+  else {
+    if (scanCount <= 1) out.push('Verified rotation persists across multiple independent radar scans');
+    if (!debris) out.push('A validated dual-pol debris signature appears with supporting velocity evidence');
   }
-  if (!hasVelocity) {
-    suggestions.push('Doppler velocity data becomes available');
-    suggestions.push('Low-level velocity couplet develops');
-  } else {
-    if (scanCount <= 1) {
-      suggestions.push('Rotation persists across multiple radar scans');
-    }
-    if (!debrisSignature) {
-      suggestions.push('Dual-pol debris signature appears');
-    }
-  }
-  suggestions.push('Storm moves into stronger low-level shear');
-
-  return suggestions;
+  out.push('Storm enters a more favorable low-level thermodynamic/kinematic environment');
+  return out;
 }
 
-// ---- Surface vs Atmospheric Environment Separation ----
-
-function buildSurfaceEnvironment(input: AnalysisInput, env: any): {
-  level: AssessmentLevel;
-  description: string;
-  capeAvailable: boolean;
-  pressureTrendAvailable: boolean;
-  factors: string[];
-} {
+function buildSurfaceEnvironment(input: AnalysisInput, env: ReturnType<typeof analyzeEnvironment>) {
   const factors: string[] = [];
-  const capeAvailable = input.cape != null;
-  const pressureAvailable = input.pressure != null;
-
-  if (capeAvailable) factors.push(`CAPE: ${input.cape!.toFixed(0)} J/kg (observed)`);
-  if (input.dewPoint != null) factors.push(`Dewpoint: ${input.dewPoint.toFixed(0)}°F (observed)`);
-  if (pressureAvailable && env.pressureChange60Min != null) {
-    factors.push(`Pressure trend: ${env.pressureTrend} (${env.pressureChange60Min.toFixed(3)} inHg/60min)`);
-  }
-
-  let level: AssessmentLevel = 'UNKNOWN';
-  let description = 'Insufficient surface data';
-
-  if (capeAvailable || pressureAvailable) {
-    if (levelValue(env.level) >= levelValue('MODERATE')) {
-      level = 'MODERATE';
-      description = 'Surface environment appears favorable';
-    } else if (levelValue(env.level) >= levelValue('MARGINAL')) {
-      level = 'MARGINAL';
-      description = 'Surface environment marginally favorable';
-    } else {
-      level = 'LOW';
-      description = 'Surface environment not particularly favorable';
-    }
-  }
-
-  return { level, description, capeAvailable, pressureTrendAvailable: pressureAvailable, factors };
-}
-
-function buildAtmosphericEnvironment(input: AnalysisInput): {
-  level: AssessmentLevel;
-  description: string;
-  shearAvailable: boolean;
-  srhAvailable: boolean;
-  stpScpAvailable: boolean;
-  factors: string[];
-} {
-  // Upper-air parameters (shear, SRH, STP, SCP) are NOT available
-  // from surface observations or Open-Meteo current weather.
+  if (env.cape != null) factors.push(`CAPE: ${env.cape.toFixed(0)} J/kg`);
+  if (input.dewPoint != null) factors.push(`Dewpoint: ${input.dewPoint.toFixed(0)}°F`);
+  if (env.pressureChange60Min != null) factors.push(`Pressure trend: ${env.pressureTrend} (${(env.pressureChange60Min * 100).toFixed(1)} mb/60 min)`);
   return {
-    level: 'UNKNOWN',
-    description: 'Upper-air data unavailable — cannot assess full tornado environment',
-    shearAvailable: false,
-    srhAvailable: false,
-    stpScpAvailable: false,
-    factors: [
-      '0-1 km shear: UNAVAILABLE',
-      '0-6 km bulk shear: UNAVAILABLE',
-      'Storm-relative helicity: UNAVAILABLE',
-      'Significant Tornado Parameter: UNAVAILABLE',
-      'Supercell Composite Parameter: UNAVAILABLE',
-      'Requires sounding/profile data or a severe weather API',
-    ],
+    level: env.level,
+    description: env.cape != null || input.pressure != null ? 'Surface/environmental observations available' : 'Insufficient surface data',
+    capeAvailable: env.cape != null,
+    pressureTrendAvailable: input.pressure != null,
+    factors,
   };
 }
 
-function buildDataFreshness(input: AnalysisInput): {
-  weatherAgeMinutes: number | null;
-  radarAgeMinutes: number | null;
-  nwsAgeMinutes: number | null;
-  isStale: boolean;
-  description: string;
-} {
+function buildAtmosphericEnvironment(input: AnalysisInput): StormAnalysisResult['atmosphericEnvironment'] {
+  const advanced = input.advancedEnvironment;
+  if (!advanced || advanced.availability === 'UNAVAILABLE') {
+    return {
+      level: 'UNKNOWN',
+      description: 'Upper-air profile data unavailable — full vertical tornado environment cannot be assessed',
+      shearAvailable: false,
+      srhAvailable: false,
+      stpScpAvailable: false,
+      factors: ['0-1 km shear: UNAVAILABLE', '0-6 km bulk shear: UNAVAILABLE', 'Storm-relative helicity: UNAVAILABLE', 'STP/SCP: UNAVAILABLE'],
+    };
+  }
+  const values = [advanced.lowLevelShear01KmKt, advanced.deepLayerShear06KmKt, advanced.srh03M2s2, advanced.significantTornadoParameter, advanced.supercellCompositeParameter].filter(v => v != null && Number.isFinite(v));
+  const level: AssessmentLevel = values.length === 0 ? 'UNKNOWN' : advanced.availability === 'PARTIAL' ? 'MODERATE' : 'MODERATE';
+  const factors: string[] = [];
+  if (advanced.lowLevelShear01KmKt != null) factors.push(`0-1 km shear: ${advanced.lowLevelShear01KmKt.toFixed(1)} kt`);
+  if (advanced.deepLayerShear06KmKt != null) factors.push(`0-6 km bulk shear: ${advanced.deepLayerShear06KmKt.toFixed(1)} kt`);
+  if (advanced.srh03M2s2 != null) factors.push(`0-3 km SRH: ${advanced.srh03M2s2.toFixed(0)} m²/s²`);
+  if (advanced.significantTornadoParameter != null) factors.push(`STP: ${advanced.significantTornadoParameter.toFixed(2)}`);
+  if (advanced.supercellCompositeParameter != null) factors.push(`SCP: ${advanced.supercellCompositeParameter.toFixed(2)}`);
+  factors.push(...advanced.limitations);
+  return {
+    level,
+    description: advanced.availability === 'PARTIAL' ? 'Partial upper-air environment data available' : 'Advanced vertical environment data available',
+    shearAvailable: advanced.lowLevelShear01KmKt != null || advanced.deepLayerShear06KmKt != null,
+    srhAvailable: advanced.srh01M2s2 != null || advanced.srh03M2s2 != null,
+    stpScpAvailable: advanced.significantTornadoParameter != null || advanced.supercellCompositeParameter != null,
+    factors,
+  };
+}
+
+function buildDataFreshness(input: AnalysisInput): StormAnalysisResult['dataFreshness'] {
   const now = Date.now();
   const radarTime = input.radarData?.latestFrameTime;
-  const radarAgeMin = radarTime ? Math.round((now - radarTime * 1000) / 60000) : null;
-
-  const isStale = radarAgeMin != null && radarAgeMin > 30;
-
-  const parts: string[] = [];
-  if (radarAgeMin != null) {
-    parts.push(`Radar: ${radarAgeMin} min old`);
-    if (radarAgeMin > 30) parts.push('(STALE)');
-  } else {
-    parts.push('Radar: no timestamp');
-  }
-
+  const radarAgeMinutes = radarTime != null && Number.isFinite(radarTime)
+    ? Math.max(0, Math.round((now - radarTime * 1000) / 60000))
+    : null;
+  const isStale = radarAgeMinutes != null && radarAgeMinutes > 30;
   return {
     weatherAgeMinutes: null,
-    radarAgeMinutes: radarAgeMin,
+    radarAgeMinutes,
     nwsAgeMinutes: null,
     isStale,
-    description: parts.join(' '),
+    description: radarAgeMinutes == null ? 'Radar: no valid observation timestamp' : `Radar: ${radarAgeMinutes} min old${isStale ? ' (STALE)' : ''}`,
   };
 }
 
-// ============================================================
-// MAIN ANALYSIS FUNCTION
-// ============================================================
-
-export function analyzeStorm(
-  input: AnalysisInput,
-  previousAnalyses?: StormAnalysisResult[]
-): StormAnalysisResult {
-  const now = Date.now();
-
-  // Layer A: Environmental Potential
+export function analyzeStorm(input: AnalysisInput, previousAnalyses?: StormAnalysisResult[]): StormAnalysisResult {
+  const timestamp = Date.now();
   const environment = analyzeEnvironment(input);
-
-  // Layer B: Storm Structure
   const stormStructure = analyzeStormStructure(input);
-
-  // Layer C: Rotation Analysis
-  const prevRotationAnalyses = previousAnalyses?.map(p => p.rotation) ?? [];
-  const rotation = analyzeRotation(input, prevRotationAnalyses);
-
-  // Layer D: Tornadic Evidence
+  const previousRotation = previousAnalyses?.map(p => p.rotation) ?? [];
+  const rotation = analyzeRotation(input, previousRotation);
   const tornadicEvidence = analyzeTornadicEvidence(input, rotation);
 
-  // Extract key flags
-  const hasRadar = input.radarData != null;
-  const hasPrecipitation = input.radarData?.hasPrecipitation === true ||
-    (input.radarData?.maxReflectivityDbz != null && input.radarData.maxReflectivityDbz > 20);
+  const hasRadar = input.radarData?.available === true;
+  const hasVelocity = hasRadar && (input.radarData?.velocityPoints?.length ?? 0) > 0;
+  const hasPrecipitation = hasRadar && input.radarData?.hasPrecipitation === true;
   const debrisSignature = tornadicEvidence.debrisSignature;
   const hasCouplet = rotation.hasCouplet;
-  const hasStrongRotation = rotation.gateToGateShear != null && rotation.gateToGateShear > 60;
-
-  const envFavorable = levelValue(environment.level) >= levelValue('MODERATE');
-
-  // Progressive overall assessment
-  const hasVelocity = input.radarData?.velocityPoints != null && input.radarData.velocityPoints.length > 0;
-  const scanCount = rotation.verticalContinuity ?? 0;
+  const scanCount = previousAnalyses ? previousAnalyses.length + 1 : 1;
 
   const overall = calculateProgressiveAssessment(
     environment.level,
     stormStructure.level,
     rotation.level,
     tornadicEvidence.level,
-    hasRadar,
     hasVelocity,
     hasPrecipitation,
     debrisSignature,
     hasCouplet,
-    hasStrongRotation,
     scanCount,
-    envFavorable,
   );
 
-  // NWS Status (separate)
   const nwsStatus = buildNwsStatus(input);
-
-  // Storm Motion
-  const radarData = input.radarData as any;
-  const stormMotion = buildStormMotion(input, radarData?.stormCells);
-
-  // Data Quality
+  const stormMotion = buildStormMotion(input, input.radarData?.stormCells);
   const dataQuality = assessDataQuality(input, hasVelocity, scanCount);
-
-  const surfaceEnv = buildSurfaceEnvironment(input, environment);
-  const atmosphericEnv = buildAtmosphericEnvironment(input);
-  const freshness = buildDataFreshness(input);
+  const surfaceEnvironment = buildSurfaceEnvironment(input, environment);
+  const atmosphericEnvironment = buildAtmosphericEnvironment(input);
 
   return {
-    surfaceEnvironment: surfaceEnv,
-    atmosphericEnvironment: atmosphericEnv,
+    surfaceEnvironment,
+    atmosphericEnvironment,
     environment,
     stormStructure,
     rotation,
@@ -680,8 +357,8 @@ export function analyzeStorm(
     assessmentText: overall.text,
     whyExplanation: overall.why,
     whatWouldIncreaseConcern: buildWhatWouldIncreaseConcern(hasVelocity, hasPrecipitation, scanCount, debrisSignature),
-    dataFreshness: freshness,
-    timestamp: now,
+    dataFreshness: buildDataFreshness(input),
+    timestamp,
     latitude: input.latitude,
     longitude: input.longitude,
     lightningTrend: input.lightning?.trend ?? 'NONE',
