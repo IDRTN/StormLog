@@ -11,6 +11,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
+import com.facebook.react.HeadlessJsTaskService
 
 class StormLogSchedulerService : Service() {
   companion object {
@@ -57,16 +58,22 @@ class StormLogSchedulerService : Service() {
   private val tick = object : Runnable {
     override fun run() {
       if (!isRunning) return
-      val scheduledAt = nextBoundary(System.currentTimeMillis(), intervalMinutes)
+
+      val nowMs = System.currentTimeMillis()
+      val intervalMs = intervalMinutes.coerceAtLeast(1).toLong() * 60_000L
+      val scheduledAt = (nowMs / intervalMs) * intervalMs
       val triggerIntent = Intent(this@StormLogSchedulerService, StormLogHeadlessTaskService::class.java).apply {
         putExtra("scheduledAt", scheduledAt)
         putExtra("intervalMinutes", intervalMinutes)
       }
+
       try {
+        HeadlessJsTaskService.acquireWakeLockNow(this@StormLogSchedulerService)
         startService(triggerIntent)
       } catch (error: Exception) {
         android.util.Log.e("StormLogScheduler", "Unable to start headless collection", error)
       }
+
       scheduleNext()
     }
   }
