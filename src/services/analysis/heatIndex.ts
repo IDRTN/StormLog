@@ -1,8 +1,8 @@
 // ============================================================
 // Heat Index — environmental safety metric
 // ============================================================
-// Uses the NOAA/NWS Rothfusz regression in the standard heat-index
-// operating range. Outside that range, the result is left unavailable
+// Uses the NOAA/NWS Rothfusz regression in its intended operating
+// range. Outside that range, the result is explicitly unavailable
 // rather than presenting an unsupported extrapolation.
 
 export type HeatIndexCategory = 'CAUTION' | 'EXTREME_CAUTION' | 'DANGER' | 'EXTREME_DANGER';
@@ -24,15 +24,15 @@ export function calculateHeatIndex(temperatureF: number | null, relativeHumidity
     return { heatIndexF: null, category: null, description: 'Heat index unavailable — relative humidity is outside 0–100%' };
   }
 
-  // NWS heat-index regression is intended for warm conditions.
-  // Below 80°F, use the standard apparent-temperature adjustment only
-  // when the simplified Rothfusz applicability condition is met.
+  // The standard NWS heat-index product is intended for warm conditions.
+  // Do not label cool air as a heat-index category.
   if (t < 80) {
-    return { heatIndexF: t, category: 'CAUTION', description: 'Heat index follows air temperature below the Rothfusz operating range' };
+    return { heatIndexF: null, category: null, description: 'Heat index unavailable — air temperature is below the standard operating range' };
   }
 
+  // At very low humidity, the Rothfusz regression is not reliable.
   if (rh < 40) {
-    return { heatIndexF: t, category: t >= 105 ? 'DANGER' : t >= 90 ? 'EXTREME_CAUTION' : 'CAUTION', description: 'Low humidity limits the standard heat-index regression' };
+    return { heatIndexF: null, category: null, description: 'Heat index unavailable — relative humidity is below the standard regression range' };
   }
 
   let hi = -42.379 + 2.04901523 * t + 10.14333127 * rh
