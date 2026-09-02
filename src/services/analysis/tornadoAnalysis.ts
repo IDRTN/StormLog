@@ -276,7 +276,7 @@ function buildAtmosphericEnvironment(input: AnalysisInput): StormAnalysisResult[
     };
   }
   const values = [advanced.lowLevelShear01KmKt, advanced.deepLayerShear06KmKt, advanced.srh03M2s2, advanced.significantTornadoParameter, advanced.supercellCompositeParameter].filter(v => v != null && Number.isFinite(v));
-  const level: AssessmentLevel = values.length === 0 ? 'UNKNOWN' : advanced.availability === 'PARTIAL' ? 'MODERATE' : 'MODERATE';
+  const level: AssessmentLevel = values.length === 0 ? 'UNKNOWN' : 'MODERATE';
   const factors: string[] = [];
   if (advanced.lowLevelShear01KmKt != null) factors.push(`0-1 km shear: ${advanced.lowLevelShear01KmKt.toFixed(1)} kt`);
   if (advanced.deepLayerShear06KmKt != null) factors.push(`0-6 km bulk shear: ${advanced.deepLayerShear06KmKt.toFixed(1)} kt`);
@@ -323,7 +323,11 @@ export function analyzeStorm(input: AnalysisInput, previousAnalyses?: StormAnaly
   const hasPrecipitation = hasRadar && input.radarData?.hasPrecipitation === true;
   const debrisSignature = tornadicEvidence.debrisSignature;
   const hasCouplet = rotation.hasCouplet;
-  const scanCount = previousAnalyses ? previousAnalyses.length + 1 : 1;
+  // Do not use analysis-history length as a radar scan count. One analysis
+  // can occur without a new radar scan, so that would falsely create
+  // persistence/confidence. Only a provider-validated couplet scan count
+  // may establish radar persistence.
+  const scanCount = hasVelocity ? Math.max(0, rotation.verticalContinuity) : 0;
 
   const overall = calculateProgressiveAssessment(
     environment.level,
