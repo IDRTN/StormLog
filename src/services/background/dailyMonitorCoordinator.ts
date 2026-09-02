@@ -107,12 +107,10 @@ export class DailyMonitorCoordinator {
     await this.ensureForegroundRuntime();
   }
 
-  async collectManual(): Promise<DailyCollectionResult> { await this.initialize(); return this.runSharedCollection('manual'); }
+  async collectManual(): Promise<DailyCollectionResult> { await this.hydrateState(); return this.runSharedCollection('manual'); }
 
   private async resolveAutomaticClaim(): Promise<((attemptAtMs: number, intervalMs: number) => Promise<boolean>) | null> {
     if (this.dependencies.claimAutomatic) return this.dependencies.claimAutomatic;
-    // Only the production coordinator has a foreground service dependency. This
-    // keeps standalone coordinator tests/headless mocks free of native SQLite.
     if (!this.dependencies.foregroundService) return null;
     try {
       const module = await import('./dailyMonitorClaim');
@@ -129,7 +127,6 @@ export class DailyMonitorCoordinator {
     const nowMs = this.now();
     const intervalMs = this.state.intervalMinutes * 60 * 1000;
     if (this.lastAutomaticAttemptMs > 0 && nowMs - this.lastAutomaticAttemptMs < intervalMs) return { success: true, outcome: 'skipped_recent_automatic' };
-
     const claim = await this.resolveAutomaticClaim();
     if (claim) {
       try {
