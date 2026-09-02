@@ -7,5 +7,4 @@ AppRegistry.registerHeadlessTask(STORMLOG_DAILY_MONITOR_HEADLESS_TASK, () => asy
   const { performDailyCollection } = await import('./dailyMonitor');
   const result = await performDailyCollection('automatic');
   console.log('[NATIVE-SCHEDULER] Headless Daily Monitor task finished:', result.success, result.outcome);
-  return result;
 });
