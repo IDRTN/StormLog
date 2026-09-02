@@ -43,6 +43,7 @@ jobs:
             --module commonjs \
             --target ES2022 \
             --moduleResolution node \
+            --ignoreDeprecations 6.0 \
             --esModuleInterop \
             --skipLibCheck \
             --outDir /tmp/stormlog-analysis-tests
@@ -60,6 +61,7 @@ jobs:
             --module commonjs \
             --target ES2022 \
             --moduleResolution node \
+            --ignoreDeprecations 6.0 \
             --esModuleInterop \
             --skipLibCheck \
             --outDir /tmp/stormlog-tornado-tests
