@@ -3,7 +3,7 @@
 // ============================================================
 //
 // Three modes:
-//   1. Radar velocity available → analyze couplets
+//   1. Radar velocity available → analyze validated couplets
 //   2. Radar connected but velocity unavailable → surface fallback
 //      with clear "Radar rotation unavailable" label
 //   3. No radar → surface observations only
@@ -53,30 +53,56 @@ function analyzeRadarRotation(input: AnalysisInput): {
     };
   }
 
-  let maxShear = 0;
-  let maxCouplet: any = null;
-  for (const couplet of radar.couplets) {
-    const shear = couplet.shear ?? 0;
-    if (shear > maxShear) { maxShear = shear; maxCouplet = couplet; }
-  }
+  // Never let a missing/non-finite shear value become zero. A couplet
+  // without a valid gate-to-gate shear measurement is not quantitative
+  // enough to score as radar-confirmed rotation.
+  const validCouplets = radar.couplets.filter(c =>
+    Number.isFinite(c?.shear) && c.shear >= 0 &&
+    Number.isFinite(c?.latitude) && Number.isFinite(c?.longitude)
+  );
 
-  if (!maxCouplet) {
+  if (validCouplets.length === 0) {
     return {
-      hasCouplet: false, coupletStrength: 'NONE',
+      hasCouplet: false, coupletStrength: 'UNAVAILABLE',
       gateToGateShear: null, rotationalVelocity: null,
       coupletDiameter: null, azimuthalShear: null,
       lowLevelRotation: false, verticalContinuity: 0,
-      level: 'LOW', factors: ['No valid couplet in radar return'],
+      level: 'UNKNOWN',
+      factors: ['Radar velocity returned no quantitatively valid rotation couplet measurements'],
+    };
+  }
+
+  let maxShear = -Infinity;
+  let maxCouplet: any = null;
+  for (const couplet of validCouplets) {
+    if (couplet.shear > maxShear) { maxShear = couplet.shear; maxCouplet = couplet; }
+  }
+
+  if (!maxCouplet || !Number.isFinite(maxShear)) {
+    return {
+      hasCouplet: false, coupletStrength: 'UNAVAILABLE',
+      gateToGateShear: null, rotationalVelocity: null,
+      coupletDiameter: null, azimuthalShear: null,
+      lowLevelRotation: false, verticalContinuity: 0,
+      level: 'UNKNOWN', factors: ['No valid quantitative couplet measurement'],
     };
   }
 
   const gateToGateShear = maxShear;
   const strength: string = maxCouplet.strength ?? 'WEAK';
   const rotationalVelocity = gateToGateShear / 2;
-  const coupletDiameter = maxCouplet.distanceKm ? maxCouplet.distanceKm * 2 : null;
-  const azimuthalShear = maxCouplet.azimuthalShear ?? null;
-  const lowLevelRotation = maxCouplet.altitude ? maxCouplet.altitude < 3000 : maxCouplet.lowLevel === true;
-  const verticalContinuity = maxCouplet.scanCount ?? 1;
+  const coupletDiameter = Number.isFinite(maxCouplet.distanceKm) && maxCouplet.distanceKm > 0
+    ? maxCouplet.distanceKm * 2
+    : null;
+  const azimuthalShear = Number.isFinite(maxCouplet.azimuthalShear) ? maxCouplet.azimuthalShear : null;
+  const lowLevelRotation = Number.isFinite(maxCouplet.altitude)
+    ? maxCouplet.altitude < 3000
+    : maxCouplet.lowLevel === true;
+  const validatedScanCount = Number.isFinite(maxCouplet.scanCount) &&
+    Number.isInteger(maxCouplet.scanCount) && maxCouplet.scanCount >= 1
+    ? maxCouplet.scanCount
+    : 1;
+  const verticalContinuity = validatedScanCount;
 
   let level: AssessmentLevel;
   if (strength === 'EXTREME') { level = 'VERY_HIGH'; factors.push('Extreme rotation detected'); }
@@ -112,8 +138,6 @@ function analyzeSurfaceRotation(input: AnalysisInput): {
     .map(o => ({ direction: o.windDirection!, timestamp: o.timestamp }));
 
   const windShift = calculateWindShift(windRecords);
-
-  const cyclonicPattern = rotationPattern.signal === 'STRONG' || rotationPattern.signal === 'MODERATE';
 
   const surfaceData: SurfaceRotationData = {
     convergenceLevel: convergence.level,
@@ -161,7 +185,6 @@ function detectTrend(
   const currentVal = current.gateToGateShear ?? 0;
 
   if (recent.length < 2) {
-    // Check if newly developing
     const prevShear = recent[recent.length - 1]?.gateToGateShear ?? 0;
     if (currentVal > prevShear * 1.5 && currentVal > 20) return 'NEWLY_DEVELOPING';
     return 'PERSISTENT';
@@ -204,7 +227,6 @@ export function analyzeRotation(
       description: radarResult.factors.join('. '),
     };
 
-    // Detect trend from history
     if (previousAnalyses && previousAnalyses.length > 0) {
       baseAssessment.trend = detectTrend(baseAssessment, previousAnalyses);
     }
