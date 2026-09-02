@@ -1,0 +1,50 @@
+name: StormLog Tornado Analysis Tests
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-analysis:
+    name: Validate advanced tornado analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+          cache: npm
+
+      - name: Install locked dependencies
+        env:
+          NPM_CONFIG_LEGACY_PEER_DEPS: 'true'
+        run: npm ci
+
+      - name: TypeScript validation
+        run: npm run typecheck
+
+      - name: Compile advanced environment test
+        run: |
+          rm -rf /tmp/stormlog-analysis-tests
+          npx tsc \
+            src/services/analysis/advancedEnvironment.ts \
+            src/services/analysis/__tests__/advancedEnvironment.runtime.test.ts \
+            --module commonjs \
+            --target ES2022 \
+            --moduleResolution node \
+            --esModuleInterop \
+            --skipLibCheck \
+            --outDir /tmp/stormlog-analysis-tests
+
+      - name: Run advanced environment test
+        run: node /tmp/stormlog-analysis-tests/__tests__/advancedEnvironment.runtime.test.js
