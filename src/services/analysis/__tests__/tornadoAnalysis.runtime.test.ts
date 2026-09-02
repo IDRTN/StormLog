@@ -40,6 +40,32 @@ const radarNoVelocity = analyzeStorm({
 assert(radarNoVelocity.rotation.velocityDataAvailable === false, 'empty velocity array must not count as velocity');
 assert(radarNoVelocity.overallAssessment !== 'HIGH' && radarNoVelocity.overallAssessment !== 'VERY_HIGH', 'missing velocity must prevent high assessment');
 
+const failedRadar = analyzeStorm({
+  ...base,
+  radarData: {
+    available: false,
+    hasPrecipitation: true,
+    velocityPoints: [],
+    couplets: [],
+    stormCells: [],
+    unavailableReason: 'provider failure',
+  },
+});
+assert(failedRadar.dataQuality.radarCoverage === 'UNAVAILABLE', 'failed radar must not count as available');
+assert(failedRadar.stormStructure.radarAvailable === false, 'failed radar must not feed radar structure analysis');
+
+const unknownMotion = analyzeStorm({
+  ...base,
+  radarData: {
+    available: true,
+    velocityPoints: [],
+    couplets: [],
+    stormCells: [{ latitude: 35.1, longitude: -97.0, speed: 30 }],
+  },
+});
+assert(unknownMotion.stormMotion?.approaching === null, 'missing storm motion direction must remain unknown, not false');
+assert(unknownMotion.stormMotion?.directionDegrees === null, 'missing storm motion direction must remain null');
+
 const advanced = analyzeStorm({
   ...base,
   advancedEnvironment: {
