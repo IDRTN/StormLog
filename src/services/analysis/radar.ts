@@ -1,14 +1,14 @@
 // ============================================================
-// Radar Velocity Provider — Real NEXRAD Integration
+// Radar Data Provider Facade
 // ============================================================
 //
-// This module provides the interface for radar data and
-// delegates to the real NEXRAD provider (nexrad.ts) which
-// connects to RainViewer API and NWS metadata.
+// This module exposes the radar contract used by the analysis engine.
+// The current mobile provider uses a RainViewer radar composite plus
+// NWS radar-site metadata. It is NOT a raw NEXRAD Level-II decoder.
 //
-// Doppler velocity data is NOT available through public REST
-// APIs that return point values. The provider clearly reports
-// what IS available vs what is NOT.
+// Doppler velocity, dual-pol fields, quantitative dBZ, and derived
+// storm-cell/couplet data remain unavailable until a real radar
+// processing path is connected.
 
 export interface RadarVelocityPoint {
   latitude: number;
@@ -72,14 +72,12 @@ export interface RadarVelocityProvider {
   isAvailable(): Promise<boolean>;
 }
 
-// Re-export the real NEXRAD provider
 export { fetchNexradData, NexradVelocityProvider } from './nexrad';
 export type { NexradProviderResult, NexradStationInfo, NexradReflectivityResult } from './nexrad';
 
 /**
- * Fetches real NEXRAD data for a location.
- * Returns actual radar availability, station info, and reflectivity.
- * Velocity data is explicitly marked as unavailable.
+ * Fetches the current radar composite and NWS radar-site metadata.
+ * The result explicitly reports unsupported Level-II products as unavailable.
  */
 export async function getRadarData(
   latitude: number,
@@ -111,7 +109,7 @@ export async function getRadarData(
       unavailableReason: result.unavailableReason,
     };
   } catch (error) {
-    console.warn('[Radar] Failed to fetch NEXRAD data:', error);
+    console.warn('[Radar] Failed to fetch radar data:', error);
     return {
       velocityPoints: [],
       couplets: [],
