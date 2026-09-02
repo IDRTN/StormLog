@@ -1,26 +1,19 @@
 // ============================================================
-// Real NEXRAD Radar Provider
+// Radar Composite Provider
 // ============================================================
 //
-// Connects to:
-//   - RainViewer API (real NEXRAD composite reflectivity tiles)
-//   - api.weather.gov (radar station metadata, alerts)
+// Uses RainViewer's public radar composite plus NWS radar-site
+// metadata. This is a radar-availability/imagery provider, not
+// a raw NEXRAD Level-II decoder.
 //
-// Provides:
-//   - Latest radar frame timestamp
-//   - Nearest NEXRAD station ID and distance
-//   - Reflectivity analysis near user location
-//   - Storm cell detection from tile patterns
-//
-// Velocity-based rotation is NOT available through public REST
-// APIs that return point data. This module clearly reports
-// what IS available vs what is NOT.
+// Raw Doppler velocity, dual-pol fields, quantitative dBZ and
+// storm-cell morphology are NOT inferred from PNG file size or
+// other proxies. Those values remain unavailable until a real
+// Level-II/Level-III processing path is connected.
 
 import type { RadarVelocityPoint, RotationCouplet, StormCell } from './radar';
 import { createRateLimitError, guardedRequest } from '../network/requestGuard';
 import { fetchNwsPointData } from '../network/nwsPoints';
-
-// ---- Types ----
 
 export interface NexradFrameInfo {
   time: number;
@@ -57,31 +50,9 @@ export interface NexradProviderResult {
   unavailableReason: string;
 }
 
-// ---- Constants ----
-
 const RAINVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json';
 const RAINVIEWER_TILE_HOST = 'https://tilecache.rainviewer.com';
-
-// Tile zoom level for local analysis (higher = more detail)
 const ANALYSIS_ZOOM = 9;
-
-// ---- Utility functions ----
-
-function haversineKm(
-  lat1: number, lon1: number,
-  lat2: number, lon2: number
-): number {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-    Math.cos((lat2 * Math.PI) / 180) *
-    Math.sin(dLon / 2) *
-    Math.sin(dLon / 2);
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
 
 function latLonToTile(lat: number, lon: number, zoom: number): { x: number; y: number } {
   const n = Math.pow(2, zoom);
@@ -92,8 +63,6 @@ function latLonToTile(lat: number, lon: number, zoom: number): { x: number; y: n
   );
   return { x, y };
 }
-
-// ---- RainViewer API ----
 
 async function fetchLatestRadarFrames(): Promise<NexradFrameInfo[]> {
   try {
@@ -109,63 +78,47 @@ async function fetchLatestRadarFrames(): Promise<NexradFrameInfo[]> {
         if (!response.ok) return [];
 
         const data = await response.json();
-        const past = data?.radar?.past ?? [];
-        const nowcast = data?.radar?.nowcast ?? [];
+        const past = Array.isArray(data?.radar?.past) ? data.radar.past : [];
+        const nowcast = Array.isArray(data?.radar?.nowcast) ? data.radar.nowcast : [];
 
-        // Combine past and nowcast frames
-        const allFrames: NexradFrameInfo[] = [
-          ...past.map((f: any) => ({ time: f.time, path: f.path })),
-          ...nowcast.map((f: any) => ({ time: f.time, path: f.path })),
-        ];
-
-        return allFrames.sort((a, b) => b.time - a.time); // Most recent first
+        return [...past, ...nowcast]
+          .filter((frame: any) => Number.isFinite(frame?.time) && typeof frame?.path === 'string')
+          .map((frame: any) => ({ time: frame.time, path: frame.path }))
+          .sort((a, b) => b.time - a.time);
       },
     });
   } catch (error) {
-    console.warn('[NEXRAD] Failed to fetch RainViewer frames:', error);
+    console.warn('[Radar composite] Failed to fetch RainViewer frames:', error);
     return [];
   }
 }
 
-// ---- NWS Radar Station Lookup ----
-
 async function fetchNearestRadarStation(
   latitude: number,
-  longitude: number
+  longitude: number,
 ): Promise<NexradStationInfo | null> {
   try {
     const point = await fetchNwsPointData(latitude, longitude);
     const stationId = point?.radarStation;
     if (!stationId) return null;
 
-    // We don't get exact station coordinates from this endpoint,
-    // but we know the user is assigned to this station.
-    // For range check, we use the fact that NWS assigns stations
-    // based on coverage area, so if they returned one, user is in range.
     return {
       stationId,
-      latitude: 0, // Not provided by API
+      latitude: 0,
       longitude: 0,
-      distanceKm: 0, // Will be estimated
+      distanceKm: 0,
       withinRange: true,
     };
   } catch (error) {
-    console.warn('[NEXRAD] Failed to fetch radar station:', error);
+    console.warn('[Radar composite] Failed to fetch radar station:', error);
     return null;
   }
 }
 
-// ---- Reflectivity Analysis ----
-
-/**
- * Analyze reflectivity near a point by fetching a small tile
- * and checking its properties. A transparent/empty tile will be
- * significantly smaller than one with precipitation data.
- */
-async function analyzeReflectivityNearPoint(
+async function buildRadarTile(
   latitude: number,
   longitude: number,
-  framePath: string
+  framePath: string,
 ): Promise<NexradReflectivityResult> {
   try {
     const cacheKey = `${latitude.toFixed(3)},${longitude.toFixed(3)}:${framePath}`;
@@ -175,12 +128,7 @@ async function analyzeReflectivityNearPoint(
       cacheTtlMs: 60 * 1000,
       execute: async () => {
         const { x, y } = latLonToTile(latitude, longitude, ANALYSIS_ZOOM);
-        const tileSize = 256;
-        const colorScheme = 2; // Universal Blue
-        const options = '1_1'; // Smooth + snow
-
-        const tileUrl = `${RAINVIEWER_TILE_HOST}${framePath}/${tileSize}/${ANALYSIS_ZOOM}/${x}/${y}/${colorScheme}/${options}.png`;
-
+        const tileUrl = `${RAINVIEWER_TILE_HOST}${framePath}/256/${ANALYSIS_ZOOM}/${x}/${y}/2/1_1.png`;
         const response = await fetch(tileUrl);
         if (response.status === 429) throw createRateLimitError('RainViewer tile', response);
         if (!response.ok) {
@@ -191,38 +139,26 @@ async function analyzeReflectivityNearPoint(
             hasPrecipitation: false,
             hasStrongStorm: false,
             tileUrl: null,
-            description: 'Failed to fetch radar tile',
+            description: `Radar imagery request failed (HTTP ${response.status})`,
           };
         }
 
-        const blob = await response.blob();
-        const sizeBytes = blob.size;
-
-        // We can detect IF precipitation imagery exists by checking if the tile
-        // has content, but we CANNOT derive quantitative dBZ values from PNG file size.
-        // Tile file size is not a valid proxy for radar reflectivity.
-
-        const hasPrecipitation = sizeBytes > 1500;
-        const hasStrongStorm = false; // Cannot determine without decoded pixel data
-
-        // Quantitative dBZ is UNAVAILABLE — we only have imagery, not decoded values
-        const maxReflectivityDbz: number | null = null;
-
+        // A successful image fetch proves imagery availability only. PNG byte
+        // size is not a valid proxy for precipitation intensity or dBZ.
+        await response.blob();
         return {
           available: true,
           timestamp: Date.now(),
-          maxReflectivityDbz,
-          hasPrecipitation,
-          hasStrongStorm,
+          maxReflectivityDbz: null,
+          hasPrecipitation: false,
+          hasStrongStorm: false,
           tileUrl,
-          description: hasPrecipitation
-            ? 'Precipitation imagery detected — quantitative dBZ unavailable'
-            : 'No significant precipitation imagery',
+          description: 'Radar composite imagery available; quantitative dBZ and pixel-level precipitation classification are unavailable in the mobile client',
         };
       },
     });
   } catch (error) {
-    console.warn('[NEXRAD] Reflectivity analysis failed:', error);
+    console.warn('[Radar composite] Tile fetch failed:', error);
     return {
       available: false,
       timestamp: null,
@@ -235,15 +171,13 @@ async function analyzeReflectivityNearPoint(
   }
 }
 
-// ---- Main Provider Function ----
-
 export async function fetchNexradData(
   latitude: number,
-  longitude: number
+  longitude: number,
 ): Promise<NexradProviderResult> {
   try {
     return await guardedRequest<NexradProviderResult>({
-      service: 'NEXRAD',
+      service: 'Radar composite',
       key: `${latitude.toFixed(3)},${longitude.toFixed(3)}`,
       cacheTtlMs: 60 * 1000,
       execute: async () => {
@@ -255,11 +189,10 @@ export async function fetchNexradData(
           velocityPoints: [],
           couplets: [],
           stormCells: [],
-          velocityAvailable: false as const,
-          unavailableReason: 'NEXRAD data not yet fetched',
+          velocityAvailable: false,
+          unavailableReason: 'Radar composite data not yet fetched',
         };
 
-        // Fetch radar frames and station info in parallel
         const [frames, station] = await Promise.all([
           fetchLatestRadarFrames(),
           fetchNearestRadarStation(latitude, longitude),
@@ -269,19 +202,12 @@ export async function fetchNexradData(
           return {
             ...emptyResult,
             station,
-            unavailableReason: 'No radar frames available from RainViewer API',
+            unavailableReason: 'No radar composite frames available from RainViewer',
           };
         }
 
         const latestFrame = frames[0];
-
-        // Analyze reflectivity at user location
-        const reflectivity = await analyzeReflectivityNearPoint(
-          latitude,
-          longitude,
-          latestFrame.path
-        );
-
+        const reflectivity = await buildRadarTile(latitude, longitude, latestFrame.path);
         const available = station != null && reflectivity.available;
 
         return {
@@ -292,15 +218,15 @@ export async function fetchNexradData(
           velocityPoints: [],
           couplets: [],
           stormCells: [],
-          velocityAvailable: false as const,
+          velocityAvailable: false,
           unavailableReason: available
-            ? 'Doppler velocity data requires backend processing of raw NEXRAD Level II files. Surface observations provide supporting rotation indicators only.'
-            : 'Radar data unavailable — no coverage or API failure.',
+            ? 'Radar imagery available. Raw NEXRAD Level-II velocity/dual-pol processing is not connected, so rotation and quantitative reflectivity remain unavailable.'
+            : 'Radar imagery unavailable — no coverage or API failure.',
         };
       },
     });
   } catch (error) {
-    console.error('[NEXRAD] Provider error:', error);
+    console.error('[Radar composite] Provider error:', error);
     return {
       available: false,
       station: null,
@@ -309,25 +235,23 @@ export async function fetchNexradData(
       velocityPoints: [],
       couplets: [],
       stormCells: [],
-      velocityAvailable: false as const,
-      unavailableReason: `NEXRAD provider error: ${error instanceof Error ? error.message : 'Unknown'}`,
+      velocityAvailable: false,
+      unavailableReason: `Radar provider error: ${error instanceof Error ? error.message : 'Unknown'}`,
     };
   }
 }
 
-// ---- Compatibility with existing RadarVelocityProvider interface ----
-
 export class NexradVelocityProvider {
   async getVelocityNearPoint(): Promise<RadarVelocityPoint[]> {
-    return []; // Velocity not available through public REST APIs
+    return [];
   }
 
   async getRotationCouplets(): Promise<RotationCouplet[]> {
-    return []; // Requires raw Level II processing
+    return [];
   }
 
   async getStormCells(): Promise<StormCell[]> {
-    return []; // Would require image analysis of multiple tiles
+    return [];
   }
 
   async isAvailable(): Promise<boolean> {
