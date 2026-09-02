@@ -100,6 +100,16 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
   const emoji = getLevelEmoji(result.overallAssessment);
   const label = getLevelLabel(result.overallAssessment);
   const motion = result.stormMotion;
+  const heatIndex = result.environment.heatIndexF;
+  const heatIndexCategory = result.environment.heatIndexCategory;
+  const heatIndexRisk = heatIndexCategory
+    ? heatIndexCategory.replace('_', ' ')
+    : 'UNAVAILABLE';
+  const heatIndexColor = heatIndexCategory === 'DANGER' || heatIndexCategory === 'EXTREME_DANGER'
+    ? '#DC2626'
+    : heatIndexCategory === 'EXTREME_CAUTION'
+      ? '#F0883E'
+      : '#F0C000';
 
   return (
     <View style={s.card}>
@@ -108,7 +118,6 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
         <Text style={s.radarStatus}>Radar: {radarStatus}</Text>
       )}
 
-      {/* Radar Capabilities */}
       <View style={s.radarCaps}>
         <Text style={s.radarCapsTitle}>RADAR CAPABILITIES</Text>
         <View style={s.radarCapsRow}>
@@ -137,7 +146,6 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
         </View>
       </View>
 
-      {/* Assessment Banner */}
       <View style={[s.banner, { borderLeftColor: color }]}>
         <Text style={s.bannerEmoji}>{emoji}</Text>
         <View style={{ flex: 1 }}>
@@ -148,7 +156,6 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
         </View>
       </View>
 
-      {/* SURFACE ENVIRONMENT */}
       <Section title="SURFACE ENVIRONMENT">
         <Row
           label="Assessment"
@@ -161,9 +168,18 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
         {result.environment.pressureTrend !== 'STABLE' && (
           <Row label="Pressure Trend" value={result.environment.pressureTrend} />
         )}
+        <Row
+          label="Heat Index"
+          value={heatIndex != null ? `${heatIndex.toFixed(1)}°F` : 'Unavailable'}
+          valueColor={heatIndex != null ? heatIndexColor : '#8B949E'}
+        />
+        <Row
+          label="Heat Risk"
+          value={heatIndexCategory ? heatIndexRisk : 'Unavailable'}
+          valueColor={heatIndexCategory ? heatIndexColor : '#8B949E'}
+        />
       </Section>
 
-      {/* ATMOSPHERIC TORNADO ENVIRONMENT */}
       <Section title="ATMOSPHERIC TORNADO ENVIRONMENT">
         <Row
           label="Status"
@@ -172,7 +188,6 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
         />
       </Section>
 
-      {/* STORM */}
       <Section title="STORM">
         <Row
           label="Structure"
@@ -201,7 +216,6 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
         )}
       </Section>
 
-      {/* ROTATION */}
       <Section title="ROTATION">
         {!result.rotation.velocityDataAvailable ? (
           <>
@@ -211,7 +225,7 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
               valueColor="#F0C000"
             />
             <Text style={s.unavailableNote}>
-              Doppler velocity requires backend processing.{'\n'}
+              Doppler velocity requires backend processing.{"\n"}
               Surface observations shown below.
             </Text>
           </>
@@ -226,7 +240,6 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
           </>
         )}
 
-        {/* Trend */}
         <Row
           label="Trend"
           value={
@@ -244,7 +257,6 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
           }
         />
 
-        {/* Surface indicators */}
         {result.rotation.surfaceWindPattern && (
           <>
             <Row label="Convergence" value={result.rotation.surfaceWindPattern.convergenceLevel} />
@@ -259,7 +271,6 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
         )}
       </Section>
 
-      {/* TORNADIC EVIDENCE */}
       <Section title="TORNADIC EVIDENCE">
         <Row
           label="Assessment"
@@ -285,7 +296,6 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
         )}
       </Section>
 
-      {/* DATA FRESHNESS */}
       {result.dataFreshness && (
         <Section title="DATA FRESHNESS">
           <Row
@@ -296,7 +306,6 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
         </Section>
       )}
 
-      {/* NWS */}
       <Section title="NWS">
         <View style={[
           s.nwsBox,
@@ -319,25 +328,21 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
         </View>
       </Section>
 
-      {/* WHAT WOULD INCREASE CONCERN */}
       {result.whatWouldIncreaseConcern?.length > 0 && (
         <Section title="WHAT WOULD INCREASE CONCERN">
           <FactorList factors={result.whatWouldIncreaseConcern} />
         </Section>
       )}
 
-      {/* WHY Button */}
       <TouchableOpacity style={s.whyBtn} onPress={() => setShowWhy(true)}>
         <Ionicons name="help-circle" size={16} color={Colors.primary} />
         <Text style={s.whyBtnText}>WHY?</Text>
       </TouchableOpacity>
 
-      {/* Disclaimer */}
       <Text style={s.disclaimer}>
         Analytical estimate — NOT an official tornado warning. Use official NWS warnings and radar for life-safety decisions.
       </Text>
 
-      {/* WHY Modal */}
       <Modal visible={showWhy} animationType="slide" transparent>
         <View style={s.modalOverlay}>
           <View style={s.modalContent}>
@@ -383,7 +388,7 @@ const s = StyleSheet.create({
     padding: SPACING.md,
     marginBottom: SPACING.md,
     borderWidth: 1,
-    borderColor: "#30363D",
+    borderColor: '#30363D',
   },
   header: {
     fontSize: 16,
@@ -395,14 +400,9 @@ const s = StyleSheet.create({
   noData: { color: Colors.warning, fontSize: 15, fontWeight: '600', textAlign: 'center', marginTop: 8 },
   subtext: { color: Colors.textSecondary, fontSize: 13, textAlign: 'center', marginTop: 4 },
   banner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderLeftWidth: 4,
-    paddingLeft: 12,
-    paddingVertical: 10,
-    marginBottom: 12,
-    backgroundColor: 'rgba(255,255,255,0.03)',
-    borderRadius: 8,
+    flexDirection: 'row', alignItems: 'center', borderLeftWidth: 4,
+    paddingLeft: 12, paddingVertical: 10, marginBottom: 12,
+    backgroundColor: 'rgba(255,255,255,0.03)', borderRadius: 8,
   },
   bannerEmoji: { fontSize: 28, marginRight: 12 },
   bannerLevel: { fontSize: 22, fontWeight: '800', letterSpacing: 0.5 },
@@ -422,9 +422,7 @@ const s = StyleSheet.create({
     fontSize: 11, color: '#F0C000', fontStyle: 'italic',
     marginTop: 4, lineHeight: 16,
   },
-  nwsBox: {
-    padding: 10, borderRadius: 8, borderWidth: 1,
-  },
+  nwsBox: { padding: 10, borderRadius: 8, borderWidth: 1 },
   nwsDanger: { backgroundColor: 'rgba(220,38,38,0.15)', borderColor: '#DC2626' },
   nwsWatch: { backgroundColor: 'rgba(240,136,62,0.15)', borderColor: '#F0883E' },
   nwsWarn: { backgroundColor: 'rgba(240,200,0,0.15)', borderColor: '#F0C000' },
@@ -437,7 +435,7 @@ const s = StyleSheet.create({
   whyBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     paddingVertical: 8, marginTop: 8, gap: 6,
-    borderWidth: 1, borderColor: "#30363D", borderRadius: 8,
+    borderWidth: 1, borderColor: '#30363D', borderRadius: 8,
   },
   whyBtnText: { color: Colors.primary, fontSize: 13, fontWeight: '600' },
   disclaimer: {
@@ -451,7 +449,7 @@ const s = StyleSheet.create({
   },
   modalHeader: {
     flexDirection: 'row', justifyContent: 'space-between',
-    alignItems: 'center', padding: 16, borderBottomWidth: 1, borderBottomColor: "#30363D",
+    alignItems: 'center', padding: 16, borderBottomWidth: 1, borderBottomColor: '#30363D',
   },
   modalTitle: { fontSize: 17, fontWeight: '700', color: Colors.text },
   modalScroll: { paddingHorizontal: 16 },
