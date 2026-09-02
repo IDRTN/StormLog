@@ -97,7 +97,7 @@ export interface StormMotion {
   bearingDegrees: number | null;
   speedMph: number | null;
   directionDegrees: number | null;
-  approaching: boolean;
+  approaching: boolean | null;
   description: string;
 }
 
@@ -187,12 +187,7 @@ export interface AnalysisInput {
   latitude: number;
   longitude: number;
   cape: number | null;
-
-  // Optional provider-derived vertical environment. It is deliberately
-  // separate from surface observations so missing upper-air data cannot be
-  // mistaken for zero shear/helicity.
   advancedEnvironment?: AdvancedEnvironmentInput | null;
-
   recentObservations: {
     timestamp: number;
     temperature: number | null;
@@ -205,7 +200,6 @@ export interface AnalysisInput {
     latitude: number;
     longitude: number;
   }[];
-
   nearbyStations: WindVector[];
   nwsAlerts: { event: string; severity: string | null; headline: string | null }[];
   radarData?: RadarAnalysisInput;
@@ -233,95 +227,16 @@ export interface RadarAnalysisInput {
 }
 
 export type PressureTrendDirection = 'RISING' | 'STABLE' | 'FALLING';
-
-export interface AnalysisSnapshotData {
-  id: number;
-  stormEventId: number;
-  timestamp: number;
-  tornadoPossibilityLevel: string;
-  rotationSignal: string;
-  convergence: string;
-  windShear: string;
-  pressureTrend: string;
-  windDirectionChange: number | null;
-  lightningTrend: string;
-  availableObservationCount: number;
-  confidence: number;
-}
-
+export interface AnalysisSnapshotData { id: number; stormEventId: number; timestamp: number; tornadoPossibilityLevel: string; rotationSignal: string; convergence: string; windShear: string; pressureTrend: string; windDirectionChange: number | null; lightningTrend: string; availableObservationCount: number; confidence: number; }
 export type PossibilityLevel = 'LOW' | 'ELEVATED' | 'MODERATE' | 'HIGH';
 export type RotationSignal = 'NONE' | 'WEAK' | 'MODERATE' | 'STRONG';
 export type ConvergenceLevel = 'LOW' | 'MODERATE' | 'HIGH';
 export type WindShearLevel = 'NONE' | 'WEAK' | 'MODERATE' | 'STRONG';
 export type LightningTrend = 'NONE' | 'DECREASING' | 'STABLE' | 'INCREASING';
-
-export interface WindVector {
-  speed: number;
-  direction: number;
-  latitude: number;
-  longitude: number;
-  stationId?: string;
-  timestamp?: number;
-}
-
-export interface AnalysisFactor {
-  name: string;
-  score: number;
-  available: boolean;
-  description: string;
-}
-
-export interface AnalysisScores {
-  windField: AnalysisFactor;
-  convergence: AnalysisFactor;
-  directionalShear: AnalysisFactor;
-  pressureTendency: AnalysisFactor;
-  windShift: AnalysisFactor;
-  thermodynamic: AnalysisFactor;
-  lightning: AnalysisFactor;
-  nwsAlerts: AnalysisFactor;
-}
-
-export interface TornadoPossibilityResult {
-  level: PossibilityLevel;
-  confidence: number;
-  rotationSignal: RotationSignal;
-  convergenceLevel: ConvergenceLevel;
-  windShear: WindShearLevel;
-  pressureTrend: PressureTrendDirection;
-  windShiftDegrees: number | null;
-  windShiftDuration: number | null;
-  lightningTrend: LightningTrend;
-  activeNwsAlerts: string[];
-  scores: AnalysisScores;
-  factorsIncreasing: string[];
-  factorsLimiting: string[];
-  observationCount: number;
-  timestamp: number;
-}
-
-export interface PressureRecord {
-  timestamp: number;
-  pressure: number;
-}
-
-export interface WindDirectionRecord {
-  timestamp: number;
-  direction: number;
-  speed: number;
-}
-
-export interface AnalysisSnapshot {
-  id: number;
-  stormEventId: number;
-  timestamp: number;
-  tornadoPossibilityLevel: PossibilityLevel;
-  rotationSignal: RotationSignal;
-  convergence: ConvergenceLevel;
-  windShear: WindShearLevel;
-  pressureTrend: PressureTrendDirection;
-  windDirectionChange: number | null;
-  lightningTrend: LightningTrend;
-  availableObservationCount: number;
-  confidence: number;
-}
+export interface WindVector { speed: number; direction: number; latitude: number; longitude: number; stationId?: string; timestamp?: number; }
+export interface AnalysisFactor { name: string; score: number; available: boolean; description: string; }
+export interface AnalysisScores { windField: AnalysisFactor; convergence: AnalysisFactor; directionalShear: AnalysisFactor; pressureTendency: AnalysisFactor; windShift: AnalysisFactor; thermodynamic: AnalysisFactor; lightning: AnalysisFactor; nwsAlerts: AnalysisFactor; }
+export interface TornadoPossibilityResult { level: PossibilityLevel; confidence: number; rotationSignal: RotationSignal; convergenceLevel: ConvergenceLevel; windShear: WindShearLevel; pressureTrend: PressureTrendDirection; windShiftDegrees: number | null; windShiftDuration: number | null; lightningTrend: LightningTrend; activeNwsAlerts: string[]; scores: AnalysisScores; factorsIncreasing: string[]; factorsLimiting: string[]; observationCount: number; timestamp: number; }
+export interface PressureRecord { timestamp: number; pressure: number; }
+export interface WindDirectionRecord { timestamp: number; direction: number; speed: number; }
+export interface AnalysisSnapshot { id: number; stormEventId: number; timestamp: number; tornadoPossibilityLevel: PossibilityLevel; rotationSignal: RotationSignal; convergence: ConvergenceLevel; windShear: WindShearLevel; pressureTrend: PressureTrendDirection; windDirectionChange: number | null; lightningTrend: LightningTrend; availableObservationCount: number; confidence: number; }
