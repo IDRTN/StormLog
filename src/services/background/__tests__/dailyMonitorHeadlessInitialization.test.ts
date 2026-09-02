@@ -3,6 +3,8 @@ import { DailyMonitorCoordinator, type DailyMonitorCoordinatorDependencies } fro
 function createDeps() {
   const storage = new Map<string, string>();
   let executionCount = 0;
+  let backgroundRegisterCount = 0;
+  let foregroundStartCount = 0;
   let now = 1_000_000;
 
   const deps: DailyMonitorCoordinatorDependencies = {
@@ -23,17 +25,27 @@ function createDeps() {
     },
     background: {
       isRegistered: async () => false,
-      register: async () => undefined,
+      register: async () => { backgroundRegisterCount += 1; },
       unregister: async () => undefined,
     },
     foregroundService: {
-      start: async () => ({ success: true }),
+      start: async () => {
+        foregroundStartCount += 1;
+        return { success: true };
+      },
       stop: async () => undefined,
       isRunning: async () => false,
     },
   };
 
-  return { deps, storage, getExecutionCount: () => executionCount, setNow: (value: number) => { now = value; } };
+  return {
+    deps,
+    storage,
+    getExecutionCount: () => executionCount,
+    getBackgroundRegisterCount: () => backgroundRegisterCount,
+    getForegroundStartCount: () => foregroundStartCount,
+    setNow: (value: number) => { now = value; },
+  };
 }
 
 let passed = 0;
@@ -53,7 +65,7 @@ async function test(name: string, task: () => Promise<void>) {
 
 void (async () => {
   await test('headless automatic collection hydrates persisted state before gating', async () => {
-    const { deps, storage, getExecutionCount, setNow } = createDeps();
+    const { deps, storage, getExecutionCount, getBackgroundRegisterCount, getForegroundStartCount, setNow } = createDeps();
     storage.set('daily_monitor_enabled', 'true');
     storage.set('daily_monitor_interval', '15');
     storage.set('daily_monitor_last_automatic_attempt', '1');
@@ -67,10 +79,12 @@ void (async () => {
     if (getExecutionCount() !== 1) throw new Error(`expected one collection, got ${getExecutionCount()}`);
     if (coordinator.getState().isActive !== true) throw new Error('persisted active state was not restored');
     if (coordinator.getState().intervalMinutes !== 15) throw new Error('persisted interval was not restored');
+    if (getBackgroundRegisterCount() !== 0) throw new Error('headless collection must not register BackgroundFetch');
+    if (getForegroundStartCount() !== 0) throw new Error('headless collection must not start the foreground service');
   });
 
-  await test('concurrent headless initialization calls share one initialization', async () => {
-    const { deps, storage } = createDeps();
+  await test('concurrent headless automatic calls share one hydration', async () => {
+    const { deps, storage, getBackgroundRegisterCount, getForegroundStartCount } = createDeps();
     storage.set('daily_monitor_enabled', 'true');
     storage.set('daily_monitor_interval', '15');
 
@@ -83,16 +97,27 @@ void (async () => {
 
     const coordinator = new DailyMonitorCoordinator(deps);
     await Promise.all([
-      coordinator.initialize(),
       coordinator.collectAutomatic(),
-      coordinator.initialize(),
+      coordinator.collectAutomatic(),
+      coordinator.collectAutomatic(),
     ]);
 
-    // One check hydrates persisted state and one is performed by the
-    // serialized registration step. The important invariant is that the
-    // concurrent calls do not start multiple initialization sequences.
-    if (registrationChecks !== 2) throw new Error(`expected two serialized registration checks, got ${registrationChecks}`);
-    if (coordinator.getState().loading) throw new Error('coordinator remained loading');
+    if (registrationChecks !== 1) throw new Error(`expected one hydration registration check, got ${registrationChecks}`);
+    if (getBackgroundRegisterCount() !== 0) throw new Error('headless calls must not register BackgroundFetch');
+    if (getForegroundStartCount() !== 0) throw new Error('headless calls must not start foreground service');
+  });
+
+  await test('foreground initialization can activate runtime after hydration', async () => {
+    const { deps, storage, getBackgroundRegisterCount, getForegroundStartCount } = createDeps();
+    storage.set('daily_monitor_enabled', 'true');
+    storage.set('daily_monitor_interval', '15');
+
+    const coordinator = new DailyMonitorCoordinator(deps);
+    await coordinator.collectAutomatic();
+    await coordinator.initialize();
+
+    if (getBackgroundRegisterCount() !== 1) throw new Error(`expected one foreground BackgroundFetch registration, got ${getBackgroundRegisterCount()}`);
+    if (getForegroundStartCount() !== 1) throw new Error(`expected one foreground service start, got ${getForegroundStartCount()}`);
   });
 
   console.log(`Headless initialization tests: ${passed} passed, ${failed} failed`);
