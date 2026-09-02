@@ -50,7 +50,6 @@ function normalizeDegrees(value: number): number {
 
 function windVector(speedKt: number, directionDeg: number): WindVector {
   const direction = (normalizeDegrees(directionDeg) * Math.PI) / 180;
-  // Meteorological direction is where wind comes FROM.
   return {
     u: -speedKt * Math.sin(direction),
     v: -speedKt * Math.cos(direction),
@@ -110,11 +109,6 @@ function stormMotionVector(directionDeg: number, speedKt: number): WindVector {
   };
 }
 
-/**
- * Integrates storm-relative helicity using the hodograph area formulation.
- * The mathematical form is ∫[(V-C) × dV], with positive values representing
- * the conventional cyclonic-sign SRH for the supplied storm motion.
- */
 function stormRelativeHelicity(
   levels: SoundingLevel[],
   bottomM: number,
@@ -123,6 +117,7 @@ function stormRelativeHelicity(
   motionSpeedKt: number | null,
 ): number | null {
   if (motionDirectionDeg == null || motionSpeedKt == null) return null;
+  if (!Number.isFinite(motionDirectionDeg) || !Number.isFinite(motionSpeedKt)) return null;
 
   const bottom = vectorAtHeight(levels, bottomM);
   const top = vectorAtHeight(levels, topM);
@@ -138,18 +133,16 @@ function stormRelativeHelicity(
 
   const points: Array<{ heightM: number; vector: WindVector }> = [
     { heightM: bottomM, vector: srBottom },
-    ...selected.map(level => ({
-      heightM: level.heightM,
-      vector: (() => {
-        const raw = windVector(level.windSpeedKt, level.windDirectionDeg);
-        return { u: raw.u - motion.u, v: raw.v - motion.v };
-      })(),
-    })),
+    ...selected.map(level => {
+      const raw = windVector(level.windSpeedKt, level.windDirectionDeg);
+      return {
+        heightM: level.heightM,
+        vector: { u: raw.u - motion.u, v: raw.v - motion.v },
+      };
+    }),
     { heightM: topM, vector: srTop },
   ];
 
-  // Hodograph integral: u dv - v du. The previous implementation used the
-  // reverse cross-product order, which inverted the SRH sign.
   let areaKt2 = 0;
   for (let i = 1; i < points.length; i += 1) {
     const previous = points[i - 1].vector;
@@ -157,11 +150,9 @@ function stormRelativeHelicity(
     areaKt2 += previous.u * current.v - previous.v * current.u;
   }
 
-  // 1 kt = 0.514444 m/s, so kt² -> m²/s².
   return areaKt2 * 0.514444 * 0.514444;
 }
 
-/** Bolton-style LCL estimate from a true surface temperature/dewpoint pair. */
 function calculateLclHeightM(temperatureC: number, dewPointC: number): number | null {
   if (!Number.isFinite(temperatureC) || !Number.isFinite(dewPointC)) return null;
 
@@ -186,7 +177,16 @@ function deriveCompositeParameters(
   shear06: number | null,
   lclM: number | null,
 ): { stp: number | null; scp: number | null } {
-  if (capeJkg == null || srh01 == null || shear06 == null || lclM == null) {
+  if (
+    capeJkg == null ||
+    !Number.isFinite(capeJkg) ||
+    srh01 == null ||
+    !Number.isFinite(srh01) ||
+    shear06 == null ||
+    !Number.isFinite(shear06) ||
+    lclM == null ||
+    !Number.isFinite(lclM)
+  ) {
     return { stp: null, scp: null };
   }
 
@@ -194,13 +194,15 @@ function deriveCompositeParameters(
   const srhTerm = srh01 / 150;
   const shearTerm = shear06 / 20;
   const lclTerm = clamp((2000 - lclM) / 1000, 0, 1.5);
-  const cinTerm = cinJkg == null ? null : clamp((200 + cinJkg) / 150, 0, 1.33);
+  const cinTerm = cinJkg == null || !Number.isFinite(cinJkg)
+    ? null
+    : clamp((200 + cinJkg) / 150, 0, 1.33);
 
   const stp = cinTerm == null
     ? null
     : clamp(capeTerm * srhTerm * shearTerm * lclTerm * cinTerm, -10, 10);
 
-  const scp = srh03 == null
+  const scp = srh03 == null || !Number.isFinite(srh03)
     ? null
     : clamp((capeJkg / 1000) * (shear06 / 20) * Math.max(0, srh03 / 50), 0, 20);
 
@@ -240,13 +242,20 @@ export function analyzeAdvancedEnvironment(input: AdvancedEnvironmentInput): Adv
   const srh01M2s2 = stormRelativeHelicity(levels, 0, 1000, input.stormMotionDirectionDeg ?? null, input.stormMotionSpeedKt ?? null);
   const srh03M2s2 = stormRelativeHelicity(levels, 0, 3000, input.stormMotionDirectionDeg ?? null, input.stormMotionSpeedKt ?? null);
   const { stp, scp } = deriveCompositeParameters(
-    input.capeJkg ?? null,
-    input.cinJkg ?? null,
+    Number.isFinite(input.capeJkg ?? NaN) ? input.capeJkg ?? null : null,
+    Number.isFinite(input.cinJkg ?? NaN) ? input.cinJkg ?? null : null,
     srh01M2s2,
     srh03M2s2,
     deepLayerShear06KmKt,
     lclHeightM,
   );
+
+  if (input.capeJkg != null && !Number.isFinite(input.capeJkg)) {
+    limitations.push('CAPE unavailable — non-finite value rejected');
+  }
+  if (input.cinJkg != null && !Number.isFinite(input.cinJkg)) {
+    limitations.push('CIN unavailable — non-finite value rejected');
+  }
 
   const availableValues = [
     lowLevelShear01KmKt,
@@ -269,8 +278,8 @@ export function analyzeAdvancedEnvironment(input: AdvancedEnvironmentInput): Adv
     srh01M2s2,
     srh03M2s2,
     lclHeightM,
-    capeJkg: input.capeJkg ?? null,
-    cinJkg: input.cinJkg ?? null,
+    capeJkg: Number.isFinite(input.capeJkg ?? NaN) ? input.capeJkg ?? null : null,
+    cinJkg: Number.isFinite(input.cinJkg ?? NaN) ? input.cinJkg ?? null : null,
     significantTornadoParameter: stp,
     supercellCompositeParameter: scp,
     availability,
