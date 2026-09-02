@@ -11,9 +11,7 @@ export async function claimAutomaticCollection(attemptAtMs: number, intervalMs: 
         last_attempt_ms INTEGER NOT NULL DEFAULT 0
       );
     `);
-    await db.runAsync(
-      'INSERT OR IGNORE INTO daily_monitor_automatic_gate (id, last_attempt_ms) VALUES (1, 0)',
-    );
+    await db.runAsync('INSERT OR IGNORE INTO daily_monitor_automatic_gate (id, last_attempt_ms) VALUES (1, 0)');
     const result = await db.runAsync(
       `UPDATE daily_monitor_automatic_gate
        SET last_attempt_ms = ?
