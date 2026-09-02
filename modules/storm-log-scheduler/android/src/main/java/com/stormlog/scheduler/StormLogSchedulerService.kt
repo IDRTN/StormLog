@@ -1,8 +1,10 @@
 package com.stormlog.scheduler
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -48,14 +50,43 @@ class StormLogSchedulerService : Service() {
     }
 
     fun stop(context: Context) {
+      cancelExactAlarm(context)
       context.stopService(Intent(context, StormLogSchedulerService::class.java))
+    }
+
+    fun scheduleNextExactAlarm(context: Context, intervalMinutes: Int) {
+      val alarmManager = context.getSystemService(AlarmManager::class.java) ?: return
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) {
+        android.util.Log.w("StormLogScheduler", "Exact alarm permission unavailable; Handler fallback remains active")
+        return
+      }
+
+      val safeInterval = intervalMinutes.coerceAtLeast(1)
+      val intervalMs = safeInterval.toLong() * 60_000L
+      val now = System.currentTimeMillis()
+      val nextBoundary = ((now / intervalMs) + 1L) * intervalMs
+      val pendingIntent = StormLogSchedulerAlarmReceiver.pendingIntent(context)
+      alarmManager.setExactAndAllowWhileIdle(
+        AlarmManager.RTC_WAKEUP,
+        nextBoundary,
+        pendingIntent
+      )
+      android.util.Log.d(
+        "StormLogScheduler",
+        "Exact Daily Monitor alarm scheduled for $nextBoundary (interval=${safeInterval}m)"
+      )
+    }
+
+    private fun cancelExactAlarm(context: Context) {
+      val alarmManager = context.getSystemService(AlarmManager::class.java) ?: return
+      alarmManager.cancel(StormLogSchedulerAlarmReceiver.pendingIntent(context))
     }
   }
 
   private val handler = Handler(Looper.getMainLooper())
   private var intervalMinutes = DEFAULT_INTERVAL_MINUTES
 
-  private val tick = object : Runnable {
+  private val fallbackTick = object : Runnable {
     override fun run() {
       if (!isRunning) return
 
@@ -65,13 +96,14 @@ class StormLogSchedulerService : Service() {
       val triggerIntent = Intent(this@StormLogSchedulerService, StormLogHeadlessTaskService::class.java).apply {
         putExtra("scheduledAt", scheduledAt)
         putExtra("intervalMinutes", intervalMinutes)
+        putExtra("source", "handler_fallback")
       }
 
       try {
         HeadlessJsTaskService.acquireWakeLockNow(this@StormLogSchedulerService)
         startService(triggerIntent)
       } catch (error: Exception) {
-        android.util.Log.e("StormLogScheduler", "Unable to start headless collection", error)
+        android.util.Log.e("StormLogScheduler", "Handler fallback collection launch failed", error)
       }
 
       scheduleNext()
@@ -117,20 +149,26 @@ class StormLogSchedulerService : Service() {
   override fun onBind(intent: Intent?): IBinder? = null
 
   private fun scheduleNext() {
-    handler.removeCallbacks(tick)
+    handler.removeCallbacks(fallbackTick)
+    if (canScheduleExactAlarms()) {
+      scheduleNextExactAlarm(this, intervalMinutes)
+      return
+    }
+
     val now = System.currentTimeMillis()
-    val next = nextBoundary(now, intervalMinutes)
+    val intervalMs = intervalMinutes.coerceAtLeast(1).toLong() * 60_000L
+    val next = ((now / intervalMs) + 1L) * intervalMs
     val delay = (next - now).coerceAtLeast(1_000L)
     android.util.Log.d(
       "StormLogScheduler",
-      "Next Daily Monitor collection boundary: $next (in ${delay}ms, interval=${intervalMinutes}m)"
+      "Exact alarms unavailable; Handler fallback boundary: $next (in ${delay}ms, interval=${intervalMinutes}m)"
     )
-    handler.postDelayed(tick, delay)
+    handler.postDelayed(fallbackTick, delay)
   }
 
-  private fun nextBoundary(nowMs: Long, intervalMinutes: Int): Long {
-    val intervalMs = intervalMinutes.coerceAtLeast(1).toLong() * 60_000L
-    return ((nowMs / intervalMs) + 1L) * intervalMs
+  private fun canScheduleExactAlarms(): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+    return getSystemService(AlarmManager::class.java)?.canScheduleExactAlarms() == true
   }
 
   private fun createNotificationChannel() {
@@ -142,7 +180,7 @@ class StormLogSchedulerService : Service() {
         "StormLog Daily Monitor",
         NotificationManager.IMPORTANCE_LOW
       ).apply {
-        description = "Keeps StormLog's 15-minute field observation scheduler active."
+        description = "Keeps StormLog's precise field observation scheduler active."
       }
     )
   }
