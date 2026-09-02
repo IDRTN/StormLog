@@ -29,6 +29,16 @@ export async function startForegroundLocationService(
   // Expo Location callbacks as a timer, since those callbacks are OS-deferred.
   if (isNativeDailyMonitorSchedulerAvailable()) {
     try {
+      // Clean up any foreground-location task left behind by an older APK so
+      // the new native scheduler is the only Android foreground clock.
+      try {
+        if (await Location.hasStartedLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK)) {
+          await Location.stopLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
+        }
+      } catch (legacyStopError: any) {
+        console.warn(`${TAG} Legacy location scheduler cleanup warning:`, legacyStopError?.message || String(legacyStopError));
+      }
+
       startNativeDailyMonitorScheduler(intervalMinutes);
       if (!isNativeDailyMonitorSchedulerRunning()) {
         return { success: false, error: 'Native Daily Monitor scheduler could not be verified' };
@@ -97,6 +107,13 @@ export async function stopForegroundLocationService(): Promise<void> {
   if (isNativeDailyMonitorSchedulerAvailable()) {
     try {
       stopNativeDailyMonitorScheduler();
+      try {
+        if (await Location.hasStartedLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK)) {
+          await Location.stopLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
+        }
+      } catch (legacyStopError: any) {
+        console.warn(`${TAG} Legacy location scheduler cleanup warning:`, legacyStopError?.message || String(legacyStopError));
+      }
       console.log(`${TAG} Native scheduler stopped`);
       return;
     } catch (error: any) {
