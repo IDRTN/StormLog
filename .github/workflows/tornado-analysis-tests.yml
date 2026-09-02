@@ -49,3 +49,20 @@ jobs:
 
       - name: Run advanced environment test
         run: node /tmp/stormlog-analysis-tests/__tests__/advancedEnvironment.runtime.test.js
+
+      - name: Compile tornado analysis runtime test
+        run: |
+          rm -rf /tmp/stormlog-tornado-tests
+          npx tsc \
+            --ignoreConfig \
+            src/services/analysis/tornadoAnalysis.ts \
+            src/services/analysis/__tests__/tornadoAnalysis.runtime.test.ts \
+            --module commonjs \
+            --target ES2022 \
+            --moduleResolution node \
+            --esModuleInterop \
+            --skipLibCheck \
+            --outDir /tmp/stormlog-tornado-tests
+
+      - name: Run tornado analysis runtime test
+        run: node /tmp/stormlog-tornado-tests/__tests__/tornadoAnalysis.runtime.test.js
