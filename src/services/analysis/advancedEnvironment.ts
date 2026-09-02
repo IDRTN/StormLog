@@ -78,8 +78,9 @@ function vectorAtHeight(levels: SoundingLevel[], targetHeightM: number): WindVec
     if (current.heightM === targetHeightM) {
       return windVector(current.windSpeedKt, current.windDirectionDeg);
     }
+
     const next = sorted[i + 1];
-    if (!next || targetHeightM > next.heightM) continue;
+    if (!next || next.heightM <= current.heightM || targetHeightM > next.heightM) continue;
 
     const fraction = (targetHeightM - current.heightM) / (next.heightM - current.heightM);
     const a = windVector(current.windSpeedKt, current.windDirectionDeg);
@@ -110,9 +111,9 @@ function stormMotionVector(directionDeg: number, speedKt: number): WindVector {
 }
 
 /**
- * Integrates storm-relative helicity using the standard hodograph area
- * formulation over the supplied height interval. The result is converted
- * from kt·m/s to m²/s².
+ * Integrates storm-relative helicity using the hodograph area formulation.
+ * The mathematical form is ∫[(V-C) × dV], with positive values representing
+ * the conventional cyclonic-sign SRH for the supplied storm motion.
  */
 function stormRelativeHelicity(
   levels: SoundingLevel[],
@@ -122,6 +123,7 @@ function stormRelativeHelicity(
   motionSpeedKt: number | null,
 ): number | null {
   if (motionDirectionDeg == null || motionSpeedKt == null) return null;
+
   const bottom = vectorAtHeight(levels, bottomM);
   const top = vectorAtHeight(levels, topM);
   if (!bottom || !top) return null;
@@ -130,10 +132,8 @@ function stormRelativeHelicity(
   const srBottom = { u: bottom.u - motion.u, v: bottom.v - motion.v };
   const srTop = { u: top.u - motion.u, v: top.v - motion.v };
 
-  // A single layer gives a secant approximation. With intermediate levels,
-  // integrate each segment using trapezoidal hodograph area.
   const selected = [...levels]
-    .filter(level => level.heightM >= bottomM && level.heightM <= topM)
+    .filter(level => level.heightM > bottomM && level.heightM < topM)
     .sort((a, b) => a.heightM - b.heightM);
 
   const points: Array<{ heightM: number; vector: WindVector }> = [
@@ -148,26 +148,30 @@ function stormRelativeHelicity(
     { heightM: topM, vector: srTop },
   ];
 
-  points.sort((a, b) => a.heightM - b.heightM);
-
-  let areaKtM = 0;
+  // Hodograph integral: u dv - v du. The previous implementation used the
+  // reverse cross-product order, which inverted the SRH sign.
+  let areaKt2 = 0;
   for (let i = 1; i < points.length; i += 1) {
     const previous = points[i - 1].vector;
     const current = points[i].vector;
-    areaKtM += current.u * previous.v - current.v * previous.u;
+    areaKt2 += previous.u * current.v - previous.v * current.u;
   }
 
-  // 1 kt = 0.514444 m/s; the vertical coordinate is already represented by
-  // the hodograph integral, so the conversion is kt² -> (m/s)².
-  return areaKtM * 0.514444 * 0.514444;
+  // 1 kt = 0.514444 m/s, so kt² -> m²/s².
+  return areaKt2 * 0.514444 * 0.514444;
 }
 
-/** Bolton-style LCL estimate from surface temperature/dewpoint. */
-function calculateLclHeightM(temperatureC: number, dewPointC: number): number {
+/** Bolton-style LCL estimate from a true surface temperature/dewpoint pair. */
+function calculateLclHeightM(temperatureC: number, dewPointC: number): number | null {
+  if (!Number.isFinite(temperatureC) || !Number.isFinite(dewPointC)) return null;
+
   const tK = temperatureC + 273.15;
   const tdK = dewPointC + 273.15;
+  if (tdK <= 0 || tK <= 0) return null;
+
   const lclK = 1 / (1 / (tdK - 56) + Math.log(tK / tdK) / 800) + 56;
-  return Math.max(0, (tK - lclK) / 0.0098);
+  const heightM = (tK - lclK) / 0.0098;
+  return Number.isFinite(heightM) ? Math.max(0, heightM) : null;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -178,9 +182,11 @@ function deriveCompositeParameters(
   capeJkg: number | null,
   cinJkg: number | null,
   srh01: number | null,
+  srh03: number | null,
   shear06: number | null,
   lclM: number | null,
 ): { stp: number | null; scp: number | null } {
+  // Fixed-layer STP requires CAPE, 0–1 km SRH, deep-layer shear, LCL and CIN.
   if (capeJkg == null || srh01 == null || shear06 == null || lclM == null) {
     return { stp: null, scp: null };
   }
@@ -195,15 +201,21 @@ function deriveCompositeParameters(
     ? null
     : clamp(capeTerm * srhTerm * shearTerm * lclTerm * cinTerm, -10, 10);
 
-  // SCP is intentionally only calculated when the core ingredients exist.
-  const scp = clamp((capeJkg / 1000) * (shear06 / 20) * Math.max(0, srh01 / 50), 0, 20);
+  // SCP uses 0–3 km SRH, not 0–1 km SRH.
+  const scp = srh03 == null
+    ? null
+    : clamp((capeJkg / 1000) * (shear06 / 20) * Math.max(0, srh03 / 50), 0, 20);
 
   return { stp, scp };
 }
 
 export function analyzeAdvancedEnvironment(input: AdvancedEnvironmentInput): AdvancedEnvironmentResult {
   const levels = input.levels
-    .filter(level => Number.isFinite(level.heightM) && Number.isFinite(level.windSpeedKt) && Number.isFinite(level.windDirectionDeg))
+    .filter(level =>
+      Number.isFinite(level.heightM) &&
+      Number.isFinite(level.windSpeedKt) &&
+      Number.isFinite(level.windDirectionDeg)
+    )
     .sort((a, b) => a.heightM - b.heightM);
 
   const limitations: string[] = [];
@@ -216,23 +228,50 @@ export function analyzeAdvancedEnvironment(input: AdvancedEnvironmentInput): Adv
     limitations.push('Storm motion unavailable — SRH cannot be calculated');
   }
 
-  const surface = levels.length > 0 ? levels[0] : null;
-  const lclHeightM = surface ? calculateLclHeightM(surface.temperatureC, surface.dewPointC) : null;
+  // LCL must use the actual surface thermodynamic observation. Do not use an
+  // elevated first level as a substitute for the surface.
+  const surface = levels.find(level => level.heightM === 0) ?? null;
+  const lclHeightM = surface
+    ? calculateLclHeightM(surface.temperatureC, surface.dewPointC)
+    : null;
+  if (surface && lclHeightM == null) {
+    limitations.push('Surface temperature/dewpoint unavailable — LCL cannot be calculated');
+  }
+
   const lowLevelShear01KmKt = bulkShear(levels, 1);
   const lowLevelShear03KmKt = bulkShear(levels, 3);
   const deepLayerShear06KmKt = bulkShear(levels, 6);
-  const srh01M2s2 = stormRelativeHelicity(levels, 0, 1000, input.stormMotionDirectionDeg ?? null, input.stormMotionSpeedKt ?? null);
-  const srh03M2s2 = stormRelativeHelicity(levels, 0, 3000, input.stormMotionDirectionDeg ?? null, input.stormMotionSpeedKt ?? null);
+  const srh01M2s2 = stormRelativeHelicity(
+    levels,
+    0,
+    1000,
+    input.stormMotionDirectionDeg ?? null,
+    input.stormMotionSpeedKt ?? null,
+  );
+  const srh03M2s2 = stormRelativeHelicity(
+    levels,
+    0,
+    3000,
+    input.stormMotionDirectionDeg ?? null,
+    input.stormMotionSpeedKt ?? null,
+  );
   const { stp, scp } = deriveCompositeParameters(
     input.capeJkg ?? null,
     input.cinJkg ?? null,
     srh01M2s2,
+    srh03M2s2,
     deepLayerShear06KmKt,
     lclHeightM,
   );
 
-  const availableValues = [lowLevelShear01KmKt, lowLevelShear03KmKt, deepLayerShear06KmKt, srh01M2s2, srh03M2s2, lclHeightM]
-    .filter(value => value != null).length;
+  const availableValues = [
+    lowLevelShear01KmKt,
+    lowLevelShear03KmKt,
+    deepLayerShear06KmKt,
+    srh01M2s2,
+    srh03M2s2,
+    lclHeightM,
+  ].filter(value => value != null).length;
 
   const availability = levels.length === 0
     ? 'UNAVAILABLE'
@@ -241,6 +280,7 @@ export function analyzeAdvancedEnvironment(input: AdvancedEnvironmentInput): Adv
   return {
     sourceLevelCount: levels.length,
     lowLevelShear01KmKt,
+    lowLevelShear03KmKmKt: undefined as never,
     lowLevelShear03KmKt,
     deepLayerShear06KmKt,
     srh01M2s2,
