@@ -2,13 +2,11 @@
 // Storm Analysis — Progressive 4-Layer Type System
 // ============================================================
 
-// ---- Severity/assessment categories ----
 export type AssessmentLevel = 'VERY_LOW' | 'LOW' | 'MARGINAL' | 'MODERATE' | 'HIGH' | 'VERY_HIGH' | 'UNKNOWN';
 export type DataAvailability = 'AVAILABLE' | 'PARTIAL' | 'UNAVAILABLE';
 export type TrendDirection = 'STRENGTHENING' | 'WEAKENING' | 'PERSISTENT' | 'NEWLY_DEVELOPING' | 'RAPIDLY_INTENSIFYING' | 'UNKNOWN';
 export type ConfidenceLevel = 'HIGH' | 'MODERATE' | 'LOW' | 'UNKNOWN';
 
-// ---- Layer A: Environmental Tornado Potential ----
 export interface EnvironmentalAssessment {
   level: AssessmentLevel;
   cape: number | null;
@@ -37,7 +35,6 @@ export interface EnvironmentalAssessment {
   factors: string[];
 }
 
-// ---- Layer B: Storm Structure ----
 export interface StormStructureAssessment {
   level: AssessmentLevel;
   hasStrongReflectivity: boolean;
@@ -53,7 +50,6 @@ export interface StormStructureAssessment {
   factors: string[];
 }
 
-// ---- Layer C: Rotation Analysis ----
 export interface RotationAssessment {
   level: AssessmentLevel;
   radarAvailable: boolean;
@@ -81,7 +77,6 @@ export interface SurfaceRotationData {
   windShiftMinutes: number | null;
 }
 
-// ---- Layer D: Tornadic Evidence ----
 export interface TornadicEvidenceAssessment {
   level: AssessmentLevel;
   debrisSignature: boolean;
@@ -97,7 +92,6 @@ export interface TornadicEvidenceAssessment {
   factors: string[];
 }
 
-// ---- Storm Motion & Distance ----
 export interface StormMotion {
   distanceMiles: number | null;
   bearingDegrees: number | null;
@@ -107,7 +101,6 @@ export interface StormMotion {
   description: string;
 }
 
-// ---- NWS Warnings (SEPARATE from analysis) ----
 export interface NwsWarningStatus {
   tornadoWarning: boolean;
   tornadoWatch: boolean;
@@ -117,7 +110,6 @@ export interface NwsWarningStatus {
   description: string;
 }
 
-// ---- Data Quality / Confidence ----
 export interface DataQuality {
   level: ConfidenceLevel;
   radarCoverage: DataAvailability;
@@ -128,7 +120,6 @@ export interface DataQuality {
   limitations: string[];
 }
 
-// ---- Composite Result ----
 export interface StormAnalysisResult {
   surfaceEnvironment: {
     level: AssessmentLevel;
@@ -149,16 +140,13 @@ export interface StormAnalysisResult {
   stormStructure: StormStructureAssessment;
   rotation: RotationAssessment;
   tornadicEvidence: TornadicEvidenceAssessment;
-
   stormMotion: StormMotion | null;
   nwsStatus: NwsWarningStatus;
   dataQuality: DataQuality;
-
   overallAssessment: AssessmentLevel;
   assessmentText: string;
   whyExplanation: string;
   whatWouldIncreaseConcern: string[];
-
   dataFreshness: {
     weatherAgeMinutes: number | null;
     radarAgeMinutes: number | null;
@@ -166,14 +154,28 @@ export interface StormAnalysisResult {
     isStale: boolean;
     description: string;
   };
-
   timestamp: number;
   latitude: number;
   longitude: number;
   lightningTrend: LightningTrend;
 }
 
-// ---- Input data ----
+export interface AdvancedEnvironmentInput {
+  sourceLevelCount: number;
+  lowLevelShear01KmKt: number | null;
+  lowLevelShear03KmKt: number | null;
+  deepLayerShear06KmKt: number | null;
+  srh01M2s2: number | null;
+  srh03M2s2: number | null;
+  lclHeightM: number | null;
+  capeJkg: number | null;
+  cinJkg: number | null;
+  significantTornadoParameter: number | null;
+  supercellCompositeParameter: number | null;
+  availability: DataAvailability;
+  limitations: string[];
+}
+
 export interface AnalysisInput {
   temperature: number | null;
   humidity: number | null;
@@ -184,8 +186,12 @@ export interface AnalysisInput {
   dewPoint: number | null;
   latitude: number;
   longitude: number;
-
   cape: number | null;
+
+  // Optional provider-derived vertical environment. It is deliberately
+  // separate from surface observations so missing upper-air data cannot be
+  // mistaken for zero shear/helicity.
+  advancedEnvironment?: AdvancedEnvironmentInput | null;
 
   recentObservations: {
     timestamp: number;
@@ -201,11 +207,8 @@ export interface AnalysisInput {
   }[];
 
   nearbyStations: WindVector[];
-
   nwsAlerts: { event: string; severity: string | null; headline: string | null }[];
-
   radarData?: RadarAnalysisInput;
-
   lightning?: {
     totalCount: number;
     recentCount5Min: number;
@@ -231,7 +234,6 @@ export interface RadarAnalysisInput {
 
 export type PressureTrendDirection = 'RISING' | 'STABLE' | 'FALLING';
 
-// ---- AnalysisSnapshot for DB storage ----
 export interface AnalysisSnapshotData {
   id: number;
   stormEventId: number;
@@ -247,7 +249,6 @@ export interface AnalysisSnapshotData {
   confidence: number;
 }
 
-// ---- Backward-compatible types ----
 export type PossibilityLevel = 'LOW' | 'ELEVATED' | 'MODERATE' | 'HIGH';
 export type RotationSignal = 'NONE' | 'WEAK' | 'MODERATE' | 'STRONG';
 export type ConvergenceLevel = 'LOW' | 'MODERATE' | 'HIGH';
