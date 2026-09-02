@@ -34,7 +34,50 @@ assert(result.supercellCompositeParameter != null, 'SCP');
 
 const missingMotion = analyzeAdvancedEnvironment({ levels: profile, capeJkg: 1000, cinJkg: -25 });
 assert(missingMotion.srh01M2s2 === null, 'SRH requires storm motion');
+assert(missingMotion.srh03M2s2 === null, '0–3 km SRH requires storm motion');
+assert(missingMotion.significantTornadoParameter === null, 'STP requires SRH and storm motion');
+assert(missingMotion.supercellCompositeParameter === null, 'SCP requires SRH and storm motion');
 assert(missingMotion.limitations.some(item => item.includes('Storm motion unavailable')), 'missing-motion limitation');
+
+const elevatedOnly = analyzeAdvancedEnvironment({
+  levels: profile.filter(level => level.heightM > 0),
+  capeJkg: 1500,
+  cinJkg: -25,
+  stormMotionDirectionDeg: 230,
+  stormMotionSpeedKt: 25,
+});
+assert(elevatedOnly.lclHeightM === null, 'elevated-only profile must not use first elevated level as surface');
+assert(elevatedOnly.significantTornadoParameter === null, 'STP unavailable without surface LCL');
+assert(elevatedOnly.limitations.includes('Profile does not reach the surface'), 'elevated-only surface limitation');
+
+const invalidThermodynamics = analyzeAdvancedEnvironment({
+  levels: [
+    { ...profile[0], temperatureC: Number.NaN },
+    ...profile.slice(1),
+  ],
+  capeJkg: 2000,
+  cinJkg: -50,
+  stormMotionDirectionDeg: 230,
+  stormMotionSpeedKt: 25,
+});
+assert(invalidThermodynamics.lclHeightM === null, 'invalid surface thermodynamics must not produce LCL');
+assert(invalidThermodynamics.significantTornadoParameter === null, 'STP unavailable without LCL');
+assert(invalidThermodynamics.limitations.some(item => item.includes('Surface temperature/dewpoint unavailable')), 'invalid-thermodynamics limitation');
+
+const duplicateHeight = analyzeAdvancedEnvironment({
+  levels: [
+    profile[0],
+    { ...profile[0], temperatureC: 27, dewPointC: 19, windSpeedKt: 11 },
+    ...profile.slice(1),
+  ],
+  capeJkg: 2200,
+  cinJkg: -50,
+  stormMotionDirectionDeg: 230,
+  stormMotionSpeedKt: 25,
+});
+assert(duplicateHeight.lowLevelShear01KmKt != null, 'duplicate-height profile still computes shear');
+assert(Number.isFinite(duplicateHeight.lowLevelShear01KmKt ?? NaN), 'duplicate-height shear remains finite');
+assert(Number.isFinite(duplicateHeight.srh01M2s2 ?? NaN), 'duplicate-height SRH remains finite');
 
 const empty = analyzeAdvancedEnvironment({ levels: [] });
 assert(empty.availability === 'UNAVAILABLE', 'empty profile availability');
