@@ -66,6 +66,18 @@ const unknownMotion = analyzeStorm({
 assert(unknownMotion.stormMotion?.approaching === null, 'missing storm motion direction must remain unknown, not false');
 assert(unknownMotion.stormMotion?.directionDegrees === null, 'missing storm motion direction must remain null');
 
+const invalidMotion = analyzeStorm({
+  ...base,
+  radarData: {
+    available: true,
+    velocityPoints: [],
+    couplets: [],
+    stormCells: [{ latitude: 35.1, longitude: -97.0, speed: 30, movement: Number.NaN }],
+  },
+});
+assert(invalidMotion.stormMotion?.approaching === null, 'invalid storm motion must remain unknown');
+assert(invalidMotion.stormMotion?.directionDegrees === null, 'invalid storm motion direction must remain null');
+
 const advanced = analyzeStorm({
   ...base,
   advancedEnvironment: {
