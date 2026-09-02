@@ -2,16 +2,9 @@ import { getNextIntervalBoundary } from '../../util/dateUtils';
 
 export type DailyCollectionMode = 'automatic' | 'manual';
 
-export type DailyCollectionOutcome =
-  | 'completed'
-  | 'shared'
-  | 'skipped_recent_automatic';
+export type DailyCollectionOutcome = 'completed' | 'shared' | 'skipped_recent_automatic';
 
-export type DailyCollectionResult = {
-  success: boolean;
-  error?: string;
-  outcome?: DailyCollectionOutcome;
-};
+export type DailyCollectionResult = { success: boolean; error?: string; outcome?: DailyCollectionOutcome };
 
 export type DailyMonitorSnapshot = {
   isActive: boolean;
@@ -50,6 +43,8 @@ export type DailyMonitorCoordinatorDependencies = {
   scheduler: DailyMonitorScheduler;
   background: BackgroundTaskAdapter;
   foregroundService?: ForegroundServiceAdapter;
+  /** Atomic cross-process claim. Falls back to the local/persisted gate if unavailable. */
+  claimAutomatic?: (attemptAtMs: number, intervalMs: number) => Promise<boolean>;
   now?: () => number;
   getNextDelayMs?: (intervalMinutes: number) => number;
 };
@@ -74,14 +69,7 @@ function parseTimestamp(value: string | null): number {
 }
 
 export class DailyMonitorCoordinator {
-  private state: DailyMonitorSnapshot = {
-    isActive: false,
-    intervalMinutes: 15,
-    loading: true,
-    lastCollectionTime: null,
-    lastError: null,
-  };
-
+  private state: DailyMonitorSnapshot = { isActive: false, intervalMinutes: 15, loading: true, lastCollectionTime: null, lastError: null };
   private listeners = new Set<(state: DailyMonitorSnapshot) => void>();
   private inFlight: Promise<DailyCollectionResult> | null = null;
   private foregroundTimer: unknown = null;
@@ -94,34 +82,19 @@ export class DailyMonitorCoordinator {
 
   constructor(private readonly dependencies: DailyMonitorCoordinatorDependencies) {}
 
-  getState(): Readonly<DailyMonitorSnapshot> {
-    return this.state;
-  }
+  getState(): Readonly<DailyMonitorSnapshot> { return this.state; }
 
   subscribe(listener: (state: DailyMonitorSnapshot) => void): () => void {
     this.listeners.add(listener);
     listener(this.state);
-    return () => {
-      this.listeners.delete(listener);
-    };
+    return () => { this.listeners.delete(listener); };
   }
 
-  /**
-   * Foreground/UI initialization. Hydrates persisted state and, when enabled,
-   * owns the foreground scheduler, BackgroundFetch registration, and Android
-   * foreground location service.
-   */
   async initialize(): Promise<void> {
     await this.hydrateState();
     if (this.state.isActive) await this.ensureForegroundRuntime();
   }
 
-  /**
-   * Headless/background initialization. This intentionally hydrates only the
-   * persisted state needed for automatic gating. It MUST NOT schedule timers,
-   * register/unregister BackgroundFetch, or start an Android foreground
-   * service from a headless JS process.
-   */
   private async initializeForAutomatic(): Promise<void> {
     await this.hydrateState();
   }
@@ -132,57 +105,40 @@ export class DailyMonitorCoordinator {
 
     this.initializationPromise = (async () => {
       if (this.initialized) return;
-
-      const [enabled, storedInterval, lastCollection, lastError, lastAttemptStr] =
-        await Promise.all([
-          this.readStorage(DAILY_MONITOR_ENABLED_EXPORT),
-          this.readStorage(DAILY_MONITOR_INTERVAL_EXPORT),
-          this.readStorage(LAST_COLLECTION_KEY_EXPORT),
-          this.readStorage(LAST_ERROR_EXPORT),
-          this.readStorage(LAST_AUTOMATIC_ATTEMPT_KEY),
-        ]);
+      const [enabled, storedInterval, lastCollection, lastError, lastAttemptStr] = await Promise.all([
+        this.readStorage(DAILY_MONITOR_ENABLED_EXPORT),
+        this.readStorage(DAILY_MONITOR_INTERVAL_EXPORT),
+        this.readStorage(LAST_COLLECTION_KEY_EXPORT),
+        this.readStorage(LAST_ERROR_EXPORT),
+        this.readStorage(LAST_AUTOMATIC_ATTEMPT_KEY),
+      ]);
 
       const interval = normalizeInterval(storedInterval ? Number(storedInterval) : null);
       const isRegistered = await this.dependencies.background.isRegistered();
-      const isActive = enabled === 'true' || isRegistered;
-
       this.lastAutomaticAttemptMs = parseTimestamp(lastAttemptStr);
-
       this.patchState({
-        isActive,
+        isActive: enabled === 'true' || isRegistered,
         intervalMinutes: interval,
         lastCollectionTime: lastCollection ? Number(lastCollection) : null,
         lastError,
         loading: false,
       });
-
-      // Mark initialized only after persistent state has been hydrated.
       this.initialized = true;
     })();
 
-    try {
-      await this.initializationPromise;
-    } finally {
-      this.initializationPromise = null;
-    }
+    try { await this.initializationPromise; } finally { this.initializationPromise = null; }
   }
 
   private async ensureForegroundRuntime(): Promise<void> {
     if (!this.state.isActive) return;
     if (this.runtimePromise) return this.runtimePromise;
-
     const interval = this.state.intervalMinutes;
     this.runtimePromise = (async () => {
       this.scheduleNext();
       await this.registerBackground(interval);
       await this.startForegroundService(interval);
     })();
-
-    try {
-      await this.runtimePromise;
-    } finally {
-      this.runtimePromise = null;
-    }
+    try { await this.runtimePromise; } finally { this.runtimePromise = null; }
   }
 
   async startMonitor(intervalMinutes?: number): Promise<void> {
@@ -191,8 +147,12 @@ export class DailyMonitorCoordinator {
     await this.writeStorage(DAILY_MONITOR_ENABLED_EXPORT, 'true');
     await this.writeStorage(DAILY_MONITOR_INTERVAL_EXPORT, interval.toString());
     this.patchState({ isActive: true, intervalMinutes: interval });
-
     await this.ensureForegroundRuntime();
+
+    // Start Log historically performs an immediate collection. Keep that user-facing
+    // behavior while still allowing the scheduled automatic path to remain gated.
+    const result = await this.collectManual();
+    if (!result.success) console.warn('[Coordinator] Initial Start Log collection failed:', result.error);
   }
 
   async stopMonitor(): Promise<void> {
@@ -209,7 +169,6 @@ export class DailyMonitorCoordinator {
     const interval = normalizeInterval(minutes);
     await this.writeStorage(DAILY_MONITOR_INTERVAL_EXPORT, interval.toString());
     this.patchState({ intervalMinutes: interval });
-
     if (!this.state.isActive) return;
     this.stopForegroundScheduler();
     await this.ensureForegroundRuntime();
@@ -221,24 +180,32 @@ export class DailyMonitorCoordinator {
   }
 
   async collectAutomatic(): Promise<DailyCollectionResult> {
-    // Android can invoke either task in a brand-new headless JS process.
-    // Hydrate persisted state only. Do not touch foreground runtime ownership.
     await this.initializeForAutomatic();
-
     if (this.inFlight) {
-      return this.inFlight.then((result) => ({
-        ...result,
-        outcome: 'shared',
-      }));
+      return this.inFlight.then((result) => ({ ...result, outcome: 'shared' }));
     }
 
     const nowMs = this.now();
     const intervalMs = this.state.intervalMinutes * 60 * 1000;
-    if (
-      this.lastAutomaticAttemptMs > 0 &&
-      nowMs - this.lastAutomaticAttemptMs < intervalMs
-    ) {
+    if (this.lastAutomaticAttemptMs > 0 && nowMs - this.lastAutomaticAttemptMs < intervalMs) {
       return { success: true, outcome: 'skipped_recent_automatic' };
+    }
+
+    // This claim is the authoritative cross-runtime gate. SQLite makes the
+    // read/modify/write operation atomic when BackgroundFetch and location
+    // tasks arrive at the same time in different JS runtimes.
+    if (this.dependencies.claimAutomatic) {
+      try {
+        const claimed = await this.dependencies.claimAutomatic(nowMs, intervalMs);
+        if (!claimed) {
+          this.lastAutomaticAttemptMs = nowMs;
+          return { success: true, outcome: 'skipped_recent_automatic' };
+        }
+      } catch (error) {
+        // Do not lose a weather observation merely because the coordination
+        // database is temporarily unavailable; retain the previous fallback gate.
+        console.warn('[Coordinator] Atomic automatic claim unavailable; using local gate:', error);
+      }
     }
 
     return this.runSharedCollection('automatic', nowMs);
@@ -249,26 +216,19 @@ export class DailyMonitorCoordinator {
     const operation = this.registrationChain.then(async () => {
       const isRegistered = await this.dependencies.background.isRegistered();
       if (isRegistered && this.registeredInterval === interval) return;
-
-      if (isRegistered) {
-        await this.dependencies.background.unregister();
-      }
+      if (isRegistered) await this.dependencies.background.unregister();
       await this.dependencies.background.register(interval);
       this.registeredInterval = interval;
     });
-
     this.registrationChain = operation.catch(() => undefined);
     await operation;
   }
 
   async unregisterBackground(): Promise<void> {
     const operation = this.registrationChain.then(async () => {
-      if (await this.dependencies.background.isRegistered()) {
-        await this.dependencies.background.unregister();
-      }
+      if (await this.dependencies.background.isRegistered()) await this.dependencies.background.unregister();
       this.registeredInterval = null;
     });
-
     this.registrationChain = operation.catch(() => undefined);
     await operation;
   }
@@ -278,9 +238,7 @@ export class DailyMonitorCoordinator {
     if (!fs) return;
     try {
       const result = await fs.start(intervalMinutes);
-      if (!result.success) {
-        console.warn('[Coordinator] Foreground service start failed:', result.error);
-      }
+      if (!result.success) console.warn('[Coordinator] Foreground service start failed:', result.error);
     } catch (err: any) {
       console.warn('[Coordinator] Foreground service start error:', err?.message || String(err));
     }
@@ -289,20 +247,14 @@ export class DailyMonitorCoordinator {
   private async stopForegroundService(): Promise<void> {
     const fs = this.dependencies.foregroundService;
     if (!fs) return;
-    try {
-      await fs.stop();
-    } catch (err: any) {
+    try { await fs.stop(); } catch (err: any) {
       console.warn('[Coordinator] Foreground service stop error:', err?.message || String(err));
     }
   }
 
   private scheduleNext(): void {
     this.clearForegroundTimer();
-    const delayMs = Math.max(
-      1000,
-      this.getNextDelay()(this.state.intervalMinutes) - this.now(),
-    );
-
+    const delayMs = Math.max(1000, this.getNextDelay()(this.state.intervalMinutes) - this.now());
     this.foregroundTimer = this.dependencies.scheduler.setTimeout(() => {
       this.foregroundTimer = null;
       void this.runScheduledCollection().then(() => {
@@ -311,14 +263,8 @@ export class DailyMonitorCoordinator {
     }, delayMs);
   }
 
-  private async runScheduledCollection(): Promise<void> {
-    await this.collectAutomatic();
-  }
-
-  private stopForegroundScheduler(): void {
-    this.clearForegroundTimer();
-  }
-
+  private async runScheduledCollection(): Promise<void> { await this.collectAutomatic(); }
+  private stopForegroundScheduler(): void { this.clearForegroundTimer(); }
   private clearForegroundTimer(): void {
     if (this.foregroundTimer != null) {
       this.dependencies.scheduler.clearTimeout(this.foregroundTimer);
@@ -326,67 +272,40 @@ export class DailyMonitorCoordinator {
     }
   }
 
-  private runSharedCollection(
-    mode: DailyCollectionMode,
-    automaticAttemptAt?: number,
-  ): Promise<DailyCollectionResult> {
-    if (this.inFlight) {
-      return this.inFlight.then((result) => ({
-        ...result,
-        outcome: 'shared',
-      }));
-    }
+  private runSharedCollection(mode: DailyCollectionMode, automaticAttemptAt?: number): Promise<DailyCollectionResult> {
+    if (this.inFlight) return this.inFlight.then((result) => ({ ...result, outcome: 'shared' }));
 
     if (mode === 'automatic' && automaticAttemptAt != null) {
       this.lastAutomaticAttemptMs = automaticAttemptAt;
       void this.writeStorage(LAST_AUTOMATIC_ATTEMPT_KEY, automaticAttemptAt.toString());
     }
 
-    this.inFlight = this.dependencies
-      .runCollection()
-      .then(
-        async (result) => {
-          await this.recordCollectionResult(result, mode, automaticAttemptAt);
-          return {
-            ...result,
-            outcome: result.outcome ?? 'completed',
-          };
-        },
-        async (error: unknown) => {
-          const result: DailyCollectionResult = {
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-          };
-          await this.recordCollectionResult(result, mode, automaticAttemptAt);
-          return result;
-        },
-      )
-      .finally(() => {
-        this.inFlight = null;
-      });
+    this.inFlight = this.dependencies.runCollection().then(
+      async (result) => {
+        await this.recordCollectionResult(result, mode, automaticAttemptAt);
+        return { ...result, outcome: result.outcome ?? 'completed' };
+      },
+      async (error: unknown) => {
+        const result: DailyCollectionResult = { success: false, error: error instanceof Error ? error.message : String(error) };
+        await this.recordCollectionResult(result, mode, automaticAttemptAt);
+        return result;
+      },
+    ).finally(() => { this.inFlight = null; });
 
     return this.inFlight;
   }
 
-  private async recordCollectionResult(
-    result: DailyCollectionResult,
-    mode: DailyCollectionMode,
-    automaticAttemptAt?: number,
-  ): Promise<void> {
+  private async recordCollectionResult(result: DailyCollectionResult, mode: DailyCollectionMode, automaticAttemptAt?: number): Promise<void> {
     const completedAt = this.now();
     if (result.success) {
       await this.writeStorage(LAST_COLLECTION_KEY_EXPORT, completedAt.toString());
       await this.removeStorage(LAST_ERROR_EXPORT);
       if (mode === 'automatic') {
-        await this.writeStorage(
-          LAST_AUTOMATIC_COLLECTION_KEY,
-          (automaticAttemptAt ?? completedAt).toString(),
-        );
+        await this.writeStorage(LAST_AUTOMATIC_COLLECTION_KEY, (automaticAttemptAt ?? completedAt).toString());
       }
       this.patchState({ lastCollectionTime: completedAt, lastError: null });
       return;
     }
-
     const error = result.error || 'Unknown collection error';
     await this.writeStorage(LAST_ERROR_EXPORT, error);
     this.patchState({ lastError: error });
@@ -395,42 +314,22 @@ export class DailyMonitorCoordinator {
   private getNextDelayMsDefault(intervalMinutes: number): number {
     return getNextIntervalBoundary(intervalMinutes * 60 * 1000) - Date.now();
   }
-
   private getNextDelay() {
-    return (
-      this.dependencies.getNextDelayMs ??
-      ((intervalMinutes: number) => this.getNextDelayMsDefault(intervalMinutes))
-    );
+    return this.dependencies.getNextDelayMs ?? ((intervalMinutes: number) => this.getNextDelayMsDefault(intervalMinutes));
   }
-
-  private now(): number {
-    return (this.dependencies.now ?? Date.now)();
-  }
+  private now(): number { return (this.dependencies.now ?? Date.now)(); }
 
   private patchState(changes: Partial<DailyMonitorSnapshot>): void {
     this.state = { ...this.state, ...changes };
-    for (const listener of [...this.listeners]) {
-      listener(this.state);
-    }
+    for (const listener of [...this.listeners]) listener(this.state);
   }
-
   private async readStorage(key: string): Promise<string | null> {
-    try {
-      return await this.dependencies.storage.getItem(key);
-    } catch {
-      return null;
-    }
+    try { return await this.dependencies.storage.getItem(key); } catch { return null; }
   }
-
   private async writeStorage(key: string, value: string): Promise<void> {
-    try {
-      await this.dependencies.storage.setItem(key, value);
-    } catch {}
+    try { await this.dependencies.storage.setItem(key, value); } catch {}
   }
-
   private async removeStorage(key: string): Promise<void> {
-    try {
-      await this.dependencies.storage.removeItem(key);
-    } catch {}
+    try { await this.dependencies.storage.removeItem(key); } catch {}
   }
 }
