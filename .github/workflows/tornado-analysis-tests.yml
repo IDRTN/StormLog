@@ -37,6 +37,7 @@ jobs:
         run: |
           rm -rf /tmp/stormlog-analysis-tests
           npx tsc \
+            --ignoreConfig \
             src/services/analysis/advancedEnvironment.ts \
             src/services/analysis/__tests__/advancedEnvironment.runtime.test.ts \
             --module commonjs \
