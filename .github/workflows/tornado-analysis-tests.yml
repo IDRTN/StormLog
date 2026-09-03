@@ -33,6 +33,25 @@ jobs:
       - name: TypeScript validation
         run: npm run typecheck
 
+      - name: Compile NWS alert display test
+        run: |
+          rm -rf /tmp/stormlog-alert-display-tests
+          npx tsc \
+            --ignoreConfig \
+            src/services/nws/alertDisplay.ts \
+            src/services/nws/__tests__/alertDisplay.runtime.test.ts \
+            --module commonjs \
+            --target ES2022 \
+            --moduleResolution node \
+            --types node \
+            --ignoreDeprecations 6.0 \
+            --esModuleInterop \
+            --skipLibCheck \
+            --outDir /tmp/stormlog-alert-display-tests
+
+      - name: Run NWS alert display test
+        run: node /tmp/stormlog-alert-display-tests/__tests__/alertDisplay.runtime.test.js
+
       - name: Compile weather provider runtime test
         run: |
           rm -rf /tmp/stormlog-weather-tests
