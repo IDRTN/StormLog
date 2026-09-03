@@ -1,5 +1,26 @@
-import { strict as assert } from 'node:assert';
 import { resolveDailyMonitorLocation } from '../dailyMonitorLocationResolver';
+
+function assertEqual<T>(actual: T, expected: T, message?: string): void {
+  if (actual !== expected) {
+    throw new Error(message ?? `Expected ${String(expected)}, received ${String(actual)}`);
+  }
+}
+
+async function assertRejects(
+  operation: () => Promise<unknown>,
+  expected: RegExp,
+): Promise<void> {
+  try {
+    await operation();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!expected.test(message)) {
+      throw new Error(`Expected rejection matching ${expected}, received: ${message}`);
+    }
+    return;
+  }
+  throw new Error(`Expected rejection matching ${expected}, but operation resolved`);
+}
 
 async function run(): Promise<void> {
   const nowMs = Date.UTC(2026, 8, 3, 20, 0, 0);
@@ -21,13 +42,10 @@ async function run(): Promise<void> {
       timestampMs: nowMs - 60_000,
     }),
   });
-  assert.equal(current.source, 'current');
-  assert.equal(current.latitude, 40.1599);
+  assertEqual(current.source, 'current');
+  assertEqual(current.latitude, 40.1599);
 
-  let releaseCurrent: (() => void) | null = null;
-  const blockedCurrent = new Promise<null>((resolve) => {
-    releaseCurrent = () => resolve(null);
-  });
+  const blockedCurrent = new Promise<null>(() => undefined);
   const lastKnown = await resolveDailyMonitorLocation({
     now: () => nowMs,
     wait: async () => undefined,
@@ -38,9 +56,8 @@ async function run(): Promise<void> {
     }),
     readCachedLocation: async () => null,
   }, { currentFixTimeoutMs: 1_000 });
-  releaseCurrent?.();
-  assert.equal(lastKnown.source, 'os_last_known');
-  assert.equal(lastKnown.latitude, 40.16);
+  assertEqual(lastKnown.source, 'os_last_known');
+  assertEqual(lastKnown.latitude, 40.16);
 
   const cached = await resolveDailyMonitorLocation({
     now: () => nowMs,
@@ -56,10 +73,10 @@ async function run(): Promise<void> {
       timestampMs: nowMs - 2 * 60_000,
     }),
   });
-  assert.equal(cached.source, 'stormlog_cached');
-  assert.equal(cached.longitude, -82.25);
+  assertEqual(cached.source, 'stormlog_cached');
+  assertEqual(cached.longitude, -82.25);
 
-  await assert.rejects(
+  await assertRejects(
     () => resolveDailyMonitorLocation({
       now: () => nowMs,
       wait: async () => undefined,
@@ -77,7 +94,7 @@ async function run(): Promise<void> {
     /No sufficiently fresh location available/,
   );
 
-  await assert.rejects(
+  await assertRejects(
     () => resolveDailyMonitorLocation({
       now: () => nowMs,
       wait: async () => undefined,
@@ -96,5 +113,5 @@ async function run(): Promise<void> {
 
 run().catch((error) => {
   console.error(error);
-  process.exitCode = 1;
+  throw error;
 });
