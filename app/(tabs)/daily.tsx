@@ -7,17 +7,20 @@ import {
   TouchableOpacity,
   RefreshControl,
   Alert,
+  Share,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, SPACING, BORDER_RADIUS } from '../../src/constants/theme';
 import { useDailyMonitor } from '../../src/hooks/useDailyMonitor';
 import {
+  getAllDailyRecords,
   getDailySummary,
   getDailyRecordCount,
   getWeatherLocalDayReferences,
   deleteDailyRecordsForDate,
 } from '../../src/database/dailyWeather';
+import { serializeDailyWeatherBackup } from '../../src/services/export/dailyWeatherBackup';
 import type { DailySummary } from '../../src/models/types';
 
 export default function DailyScreen() {
@@ -27,6 +30,7 @@ export default function DailyScreen() {
   const [summaries, setSummaries] = useState<Map<string, DailySummary>>(new Map());
   const [dayOffsets, setDayOffsets] = useState<Map<string, number>>(new Map());
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -51,6 +55,29 @@ export default function DailyScreen() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  const handleExportBackup = useCallback(async () => {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const records = await getAllDailyRecords();
+      if (records.length === 0) {
+        Alert.alert('Nothing to Back Up', 'There are no Daily Monitor observations to export yet.');
+        return;
+      }
+
+      const payload = serializeDailyWeatherBackup(records);
+      await Share.share({
+        title: `StormLog Daily Monitor Backup (${records.length} observations)`,
+        message: payload,
+      });
+    } catch (error: any) {
+      console.error('Failed to export Daily Monitor backup:', error);
+      Alert.alert('Backup Failed', error?.message ?? 'Unable to export Daily Monitor observations.');
+    } finally {
+      setExporting(false);
+    }
+  }, [exporting]);
 
   const handleDeleteDay = (dateStr: string) => {
     const formatted = new Date(dateStr + 'T12:00:00').toLocaleDateString('en-US', {
@@ -154,6 +181,18 @@ export default function DailyScreen() {
             <Text style={styles.actionBtnText}>Collect Now</Text>
           </TouchableOpacity>
         </View>
+
+        <TouchableOpacity
+          style={[styles.backupBtn, exporting && styles.backupBtnDisabled]}
+          onPress={handleExportBackup}
+          disabled={exporting}
+        >
+          <Ionicons name="cloud-upload-outline" size={18} color={Colors.primary} />
+          <View style={styles.backupTextWrap}>
+            <Text style={styles.backupTitle}>{exporting ? 'Preparing Backup…' : 'Export Daily Backup'}</Text>
+            <Text style={styles.backupSubtitle}>Share a versioned copy of all Daily Monitor observations</Text>
+          </View>
+        </TouchableOpacity>
 
         {monitor.error && (
           <Text style={styles.errorText}>{monitor.error}</Text>
@@ -261,6 +300,20 @@ const styles = StyleSheet.create({
   statusActions: { flexDirection: 'row', gap: SPACING.sm, marginTop: SPACING.md },
   actionBtn: { flex: 1, paddingVertical: SPACING.sm, borderRadius: BORDER_RADIUS.sm, alignItems: 'center' },
   actionBtnText: { color: Colors.white, fontSize: 13, fontWeight: '600' },
+  backupBtn: {
+    marginTop: SPACING.md,
+    padding: SPACING.md,
+    borderWidth: 1,
+    borderColor: Colors.primary,
+    borderRadius: BORDER_RADIUS.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+  },
+  backupBtnDisabled: { opacity: 0.6 },
+  backupTextWrap: { flex: 1 },
+  backupTitle: { color: Colors.primary, fontSize: 13, fontWeight: '700' },
+  backupSubtitle: { color: Colors.textSecondary, fontSize: 11, marginTop: 2 },
   errorText: { color: Colors.danger, fontSize: 12, marginTop: SPACING.sm },
   sectionTitle: { color: Colors.text, fontSize: 18, fontWeight: '700', marginBottom: SPACING.md },
   dayCard: {
