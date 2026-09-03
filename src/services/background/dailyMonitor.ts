@@ -32,6 +32,7 @@ import {
   type DailyCollectionMode,
   type DailyCollectionResult,
 } from './dailyMonitorCoordinator';
+import { resolveDailyMonitorLocation } from './dailyMonitorLocationResolver';
 
 export const DAILY_MONITOR_TASK = 'STORM_LOG_DAILY_MONITOR';
 export const DAILY_MONITOR_INTERVAL_KEY = 'daily_monitor_interval';
@@ -129,53 +130,51 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
     return { success: false, error: 'Location permission not granted' };
   }
 
-  // Step 2: Get location
-  // Priority: fresh GPS → OS last-known → StormLog cached
-  let lat: number, lon: number;
-  let locationSource: 'current' | 'os_last_known' | 'stormlog_cached' = 'current';
+  // Step 2: Resolve a sufficiently fresh location without allowing a slow
+  // moving/background GPS request to stall the entire collection cycle.
+  let lat: number;
+  let lon: number;
+  let locationSource: 'current' | 'os_last_known' | 'stormlog_cached';
   try {
-    const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Low });
-    lat = loc.coords.latitude;
-    lon = loc.coords.longitude;
-    locationSource = 'current';
-    console.log(`${TAG} Location: ${lat.toFixed(4)}, ${lon.toFixed(4)} [current]`);
-    // Persist successful GPS fix for background fallback
-    try {
-      await AsyncStorage.setItem(CACHED_LOCATION_LAT_KEY, lat.toString());
-      await AsyncStorage.setItem(CACHED_LOCATION_LON_KEY, lon.toString());
-      await AsyncStorage.setItem(CACHED_LOCATION_TIMESTAMP_KEY, Date.now().toString());
-    } catch {}
-  } catch (err: any) {
-    console.log(`${TAG} getCurrentPosition failed (${err?.message}), trying last known...`);
-    try {
-      const last = await Location.getLastKnownPositionAsync();
-      if (last) {
-        lat = last.coords.latitude;
-        lon = last.coords.longitude;
-        locationSource = 'os_last_known';
-        console.log(`${TAG} Last known: ${lat.toFixed(4)}, ${lon.toFixed(4)} [os_last_known]`);
-      } else {
-        // Attempt StormLog cached location as final fallback
-        const cachedLat = await AsyncStorage.getItem(CACHED_LOCATION_LAT_KEY);
-        const cachedLon = await AsyncStorage.getItem(CACHED_LOCATION_LON_KEY);
-        const cachedTs = await AsyncStorage.getItem(CACHED_LOCATION_TIMESTAMP_KEY);
-        if (cachedLat && cachedLon && cachedTs) {
-          lat = parseFloat(cachedLat);
-          lon = parseFloat(cachedLon);
-          if (Number.isFinite(lat) && Number.isFinite(lon)) {
-            locationSource = 'stormlog_cached';
-            const ageMinutes = Math.round((Date.now() - Number(cachedTs)) / 60_000);
-            console.log(`${TAG} Cached location: ${lat.toFixed(4)}, ${lon.toFixed(4)} [stormlog_cached, ${ageMinutes}m old]`);
-          } else {
-            return { success: false, error: 'No location available' };
-          }
-        } else {
-          return { success: false, error: 'No location available' };
-        }
-      }
-    } catch {
-      return { success: false, error: 'Failed to get location' };
+    const resolved = await resolveDailyMonitorLocation({
+      getCurrentPosition: () => Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Low }),
+      getLastKnownPosition: () => Location.getLastKnownPositionAsync(),
+      readCachedLocation: async () => {
+        const [cachedLat, cachedLon, cachedTs] = await Promise.all([
+          AsyncStorage.getItem(CACHED_LOCATION_LAT_KEY),
+          AsyncStorage.getItem(CACHED_LOCATION_LON_KEY),
+          AsyncStorage.getItem(CACHED_LOCATION_TIMESTAMP_KEY),
+        ]);
+        if (!cachedLat || !cachedLon || !cachedTs) return null;
+        const latitude = Number(cachedLat);
+        const longitude = Number(cachedLon);
+        const timestampMs = Number(cachedTs);
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !Number.isFinite(timestampMs)) return null;
+        return { latitude, longitude, timestampMs };
+      },
+    });
+
+    lat = resolved.latitude;
+    lon = resolved.longitude;
+    locationSource = resolved.source;
+    console.log(
+      `${TAG} Location: ${lat.toFixed(4)}, ${lon.toFixed(4)} ` +
+      `[${locationSource}, ${Math.round(resolved.ageMs / 1000)}s old]`,
+    );
+
+    // Only a genuine fresh GPS fix advances StormLog's cached location. Using
+    // a fallback must never make an older coordinate appear newly observed.
+    if (locationSource === 'current') {
+      try {
+        await AsyncStorage.setItem(CACHED_LOCATION_LAT_KEY, lat.toString());
+        await AsyncStorage.setItem(CACHED_LOCATION_LON_KEY, lon.toString());
+        await AsyncStorage.setItem(CACHED_LOCATION_TIMESTAMP_KEY, resolved.sourceTimestampMs.toString());
+      } catch {}
     }
+  } catch (error: any) {
+    const msg = error?.message || String(error);
+    console.error(`${TAG} Location resolution failed: ${msg}`);
+    return { success: false, error: `Location: ${msg}` };
   }
 
   // Step 3: Fetch weather
