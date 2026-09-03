@@ -2,6 +2,7 @@ import { useState, useCallback, useRef } from 'react';
 import type { AnalysisInput, StormAnalysisResult } from '../services/analysis/types';
 import { analyzeStorm } from '../services/analysis/tornadoAnalysis';
 import { getRadarData } from '../services/analysis/radar';
+import { fetchHrrrAdvancedEnvironment } from '../services/analysis/hrrrEnvironment';
 
 export function useTornadoAnalysis() {
   const [result, setResult] = useState<StormAnalysisResult | null>(null);
@@ -15,13 +16,25 @@ export function useTornadoAnalysis() {
       console.log('[TornadoAnalysis] duplicate analysis skipped; reusing in-flight promise');
       return inFlightRef.current;
     }
+
     const promise = (async () => {
       setLoading(true);
       try {
-        // Fetch real NEXRAD data
+        const radarPromise = getRadarData(input.latitude, input.longitude)
+          .then((nexradResult) => ({ success: true as const, nexradResult }))
+          .catch((error) => ({ success: false as const, error }));
+
+        const hrrrPromise = input.advancedEnvironment
+          ? Promise.resolve({ success: true as const, advancedEnvironment: input.advancedEnvironment })
+          : fetchHrrrAdvancedEnvironment(input.latitude, input.longitude)
+              .then((hrrr) => ({ success: true as const, advancedEnvironment: hrrr.environment }))
+              .catch((error) => ({ success: false as const, error }));
+
+        const [radarResult, hrrrResult] = await Promise.all([radarPromise, hrrrPromise]);
+
         let radarInput = input.radarData;
-        try {
-          const nexradResult = await getRadarData(input.latitude, input.longitude);
+        if (radarResult.success) {
+          const nexradResult = radarResult.nexradResult;
           setRadarStatus(
             nexradResult.available
               ? `Connected${nexradResult.stationId ? ` (${nexradResult.stationId})` : ''}`
@@ -38,8 +51,8 @@ export function useTornadoAnalysis() {
             couplets: nexradResult.couplets,
             stormCells: nexradResult.cells,
           };
-        } catch (radarError) {
-          console.warn('[TornadoAnalysis] NEXRAD fetch failed:', radarError);
+        } else {
+          console.warn('[TornadoAnalysis] radar fetch failed:', radarResult.error);
           setRadarStatus('Radar fetch failed');
           radarInput = {
             available: false,
@@ -50,8 +63,20 @@ export function useTornadoAnalysis() {
           };
         }
 
-        // Run analysis with real radar data
-        const enrichedInput: AnalysisInput = { ...input, radarData: radarInput };
+        let advancedEnvironment = input.advancedEnvironment ?? null;
+        if (!advancedEnvironment && hrrrResult.success) {
+          advancedEnvironment = hrrrResult.advancedEnvironment;
+        } else if (!advancedEnvironment && !hrrrResult.success) {
+          console.warn('[TornadoAnalysis] HRRR upper-air fetch failed:', hrrrResult.error);
+        }
+
+        // Radar and HRRR are independent inputs. Failure of either source must
+        // degrade only that analysis layer rather than erase valid data from the other.
+        const enrichedInput: AnalysisInput = {
+          ...input,
+          radarData: radarInput,
+          advancedEnvironment,
+        };
         const r = analyzeStorm(enrichedInput, previousAnalysesRef.current);
 
         setResult(r);
@@ -66,6 +91,7 @@ export function useTornadoAnalysis() {
         inFlightRef.current = null;
       }
     })();
+
     inFlightRef.current = promise;
     return promise;
   }, []);
