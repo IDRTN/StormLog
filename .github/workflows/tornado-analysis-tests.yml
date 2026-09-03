@@ -42,6 +42,7 @@ jobs:
             --module commonjs \
             --target ES2022 \
             --moduleResolution node \
+            --types node \
             --ignoreDeprecations 6.0 \
             --esModuleInterop \
             --skipLibCheck \
