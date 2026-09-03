@@ -33,6 +33,25 @@ jobs:
       - name: TypeScript validation
         run: npm run typecheck
 
+      - name: Compile Daily Monitor location resolver test
+        run: |
+          rm -rf /tmp/stormlog-location-tests
+          npx tsc \
+            --ignoreConfig \
+            src/services/background/dailyMonitorLocationResolver.ts \
+            src/services/background/__tests__/dailyMonitorLocationResolver.runtime.test.ts \
+            --module commonjs \
+            --target ES2022 \
+            --moduleResolution node \
+            --types node \
+            --ignoreDeprecations 6.0 \
+            --esModuleInterop \
+            --skipLibCheck \
+            --outDir /tmp/stormlog-location-tests
+
+      - name: Run Daily Monitor location resolver test
+        run: node /tmp/stormlog-location-tests/__tests__/dailyMonitorLocationResolver.runtime.test.js
+
       - name: Compile NWS alert display test
         run: |
           rm -rf /tmp/stormlog-alert-display-tests
