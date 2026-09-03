@@ -49,7 +49,10 @@ jobs:
             --outDir /tmp/stormlog-weather-tests
 
       - name: Run weather provider runtime test
-        run: node /tmp/stormlog-weather-tests/weather/__tests__/weatherProvider.runtime.test.js
+        run: |
+          TEST_FILE="$(find /tmp/stormlog-weather-tests -name weatherProvider.runtime.test.js -print -quit)"
+          test -n "$TEST_FILE"
+          node "$TEST_FILE"
 
       - name: Compile advanced environment test
         run: |
