@@ -51,10 +51,12 @@ async function run(): Promise<void> {
   assert.equal(result.environment.srh03M2s2, null);
   assert.ok(result.environment.limitations.some((item) => item.includes('Storm motion unavailable')));
 
+  // Use a different point for each negative scenario so the provider cache
+  // cannot mask the payload under test.
   const stalePayload = profilePayload(referenceTimeMs - 3 * 60 * 60 * 1000);
   const staleFetch = async () => response(stalePayload);
   await assert.rejects(
-    () => fetchHrrrAdvancedEnvironment(40.1, -82.3, referenceTimeMs, staleFetch as typeof fetch),
+    () => fetchHrrrAdvancedEnvironment(40.2, -82.3, referenceTimeMs, staleFetch as typeof fetch),
     /more than 2 hours/,
   );
 
@@ -72,7 +74,7 @@ async function run(): Promise<void> {
     },
   });
   await assert.rejects(
-    () => fetchHrrrAdvancedEnvironment(40.1, -82.3, referenceTimeMs, incompleteFetch as typeof fetch),
+    () => fetchHrrrAdvancedEnvironment(40.3, -82.3, referenceTimeMs, incompleteFetch as typeof fetch),
     /profile incomplete/,
   );
 
