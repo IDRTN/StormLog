@@ -24,10 +24,12 @@ async function assertRejects(
 
 async function run(): Promise<void> {
   const nowMs = Date.UTC(2026, 8, 3, 20, 0, 0);
+  const neverTimeout = () => new Promise<void>(() => undefined);
+  const immediateTimeout = async () => undefined;
 
   const current = await resolveDailyMonitorLocation({
     now: () => nowMs,
-    wait: async () => undefined,
+    wait: neverTimeout,
     getCurrentPosition: async () => ({
       coords: { latitude: 40.1599, longitude: -82.2384 },
       timestamp: nowMs - 1_000,
@@ -48,7 +50,7 @@ async function run(): Promise<void> {
   const blockedCurrent = new Promise<null>(() => undefined);
   const lastKnown = await resolveDailyMonitorLocation({
     now: () => nowMs,
-    wait: async () => undefined,
+    wait: immediateTimeout,
     getCurrentPosition: () => blockedCurrent,
     getLastKnownPosition: async () => ({
       coords: { latitude: 40.16, longitude: -82.24 },
@@ -61,7 +63,7 @@ async function run(): Promise<void> {
 
   const cached = await resolveDailyMonitorLocation({
     now: () => nowMs,
-    wait: async () => undefined,
+    wait: neverTimeout,
     getCurrentPosition: async () => null,
     getLastKnownPosition: async () => ({
       coords: { latitude: 40.2, longitude: -82.3 },
@@ -79,7 +81,7 @@ async function run(): Promise<void> {
   await assertRejects(
     () => resolveDailyMonitorLocation({
       now: () => nowMs,
-      wait: async () => undefined,
+      wait: neverTimeout,
       getCurrentPosition: async () => null,
       getLastKnownPosition: async () => ({
         coords: { latitude: 40.2, longitude: -82.3 },
@@ -97,7 +99,7 @@ async function run(): Promise<void> {
   await assertRejects(
     () => resolveDailyMonitorLocation({
       now: () => nowMs,
-      wait: async () => undefined,
+      wait: neverTimeout,
       getCurrentPosition: async () => ({
         coords: { latitude: 999, longitude: -82.3 },
         timestamp: nowMs,
