@@ -12,6 +12,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Colors, SPACING, BORDER_RADIUS } from '../../src/constants/theme';
 import { WeatherCard } from '../../src/components/WeatherCard';
 import { TornadoAnalysisCard } from '../../src/components/TornadoAnalysisCard';
+import { ActiveNwsAlertsBanner } from '../../src/components/ActiveNwsAlertsBanner';
 import { useLocation } from '../../src/hooks/useLocation';
 import { useStormLogger } from '../../src/hooks/useStormLogger';
 import { useDailyMonitor } from '../../src/hooks/useDailyMonitor';
@@ -107,8 +108,6 @@ export default function HomeScreen() {
     try {
       const observationMap = new Map<number, AnalysisInput['recentObservations'][number]>();
 
-      // Storm-event observations are useful during an active chase, but they
-      // may not span a full hour immediately after logging starts.
       if (activeEventId) {
         try {
           const obs = await getRecentObservations(activeEventId, 120);
@@ -131,10 +130,6 @@ export default function HomeScreen() {
         }
       }
 
-      // Daily Monitor is already recording regular observations. Read that
-      // existing history so pressure/wind trends work on Home even when a
-      // manual storm log is not active. This is read-only integration and does
-      // not alter the Daily Monitor scheduler or collection path.
       try {
         const dateString = getWeatherLocalDateString(Date.now(), weather.utcOffsetSeconds);
         const dailyRecords = await getDailyRecordsForDate(dateString, weather.utcOffsetSeconds);
@@ -277,6 +272,11 @@ export default function HomeScreen() {
 
       {lastUpdated ? <Text style={styles.updatedText}>Updated: {lastUpdated}</Text> : null}
       <Text style={styles.conditionText}>{weather?.weatherCondition ?? 'Loading...'}</Text>
+
+      <ActiveNwsAlertsBanner
+        latitude={location?.latitude ?? null}
+        longitude={location?.longitude ?? null}
+      />
 
       {weatherError ? (
         <View style={[styles.errorBanner, { backgroundColor: Colors.danger + '20' }]}>
@@ -442,7 +442,7 @@ const styles = StyleSheet.create({
   locationRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: SPACING.xs },
   locationText: { color: Colors.textSecondary, fontSize: 13 },
   updatedText: { color: Colors.textSecondary, fontSize: 11, marginBottom: SPACING.sm },
-  conditionText: { color: Colors.white, fontSize: 22, fontWeight: '600', marginBottom: SPACING.lg },
+  conditionText: { color: Colors.white, fontSize: 22, fontWeight: '600', marginBottom: SPACING.md },
   errorBanner: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm, padding: SPACING.md, borderRadius: BORDER_RADIUS.md, width: '100%', marginBottom: SPACING.sm },
   errorText: { fontSize: 13, flex: 1 },
   cardRow: { flexDirection: 'row', gap: SPACING.sm, width: '100%', marginBottom: SPACING.sm },
