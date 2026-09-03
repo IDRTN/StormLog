@@ -33,6 +33,23 @@ jobs:
       - name: TypeScript validation
         run: npm run typecheck
 
+      - name: Compile weather provider runtime test
+        run: |
+          rm -rf /tmp/stormlog-weather-tests
+          npx tsc \
+            --ignoreConfig \
+            src/services/weather/__tests__/weatherProvider.runtime.test.ts \
+            --module commonjs \
+            --target ES2022 \
+            --moduleResolution node \
+            --ignoreDeprecations 6.0 \
+            --esModuleInterop \
+            --skipLibCheck \
+            --outDir /tmp/stormlog-weather-tests
+
+      - name: Run weather provider runtime test
+        run: node /tmp/stormlog-weather-tests/weather/__tests__/weatherProvider.runtime.test.js
+
       - name: Compile advanced environment test
         run: |
           rm -rf /tmp/stormlog-analysis-tests
