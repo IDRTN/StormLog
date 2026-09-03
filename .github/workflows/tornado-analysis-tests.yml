@@ -54,6 +54,26 @@ jobs:
           test -n "$TEST_FILE"
           node "$TEST_FILE"
 
+      - name: Compile temperature comfort test
+        run: |
+          rm -rf /tmp/stormlog-temperature-tests
+          npx tsc \
+            --ignoreConfig \
+            src/services/analysis/heatIndex.ts \
+            src/services/analysis/temperatureComfort.ts \
+            src/services/analysis/__tests__/temperatureComfort.runtime.test.ts \
+            --module commonjs \
+            --target ES2022 \
+            --moduleResolution node \
+            --types node \
+            --ignoreDeprecations 6.0 \
+            --esModuleInterop \
+            --skipLibCheck \
+            --outDir /tmp/stormlog-temperature-tests
+
+      - name: Run temperature comfort test
+        run: node /tmp/stormlog-temperature-tests/__tests__/temperatureComfort.runtime.test.js
+
       - name: Compile advanced environment test
         run: |
           rm -rf /tmp/stormlog-analysis-tests
@@ -71,6 +91,28 @@ jobs:
 
       - name: Run advanced environment test
         run: node /tmp/stormlog-analysis-tests/__tests__/advancedEnvironment.runtime.test.js
+
+      - name: Compile HRRR environment test
+        run: |
+          rm -rf /tmp/stormlog-hrrr-tests
+          npx tsc \
+            --ignoreConfig \
+            src/services/analysis/hrrrEnvironment.ts \
+            src/services/analysis/__tests__/hrrrEnvironment.runtime.test.ts \
+            --module commonjs \
+            --target ES2022 \
+            --moduleResolution node \
+            --types node \
+            --ignoreDeprecations 6.0 \
+            --esModuleInterop \
+            --skipLibCheck \
+            --outDir /tmp/stormlog-hrrr-tests
+
+      - name: Run HRRR environment test
+        run: |
+          TEST_FILE="$(find /tmp/stormlog-hrrr-tests -name hrrrEnvironment.runtime.test.js -print -quit)"
+          test -n "$TEST_FILE"
+          node "$TEST_FILE"
 
       - name: Compile tornado analysis runtime test
         run: |
