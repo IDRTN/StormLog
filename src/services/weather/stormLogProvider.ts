@@ -6,28 +6,34 @@ import { fetchOpenMeteoSnapshot } from './openMeteo';
 import { createHttpMrmsProvider, type MrmsProvider } from './mrms';
 import { guardedRequest } from '../network/requestGuard';
 
+export interface WeatherFeatureFlags {
+  NWS_CURRENT_CONDITIONS: boolean;
+  NWS_PRESSURE: boolean;
+  NWS_FORECAST: boolean;
+  MRMS_PRECIPITATION: boolean;
+}
+
 export const WEATHER_FEATURE_FLAGS = {
   NWS_CURRENT_CONDITIONS: true,
   NWS_PRESSURE: true,
   NWS_FORECAST: true,
   MRMS_PRECIPITATION: true,
-} as const;
+} as const satisfies WeatherFeatureFlags;
 
 const MRMS_SERVICE_URL = process.env.EXPO_PUBLIC_STORMLOG_MRMS_URL;
 
 type ObservationFetchJson = FetchJson & ForecastFetchJson;
-type FeatureFlags = typeof WEATHER_FEATURE_FLAGS;
 
 export interface StormLogProviderDependencies {
   mrmsProvider?: MrmsProvider;
   fetchJson?: ObservationFetchJson;
-  features?: Partial<FeatureFlags>;
+  features?: Partial<WeatherFeatureFlags>;
 }
 
 function mergeWeatherData(
   openMeteo: WeatherData,
   nws: WeatherData,
-  features: FeatureFlags,
+  features: WeatherFeatureFlags,
 ): WeatherData {
   const useCurrentConditions = features.NWS_CURRENT_CONDITIONS;
   const usePressure = features.NWS_PRESSURE;
@@ -79,7 +85,7 @@ export function createStormLogWeatherProvider(
   dependencies: StormLogProviderDependencies = {},
 ) {
   const fetchJson = dependencies.fetchJson ?? fetch;
-  const features: FeatureFlags = { ...WEATHER_FEATURE_FLAGS, ...dependencies.features };
+  const features: WeatherFeatureFlags = { ...WEATHER_FEATURE_FLAGS, ...dependencies.features };
   const mrms = dependencies.mrmsProvider ?? createHttpMrmsProvider(MRMS_SERVICE_URL, fetchJson);
 
   return {
