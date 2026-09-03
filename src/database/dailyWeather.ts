@@ -93,6 +93,18 @@ export async function getDailyRecordsForDate(
   );
 }
 
+/**
+ * Read every Daily Monitor observation in chronological order for export.
+ * This is intentionally read-only and does not participate in monitor
+ * scheduling or collection ownership.
+ */
+export async function getAllDailyRecords(): Promise<DailyWeatherRecord[]> {
+  const db = await getDatabase();
+  return await db.getAllAsync<DailyWeatherRecord>(
+    'SELECT * FROM daily_weather ORDER BY timestamp ASC'
+  );
+}
+
 export async function getDailySummary(dateString: string, utcOffsetSeconds?: number): Promise<DailySummary> {
   const records = await getDailyRecordsForDate(dateString, utcOffsetSeconds);
 
