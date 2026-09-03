@@ -7,6 +7,7 @@ import { View, Text, StyleSheet, TouchableOpacity, Modal, ScrollView } from 'rea
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, SPACING, BORDER_RADIUS } from '../constants/theme';
 import type { StormAnalysisResult, AssessmentLevel } from '../services/analysis/types';
+import { calculateTemperatureComfort } from '../services/analysis/temperatureComfort';
 
 interface Props {
   result: StormAnalysisResult | null;
@@ -111,8 +112,13 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
   const emoji = getLevelEmoji(result.overallAssessment);
   const label = getLevelLabel(result.overallAssessment);
   const motion = result.stormMotion;
-  const heatIndex = result.environment.heatIndexF;
-  const heatIndexCategory = result.environment.heatIndexCategory;
+  const comfort = calculateTemperatureComfort(
+    result.environment.surfaceTempF,
+    result.environment.surfaceHumidity,
+    result.environment.surfaceWindSpeed,
+  );
+  const heatIndex = comfort.heatIndexF;
+  const heatIndexCategory = comfort.heatIndexCategory;
   const heatIndexRisk = heatIndexCategory ? heatIndexCategory.replace('_', ' ') : 'NONE';
   const heatIndexColor = heatIndexCategory === 'DANGER' || heatIndexCategory === 'EXTREME_DANGER'
     ? '#DC2626'
@@ -186,6 +192,19 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
           <Row label="Pressure Trend" value={result.environment.pressureTrend} />
         ) : null}
         <Row
+          label="Feels Like"
+          value={comfort.feelsLikeF != null ? `${comfort.feelsLikeF.toFixed(1)}°F` : 'Unavailable'}
+        />
+        <Text style={s.metricReason}>
+          {comfort.method === 'HEAT_INDEX'
+            ? 'Feels Like is using the heat index.'
+            : comfort.method === 'WIND_CHILL'
+              ? 'Feels Like is using the wind chill.'
+              : comfort.method === 'AIR_TEMPERATURE'
+                ? 'No specialized heat/cold index applies, so Feels Like matches air temperature.'
+                : 'Feels Like requires a valid air temperature.'}
+        </Text>
+        <Row
           label="Heat Index"
           value={heatIndex != null ? `${heatIndex.toFixed(1)}°F` : 'Not applicable'}
           valueColor={heatIndex != null ? heatIndexColor : '#8B949E'}
@@ -195,8 +214,16 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
           value={heatIndexCategory ? heatIndexRisk : 'NONE'}
           valueColor={heatIndexColor}
         />
-        {heatIndex == null && result.environment.heatIndexDescription ? (
-          <Text style={s.metricReason}>{result.environment.heatIndexDescription}</Text>
+        {heatIndex == null ? (
+          <Text style={s.metricReason}>{comfort.heatIndexDescription}</Text>
+        ) : null}
+        <Row
+          label="Wind Chill"
+          value={comfort.windChillF != null ? `${comfort.windChillF.toFixed(1)}°F` : 'Not applicable'}
+          valueColor={comfort.windChillF != null ? Colors.primary : '#8B949E'}
+        />
+        {comfort.windChillF == null ? (
+          <Text style={s.metricReason}>{comfort.windChillDescription}</Text>
         ) : null}
       </Section>
 
