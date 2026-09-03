@@ -35,15 +35,6 @@ function finiteCoordinate(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
-function validCoordinates(latitude: unknown, longitude: unknown): latitude is number {
-  return finiteCoordinate(latitude)
-    && finiteCoordinate(longitude)
-    && latitude >= -90
-    && latitude <= 90
-    && longitude >= -180
-    && longitude <= 180;
-}
-
 function normalizeCandidate(
   candidate: DailyMonitorLocationCandidate,
   source: Exclude<DailyMonitorLocationSource, 'stormlog_cached'>,
@@ -51,7 +42,8 @@ function normalizeCandidate(
 ): DailyMonitorResolvedLocation | null {
   const latitude = candidate?.coords?.latitude;
   const longitude = candidate?.coords?.longitude;
-  if (!validCoordinates(latitude, longitude)) return null;
+  if (!finiteCoordinate(latitude) || !finiteCoordinate(longitude)) return null;
+  if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return null;
 
   const timestamp = candidate?.timestamp;
   const sourceTimestampMs = typeof timestamp === 'number' && Number.isFinite(timestamp) && timestamp > 0
@@ -66,7 +58,9 @@ function normalizeCached(
   cached: { latitude: number; longitude: number; timestampMs: number } | null,
   nowMs: number,
 ): DailyMonitorResolvedLocation | null {
-  if (!cached || !validCoordinates(cached.latitude, cached.longitude)) return null;
+  if (!cached) return null;
+  if (!finiteCoordinate(cached.latitude) || !finiteCoordinate(cached.longitude)) return null;
+  if (cached.latitude < -90 || cached.latitude > 90 || cached.longitude < -180 || cached.longitude > 180) return null;
   if (!Number.isFinite(cached.timestampMs) || cached.timestampMs <= 0) return null;
   return {
     latitude: cached.latitude,
