@@ -118,7 +118,7 @@ async function optionalProviderFailuresDoNotEraseOpenMeteo() {
   };
 
   const provider = createStormLogWeatherProvider({ fetchJson, mrmsProvider });
-  const result = await provider.getCurrentWeather(40.0393, -82.4606, reference);
+  const result = await provider.getCurrentWeather(40.0493, -82.4606, reference);
 
   assert(result.success, `Open-Meteo baseline should survive optional provider failures: ${!result.success ? result.error : ''}`);
   if (!result.success) return;
