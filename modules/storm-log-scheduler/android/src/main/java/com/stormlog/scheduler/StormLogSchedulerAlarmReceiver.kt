@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.app.AlarmManager
 import android.app.PendingIntent
-import android.os.Build
 import com.facebook.react.HeadlessJsTaskService
 
 class StormLogSchedulerAlarmReceiver : BroadcastReceiver() {
@@ -24,14 +23,16 @@ class StormLogSchedulerAlarmReceiver : BroadcastReceiver() {
         Intent(context, StormLogHeadlessTaskService::class.java).apply {
           putExtra("scheduledAt", scheduledAt)
           putExtra("intervalMinutes", intervalMinutes)
-          putExtra("source", "exact_alarm")
+          putExtra("source", "alarm_manager")
         }
       )
     } catch (error: Exception) {
-      android.util.Log.e("StormLogScheduler", "Exact-alarm collection launch failed", error)
+      android.util.Log.e("StormLogScheduler", "Alarm collection launch failed", error)
+    } finally {
+      // One-shot alarms are always re-armed here. Exact permission changes only
+      // affect precision; they no longer switch StormLog to an in-process timer.
+      StormLogSchedulerService.scheduleNextAlarm(context, intervalMinutes)
     }
-
-    StormLogSchedulerService.scheduleNextExactAlarm(context, intervalMinutes)
   }
 
   companion object {
