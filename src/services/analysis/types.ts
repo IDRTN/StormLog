@@ -16,7 +16,7 @@ export type HeatIndexCategory = 'CAUTION' | 'EXTREME_CAUTION' | 'DANGER' | 'EXTR
 
 export interface EnvironmentalAssessment {
   level: AssessmentLevel; cape: number | null; cin: number | null; surfaceTempF: number | null; surfaceDewPointF: number | null;
-  surfaceHumidity: number | null; heatIndexF?: number | null; heatIndexCategory?: HeatIndexCategory | null;
+  surfaceHumidity: number | null; heatIndexF?: number | null; heatIndexCategory?: HeatIndexCategory | null; heatIndexDescription?: string | null;
   surfaceWindSpeed: number | null; surfaceWindDirection: number | null; pressureTrend: PressureTrendDirection;
   pressureChange30Min: number | null; pressureChange60Min: number | null; lowLevelShear: number | null; deepLayerShear: number | null;
   srh: number | null; lclHeight: number | null; significantTornadoParam: number | null; supercellComposite: number | null;
