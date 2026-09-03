@@ -135,8 +135,6 @@ export function analyzeEnvironment(input: AnalysisInput): EnvironmentalAssessmen
   const advancedIsUsable = advanced != null && advanced.availability !== 'UNAVAILABLE';
   const advLevel = advancedIsUsable ? advancedLevel(advanced) : 'UNKNOWN';
   if (advancedIsUsable && advLevel !== 'UNKNOWN') {
-    // Vertical profile data is more directly relevant to the tornado environment than surface trends.
-    // Blend it conservatively with the surface assessment; do not double-count STP/SCP as independent evidence.
     const surfaceAvg = scoreCount > 0 ? overallScore / scoreCount : 0;
     const advVal = ({ VERY_HIGH: 1, HIGH: 0.7, MODERATE: 0.5, MARGINAL: 0.3, LOW: 0.1, VERY_LOW: 0, UNKNOWN: 0 } as Record<AssessmentLevel, number>)[advLevel];
     const blended = scoreCount > 0 ? (surfaceAvg + advVal) / 2 : advVal;
@@ -175,6 +173,7 @@ export function analyzeEnvironment(input: AnalysisInput): EnvironmentalAssessmen
     surfaceHumidity: input.humidity,
     heatIndexF: heatIndex.heatIndexF,
     heatIndexCategory: heatIndex.category,
+    heatIndexDescription: heatIndex.description,
     surfaceWindSpeed: input.windSpeed,
     surfaceWindDirection: input.windDirection,
     pressureTrend: pressure.trend,
