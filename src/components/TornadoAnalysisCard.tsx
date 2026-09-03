@@ -71,13 +71,16 @@ function FactorList({ factors }: { factors: string[] }) {
   );
 }
 
-function CapabilityRow({ label, available }: { label: string; available: boolean }) {
+function CapabilityRow({ label, available, reason }: { label: string; available: boolean; reason?: string }) {
   return (
-    <View style={s.radarCapsRow}>
-      <Text style={s.radarCapsLabel}>{label}</Text>
-      <Text style={[s.radarCapsValue, { color: available ? '#3FB950' : '#F0C000' }]}>
-        {available ? 'AVAILABLE' : 'UNAVAILABLE'}
-      </Text>
+    <View style={s.radarCapsItem}>
+      <View style={s.radarCapsRow}>
+        <Text style={s.radarCapsLabel}>{label}</Text>
+        <Text style={[s.radarCapsValue, { color: available ? '#3FB950' : '#F0C000' }]}>
+          {available ? 'AVAILABLE' : 'UNAVAILABLE'}
+        </Text>
+      </View>
+      {!available && reason ? <Text style={s.capabilityReason}>{reason}</Text> : null}
     </View>
   );
 }
@@ -110,19 +113,19 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
   const motion = result.stormMotion;
   const heatIndex = result.environment.heatIndexF;
   const heatIndexCategory = result.environment.heatIndexCategory;
-  const heatIndexRisk = heatIndexCategory ? heatIndexCategory.replace('_', ' ') : 'UNAVAILABLE';
+  const heatIndexRisk = heatIndexCategory ? heatIndexCategory.replace('_', ' ') : 'NONE';
   const heatIndexColor = heatIndexCategory === 'DANGER' || heatIndexCategory === 'EXTREME_DANGER'
     ? '#DC2626'
     : heatIndexCategory === 'EXTREME_CAUTION'
       ? '#F0883E'
-      : '#F0C000';
+      : heatIndexCategory === 'CAUTION'
+        ? '#F0C000'
+        : '#3FB950';
 
-  // These capability labels must reflect the validated analysis result, not
-  // assumptions about a particular provider. That keeps the UI truthful if a
-  // future provider supplies velocity, quantitative reflectivity, or dual-pol.
   const quantitativeDbzAvailable = result.stormStructure.maxReflectivity != null;
   const velocityAvailable = result.rotation.velocityDataAvailable;
   const dualPolAvailable = result.tornadicEvidence.dualPolAvailable;
+  const radarConnected = result.stormStructure.radarAvailable;
 
   return (
     <View style={s.card}>
@@ -131,11 +134,31 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
 
       <View style={s.radarCaps}>
         <Text style={s.radarCapsTitle}>RADAR CAPABILITIES</Text>
-        <CapabilityRow label="Connection" available={result.stormStructure.radarAvailable} />
-        <CapabilityRow label="Reflectivity imagery" available={result.stormStructure.radarAvailable} />
-        <CapabilityRow label="Quantitative dBZ" available={quantitativeDbzAvailable} />
-        <CapabilityRow label="Doppler velocity" available={velocityAvailable} />
-        <CapabilityRow label="Dual-pol" available={dualPolAvailable} />
+        <CapabilityRow
+          label="Connection"
+          available={radarConnected}
+          reason="No radar feed is currently connected for this location."
+        />
+        <CapabilityRow
+          label="Reflectivity imagery"
+          available={radarConnected}
+          reason="Radar imagery cannot be displayed without a connected radar feed."
+        />
+        <CapabilityRow
+          label="Quantitative dBZ"
+          available={quantitativeDbzAvailable}
+          reason="The current radar path supplies imagery only; calibrated reflectivity values are not being decoded yet."
+        />
+        <CapabilityRow
+          label="Doppler velocity"
+          available={velocityAvailable}
+          reason="Base velocity data is not connected to the current radar-processing path yet."
+        />
+        <CapabilityRow
+          label="Dual-pol"
+          available={dualPolAvailable}
+          reason="Correlation coefficient and other dual-pol products are not connected to the current radar-processing path yet."
+        />
       </View>
 
       <View style={[s.banner, { borderLeftColor: color }]}>
@@ -169,9 +192,12 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
         />
         <Row
           label="Heat Risk"
-          value={heatIndexCategory ? heatIndexRisk : 'Not applicable'}
-          valueColor={heatIndexCategory ? heatIndexColor : '#8B949E'}
+          value={heatIndexCategory ? heatIndexRisk : 'NONE'}
+          valueColor={heatIndexColor}
         />
+        {heatIndex == null && result.environment.heatIndexDescription ? (
+          <Text style={s.metricReason}>{result.environment.heatIndexDescription}</Text>
+        ) : null}
       </Section>
 
       <Section title="ATMOSPHERIC TORNADO ENVIRONMENT">
@@ -194,6 +220,9 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
             : 'Unavailable'}
           valueColor={quantitativeDbzAvailable ? undefined : '#8B949E'}
         />
+        {!quantitativeDbzAvailable ? (
+          <Text style={s.metricReason}>Calibrated dBZ values are unavailable because the current radar provider only supplies imagery.</Text>
+        ) : null}
         {motion?.distanceMiles != null ? <Row label="Distance" value={`${motion.distanceMiles.toFixed(1)} mi`} /> : null}
         {motion ? (
           <Row
@@ -203,7 +232,9 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
               motion.speedMph != null ? `${motion.speedMph.toFixed(0)} mph` : null,
             ].filter(Boolean).join(' · ')}
           />
-        ) : null}
+        ) : (
+          <Text style={s.metricReason}>Storm motion is unavailable until a validated storm-cell motion source is connected.</Text>
+        )}
         {!result.stormStructure.radarAvailable ? <Row label="Radar" value="Not connected" valueColor="#8B949E" /> : null}
       </Section>
 
@@ -267,6 +298,9 @@ export function TornadoAnalysisCard({ result, loading, radarStatus }: Props) {
             ? 'Not available (no dual-pol)'
             : result.tornadicEvidence.debrisSignature ? 'Detected' : 'Not detected'}
         />
+        {!dualPolAvailable ? (
+          <Text style={s.metricReason}>A debris signature cannot be evaluated until dual-pol correlation-coefficient data is available.</Text>
+        ) : null}
         {result.tornadicEvidence.correlationCoefficient != null ? (
           <Row label="CC" value={result.tornadicEvidence.correlationCoefficient.toFixed(2)} />
         ) : null}
@@ -368,6 +402,7 @@ const s = StyleSheet.create({
   rowLabel: { fontSize: 13, color: Colors.textSecondary, flexBasis: '38%', flexShrink: 0 },
   rowValue: { fontSize: 13, color: Colors.text, fontWeight: '500', textAlign: 'right', flex: 1, marginLeft: 8 },
   contextNote: { fontSize: 10, color: Colors.textSecondary, lineHeight: 14, marginBottom: 5, fontStyle: 'italic' },
+  metricReason: { fontSize: 10, color: Colors.textSecondary, lineHeight: 14, marginTop: 2, marginBottom: 5, fontStyle: 'italic' },
   blockStatusLabel: { fontSize: 10, color: Colors.textSecondary, fontWeight: '700', marginBottom: 3 },
   blockStatusValue: { fontSize: 12, color: Colors.textSecondary, lineHeight: 17 },
   unavailableNote: { fontSize: 11, color: '#F0C000', fontStyle: 'italic', marginTop: 4, lineHeight: 16 },
@@ -397,7 +432,9 @@ const s = StyleSheet.create({
   radarStatus: { fontSize: 11, color: Colors.textSecondary, marginBottom: 8, fontStyle: 'italic' },
   radarCaps: { backgroundColor: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: 8, marginBottom: 10 },
   radarCapsTitle: { fontSize: 10, fontWeight: '700', color: '#8B949E', letterSpacing: 1, marginBottom: 4 },
+  radarCapsItem: { marginBottom: 4 },
   radarCapsRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 2 },
   radarCapsLabel: { fontSize: 11, color: '#8B949E' },
   radarCapsValue: { fontSize: 11, fontWeight: '600' },
+  capabilityReason: { fontSize: 9, color: '#8B949E', lineHeight: 13, paddingRight: 6 },
 });
