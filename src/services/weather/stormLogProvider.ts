@@ -16,19 +16,21 @@ export const WEATHER_FEATURE_FLAGS = {
 const MRMS_SERVICE_URL = process.env.EXPO_PUBLIC_STORMLOG_MRMS_URL;
 
 type ObservationFetchJson = FetchJson & ForecastFetchJson;
+type FeatureFlags = typeof WEATHER_FEATURE_FLAGS;
 
 export interface StormLogProviderDependencies {
   mrmsProvider?: MrmsProvider;
   fetchJson?: ObservationFetchJson;
-  features?: Partial<typeof WEATHER_FEATURE_FLAGS>;
+  features?: Partial<FeatureFlags>;
 }
 
 function mergeWeatherData(
   openMeteo: WeatherData,
   nws: WeatherData,
+  features: FeatureFlags,
 ): WeatherData {
-  const useCurrentConditions = WEATHER_FEATURE_FLAGS.NWS_CURRENT_CONDITIONS;
-  const usePressure = WEATHER_FEATURE_FLAGS.NWS_PRESSURE;
+  const useCurrentConditions = features.NWS_CURRENT_CONDITIONS;
+  const usePressure = features.NWS_PRESSURE;
   const merged: WeatherData = {
     ...openMeteo,
     temperature: useCurrentConditions ? nws.temperature ?? openMeteo.temperature : openMeteo.temperature,
@@ -41,8 +43,8 @@ function mergeWeatherData(
     visibility: useCurrentConditions ? nws.visibility ?? null : undefined,
     presentWeather: useCurrentConditions ? nws.presentWeather ?? [] : undefined,
     cloudLayers: useCurrentConditions ? nws.cloudLayers ?? [] : undefined,
-    currentConditionsSource: useCurrentConditions ? nws.currentConditionsSource : undefined,
-    pressureSource: usePressure ? nws.pressureSource : openMeteo.pressureSource,
+    currentConditionsSource: useCurrentConditions ? nws.currentConditionsSource : openMeteo.currentConditionsSource,
+    pressureSource: usePressure ? nws.pressureSource ?? openMeteo.pressureSource : openMeteo.pressureSource,
     valueSources: [...(nws.valueSources ?? []), ...(openMeteo.valueSources ?? [])],
   };
 
@@ -57,11 +59,27 @@ function mergeWeatherData(
   return merged;
 }
 
+function hasUsableCurrentConditions(data: WeatherData | undefined): data is WeatherData {
+  if (!data) return false;
+  return [
+    data.temperature,
+    data.humidity,
+    data.pressure,
+    data.windSpeed,
+    data.dewPoint,
+  ].some((value) => typeof value === 'number' && Number.isFinite(value));
+}
+
+function providerError(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  return String(error ?? 'unknown provider error');
+}
+
 export function createStormLogWeatherProvider(
   dependencies: StormLogProviderDependencies = {},
 ) {
   const fetchJson = dependencies.fetchJson ?? fetch;
-  const features = { ...WEATHER_FEATURE_FLAGS, ...dependencies.features };
+  const features: FeatureFlags = { ...WEATHER_FEATURE_FLAGS, ...dependencies.features };
   const mrms = dependencies.mrmsProvider ?? createHttpMrmsProvider(MRMS_SERVICE_URL, fetchJson);
 
   return {
@@ -78,27 +96,63 @@ export function createStormLogWeatherProvider(
           cacheTtlMs: 60 * 1000,
           cacheIf: (result) => result.success,
           execute: async () => {
-            const openMeteoResult = await fetchOpenMeteoSnapshot(
+            // Provider isolation is intentional. A malformed or unavailable response
+            // from one upstream source must not erase valid data from another source.
+            const openMeteoPromise = fetchOpenMeteoSnapshot(
               latitude,
               longitude,
               referenceTimeMs,
               fetchJson,
+            ).then(
+              (value) => ({ success: true as const, value }),
+              (error) => ({ success: false as const, error }),
             );
-            const utcOffsetSeconds = openMeteoResult.data.utcOffsetSeconds ?? 0;
-            const [nwsResult, forecastResult, mrmsResult] = await Promise.all([
-              features.NWS_CURRENT_CONDITIONS || features.NWS_PRESSURE
-                ? fetchBestNwsObservation(referenceTimeMs, fetchJson)
-                : Promise.resolve({ success: false as const, error: 'disabled' }),
-              features.NWS_FORECAST
-                ? fetchNwsForecast(latitude, longitude, referenceTimeMs, fetchJson)
-                : Promise.resolve({ success: false as const, error: 'disabled' }),
-              features.MRMS_PRECIPITATION
-                ? mrms.getPrecipitation(latitude, longitude, referenceTimeMs, utcOffsetSeconds)
-                : Promise.resolve(null),
+
+            const nwsPromise = features.NWS_CURRENT_CONDITIONS || features.NWS_PRESSURE
+              ? fetchBestNwsObservation(referenceTimeMs, fetchJson)
+              : Promise.resolve({ success: false as const, error: 'disabled' });
+
+            const forecastPromise = features.NWS_FORECAST
+              ? fetchNwsForecast(latitude, longitude, referenceTimeMs, fetchJson)
+              : Promise.resolve({ success: false as const, error: 'disabled' });
+
+            const [openMeteoResult, nwsResult, forecastResult] = await Promise.all([
+              openMeteoPromise,
+              nwsPromise,
+              forecastPromise,
             ]);
 
-            let weatherData = openMeteoResult.data;
-            if (nwsResult.success && nwsResult.data) weatherData = mergeWeatherData(weatherData, nwsResult.data);
+            let weatherData: WeatherData | null = null;
+            let openMeteoAvailable = false;
+
+            if (openMeteoResult.success) {
+              weatherData = openMeteoResult.value.data;
+              openMeteoAvailable = true;
+            }
+
+            if (nwsResult.success && hasUsableCurrentConditions(nwsResult.data)) {
+              weatherData = weatherData
+                ? mergeWeatherData(weatherData, nwsResult.data, features)
+                : {
+                    ...nwsResult.data,
+                    referenceTimeMs,
+                    weatherTimezone: forecastResult.success
+                      ? forecastResult.timezone ?? nwsResult.data.weatherTimezone
+                      : nwsResult.data.weatherTimezone,
+                  };
+            }
+
+            if (!weatherData) {
+              const openError = openMeteoResult.success
+                ? 'Open-Meteo returned no usable weather data'
+                : providerError(openMeteoResult.error);
+              const nwsError = nwsResult.error ?? 'NWS observation unavailable';
+              return {
+                success: false,
+                error: `Weather sources unavailable — Open-Meteo: ${openError}; NWS: ${nwsError}`,
+                noConnection: /network|fetch|timeout|connection/i.test(`${openError} ${nwsError}`),
+              };
+            }
 
             if (forecastResult.success && forecastResult.source) {
               weatherData.forecast = {
@@ -111,17 +165,43 @@ export function createStormLogWeatherProvider(
               weatherData.forecastSource = forecastResult.source;
             }
 
-            if (mrmsResult) {
-              weatherData.precipitation = mrmsResult.currentOneHourInches;
-              weatherData.precipitationRateInchesPerHour = mrmsResult.precipitationRateInchesPerHour;
-              weatherData.observedDailyPrecipitation = mrmsResult.observedDailyPrecipitationInches;
-              weatherData.observedDailyPrecipitationIsComplete = mrmsResult.observedDailyIsComplete;
-              weatherData.precipitationIsComplete = mrmsResult.observedDailyIsComplete;
-              weatherData.currentPartialHourPrecipitation = mrmsResult.currentPartialHourInches;
-              weatherData.precipitationSource = mrmsResult.source;
-              if (mrmsResult.precipitationRateInchesPerHour != null) {
-                weatherData.rainRateSource = mrmsResult.source;
+            // MRMS daily accumulation depends on the weather-location UTC offset.
+            // If Open-Meteo is unavailable, skip MRMS instead of guessing an offset.
+            if (features.MRMS_PRECIPITATION && openMeteoAvailable) {
+              try {
+                const utcOffsetSeconds = weatherData.utcOffsetSeconds ?? 0;
+                const mrmsResult = await mrms.getPrecipitation(
+                  latitude,
+                  longitude,
+                  referenceTimeMs,
+                  utcOffsetSeconds,
+                );
+
+                if (mrmsResult) {
+                  weatherData.precipitation = mrmsResult.currentOneHourInches;
+                  weatherData.precipitationRateInchesPerHour = mrmsResult.precipitationRateInchesPerHour;
+                  weatherData.observedDailyPrecipitation = mrmsResult.observedDailyPrecipitationInches;
+                  weatherData.observedDailyPrecipitationIsComplete = mrmsResult.observedDailyIsComplete;
+                  weatherData.precipitationIsComplete = mrmsResult.observedDailyIsComplete;
+                  weatherData.currentPartialHourPrecipitation = mrmsResult.currentPartialHourInches;
+                  weatherData.precipitationSource = mrmsResult.source;
+                  if (mrmsResult.precipitationRateInchesPerHour != null) {
+                    weatherData.rainRateSource = mrmsResult.source;
+                  }
+                }
+              } catch (error) {
+                console.warn('[WEATHER] MRMS unavailable; preserving other weather data:', providerError(error));
               }
+            }
+
+            if (!openMeteoAvailable) {
+              console.warn('[WEATHER] Open-Meteo unavailable; using degraded NWS-only weather data');
+            }
+            if (!nwsResult.success) {
+              console.warn('[WEATHER] NWS observation unavailable; using Open-Meteo current conditions');
+            }
+            if (!forecastResult.success) {
+              console.warn('[WEATHER] NWS forecast unavailable; current conditions remain usable');
             }
 
             return { success: true, data: weatherData };
@@ -129,7 +209,7 @@ export function createStormLogWeatherProvider(
         });
       } catch (error: any) {
         const message = error?.message || String(error);
-        const noConnection = message.includes('Network') || message.includes('fetch') || message.includes('timeout');
+        const noConnection = /network|fetch|timeout|connection/i.test(message);
         return {
           success: false,
           error: noConnection ? 'No internet connection' : `Weather fetch failed: ${message}`,
