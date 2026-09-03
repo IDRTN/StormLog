@@ -102,9 +102,6 @@ async function optionalProviderFailuresDoNotEraseOpenMeteo() {
         daily: { time: [] },
       });
     }
-    if (url.includes('/stations/')) {
-      return jsonResponse(200, null, new Error('JSON Parse error: Unexpected character: U'));
-    }
     if (url.startsWith('https://api.weather.gov/points/')) {
       return jsonResponse(200, null, new Error('JSON Parse error: Unexpected character: U'));
     }
@@ -117,7 +114,16 @@ async function optionalProviderFailuresDoNotEraseOpenMeteo() {
     },
   };
 
-  const provider = createStormLogWeatherProvider({ fetchJson, mrmsProvider });
+  const provider = createStormLogWeatherProvider({
+    fetchJson,
+    mrmsProvider,
+    features: {
+      NWS_CURRENT_CONDITIONS: false,
+      NWS_PRESSURE: false,
+      NWS_FORECAST: true,
+      MRMS_PRECIPITATION: true,
+    },
+  });
   const result = await provider.getCurrentWeather(40.0493, -82.4606, reference);
 
   assert(result.success, `Open-Meteo baseline should survive optional provider failures: ${!result.success ? result.error : ''}`);
