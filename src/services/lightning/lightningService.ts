@@ -17,9 +17,10 @@ import {
 } from './lightningUsageStore';
 
 const LIGHTNING_PROXY_URL = process.env.EXPO_PUBLIC_STORMLOG_LIGHTNING_URL?.trim() || null;
+const LIGHTNING_PROXY_TOKEN = process.env.EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN?.trim() || null;
 
 const rawAdapter: LightningProviderAdapter | null = LIGHTNING_PROXY_URL
-  ? new HttpLightningAdapter(LIGHTNING_PROXY_URL)
+  ? new HttpLightningAdapter(LIGHTNING_PROXY_URL, fetch, LIGHTNING_PROXY_TOKEN)
   : null;
 
 const adapter: LightningProviderAdapter | null = rawAdapter
