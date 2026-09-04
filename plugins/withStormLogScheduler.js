@@ -1,6 +1,5 @@
 const { withAndroidManifest } = require('expo/config-plugins');
 
-const SCHEDULER_SERVICE = 'com.stormlog.scheduler.StormLogSchedulerService';
 const HEADLESS_SERVICE = 'com.stormlog.scheduler.StormLogHeadlessTaskService';
 const ALARM_RECEIVER = 'com.stormlog.scheduler.StormLogSchedulerAlarmReceiver';
 const EXACT_ALARM_PERMISSION_RECEIVER = 'com.stormlog.scheduler.StormLogExactAlarmPermissionReceiver';
@@ -40,13 +39,9 @@ module.exports = function withStormLogScheduler(config) {
     const application = configWithManifest.modResults.manifest.application?.[0];
     if (!application) throw new Error('StormLog scheduler could not find the Android application manifest entry.');
 
-    ensureService(application, SCHEDULER_SERVICE, {
-      'android:enabled': 'true',
-      'android:exported': 'false',
-      'android:foregroundServiceType': 'location',
-      'android:stopWithTask': 'false',
-    });
-
+    // There is intentionally no always-running StormLog scheduler service.
+    // AlarmManager owns timing and this headless service exists only while a
+    // collection is executing.
     ensureService(application, HEADLESS_SERVICE, {
       'android:enabled': 'true',
       'android:exported': 'false',
