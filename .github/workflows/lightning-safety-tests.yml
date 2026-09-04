@@ -48,6 +48,8 @@ jobs:
             src/services/lightning/__tests__/lightningSafety.runtime.test.ts \
             src/services/lightning/__tests__/lightningUsageGuard.runtime.test.ts \
             src/services/lightning/__tests__/httpLightningAdapter.runtime.test.ts \
+            server/lightning-proxy/src/handler.ts \
+            server/lightning-proxy/src/handler.runtime.test.ts \
             --module commonjs \
             --target ES2022 \
             --moduleResolution node \
@@ -59,10 +61,13 @@ jobs:
             --outDir /tmp/stormlog-lightning-tests
 
       - name: Run lightning safety runtime test
-        run: node /tmp/stormlog-lightning-tests/__tests__/lightningSafety.runtime.test.js
+        run: node /tmp/stormlog-lightning-tests/src/services/lightning/__tests__/lightningSafety.runtime.test.js
 
       - name: Run lightning usage guard runtime test
-        run: node /tmp/stormlog-lightning-tests/__tests__/lightningUsageGuard.runtime.test.js
+        run: node /tmp/stormlog-lightning-tests/src/services/lightning/__tests__/lightningUsageGuard.runtime.test.js
 
       - name: Run lightning provider adapter runtime test
-        run: node /tmp/stormlog-lightning-tests/__tests__/httpLightningAdapter.runtime.test.js
+        run: node /tmp/stormlog-lightning-tests/src/services/lightning/__tests__/httpLightningAdapter.runtime.test.js
+
+      - name: Run secured lightning proxy runtime test
+        run: node /tmp/stormlog-lightning-tests/server/lightning-proxy/src/handler.runtime.test.js
