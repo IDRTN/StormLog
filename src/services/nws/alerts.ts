@@ -12,6 +12,12 @@ export interface NormalizedNwsAlert extends NwsAlert {
   references?: string[];
 }
 
+export interface NwsAreaProduct {
+  code: 'HWO' | 'SPS';
+  label: string;
+  issuedAt: number;
+}
+
 function normalizeAlertTimestamp(value: unknown): number | null {
   if (typeof value !== 'string' || value.length === 0) return null;
   const timestamp = Date.parse(value);
@@ -201,4 +207,90 @@ export async function getAlertCount(
 ): Promise<number> {
   const alerts = await fetchNwsAlerts(latitude, longitude, nowMs!);
   return alerts.length;
+}
+
+function extractNwsId(url: unknown): string | null {
+  if (typeof url !== 'string' || url.length === 0) return null;
+  const value = url.split('/').filter(Boolean).pop();
+  return value?.trim() || null;
+}
+
+async function fetchJson(url: string, service: string): Promise<any> {
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'StormLog/1.0 (stormlog@example.com)',
+      Accept: 'application/geo+json, application/json',
+    },
+  });
+  if (response.status === 429) throw createRateLimitError(service, response);
+  if (!response.ok) throw new Error(`${service} HTTP ${response.status}`);
+  return response.json();
+}
+
+function productMentionsLocation(productText: string, countyId: string | null, forecastZoneId: string | null, countyName: string | null): boolean {
+  const text = productText.toUpperCase();
+  if (countyId && text.includes(countyId.toUpperCase())) return true;
+  if (forecastZoneId && text.includes(forecastZoneId.toUpperCase())) return true;
+  if (countyName && text.includes(countyName.toUpperCase())) return true;
+  return false;
+}
+
+export async function fetchRelevantNwsAreaProducts(
+  latitude: number,
+  longitude: number,
+  nowMs: number = Date.now()
+): Promise<NwsAreaProduct[]> {
+  const cacheKey = `${latitude.toFixed(3)},${longitude.toFixed(3)}:${Math.floor(nowMs / (5 * 60000))}`;
+  return guardedRequest<NwsAreaProduct[]>({
+    service: 'NWS area products',
+    key: cacheKey,
+    cacheTtlMs: 5 * 60 * 1000,
+    execute: async () => {
+      const point = await fetchJson(`${NWS_API}/points/${latitude},${longitude}`, 'NWS point metadata');
+      const props = point?.properties ?? {};
+      const office = typeof props.cwa === 'string' ? props.cwa.trim() : '';
+      if (!office) return [];
+
+      const countyUrl = typeof props.county === 'string' ? props.county : null;
+      const countyId = extractNwsId(countyUrl);
+      const forecastZoneId = extractNwsId(props.forecastZone);
+      let countyName: string | null = null;
+      if (countyUrl) {
+        try {
+          const county = await fetchJson(countyUrl, 'NWS county metadata');
+          countyName = typeof county?.properties?.name === 'string' ? county.properties.name : null;
+        } catch (error) {
+          console.warn('[NWS-PRODUCTS] County metadata lookup failed:', error);
+        }
+      }
+
+      const definitions: Array<{ code: 'HWO' | 'SPS'; label: string; maxAgeMs: number }> = [
+        { code: 'HWO', label: 'Hazardous Weather Outlook', maxAgeMs: 18 * 60 * 60 * 1000 },
+        { code: 'SPS', label: 'Special Weather Statement', maxAgeMs: 3 * 60 * 60 * 1000 },
+      ];
+
+      const products: NwsAreaProduct[] = [];
+      for (const definition of definitions) {
+        try {
+          const product = await fetchJson(
+            `${NWS_API}/products/types/${definition.code}/locations/${office}/latest`,
+            `NWS ${definition.code} product`
+          );
+          const issuanceTime = normalizeAlertTimestamp(product?.issuanceTime ?? product?.properties?.issuanceTime);
+          const productText = typeof product?.productText === 'string'
+            ? product.productText
+            : typeof product?.properties?.productText === 'string'
+              ? product.properties.productText
+              : '';
+          if (issuanceTime == null || nowMs - issuanceTime > definition.maxAgeMs || issuanceTime > nowMs + 5 * 60 * 1000) continue;
+          if (!productMentionsLocation(productText, countyId, forecastZoneId, countyName)) continue;
+          products.push({ code: definition.code, label: definition.label, issuedAt: issuanceTime });
+        } catch (error) {
+          console.warn(`[NWS-PRODUCTS] ${definition.code} lookup failed:`, error);
+        }
+      }
+
+      return products.sort((a, b) => b.issuedAt - a.issuedAt);
+    },
+  });
 }
