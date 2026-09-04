@@ -46,12 +46,13 @@ export function LightningSafetyBanner() {
   const usageText = remaining != null
     ? `Lightning API: ${remaining.toLocaleString()} accesses left${remainingPct != null ? ` (${remainingPct}%)` : ''}`
     : 'Lightning API usage: awaiting first live check';
+  const detailText = error ? `Refresh error: ${error}` : safety.detail;
 
   return (
     <View
       style={[styles.container, { borderColor: color, backgroundColor: color + '12' }]}
       accessible
-      accessibilityLabel={`Lightning safety. ${safety.title}. ${proximity ?? safety.detail}. ${usageText}`}
+      accessibilityLabel={`Lightning safety. ${safety.title}. ${proximity ?? detailText}. ${usageText}`}
     >
       <Ionicons name={icon(safety.level)} size={23} color={color} />
       <View style={styles.content}>
@@ -60,7 +61,7 @@ export function LightningSafetyBanner() {
           {loading ? <Text style={styles.refreshing}>REFRESHING</Text> : null}
         </View>
         {proximity ? <Text style={styles.proximity}>{proximity}</Text> : null}
-        <Text style={styles.detail}>{error ? 'Lightning status could not be refreshed.' : safety.detail}</Text>
+        <Text style={styles.detail}>{detailText}</Text>
         {ageMinutes != null ? (
           <Text style={styles.age}>Lightning data age: {ageMinutes} min</Text>
         ) : null}
