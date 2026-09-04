@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Colors, SPACING, BORDER_RADIUS } from '../constants/theme';
 import { getActiveAlertTypes } from '../services/nws/alerts';
 import { sortAlertTypes, type AlertDisplayTone } from '../services/nws/alertDisplay';
+import { LightningSafetyBanner } from './LightningSafetyBanner';
 
 type Props = {
   latitude: number | null;
@@ -44,46 +45,55 @@ export function ActiveNwsAlertsBanner({ latitude, longitude }: Props) {
     return () => clearInterval(timer);
   }, [latitude, longitude, refresh]);
 
-  if (latitude == null || longitude == null) return null;
+  let nwsContent: React.ReactNode = null;
 
-  if (!lookupAvailable) {
-    return (
-      <View style={[styles.statusBanner, styles.unavailableBanner]}>
-        <Ionicons name="warning-outline" size={15} color={Colors.warning} />
-        <Text style={[styles.statusText, { color: Colors.warning }]}>NWS alerts unavailable</Text>
-      </View>
-    );
-  }
-
-  const alerts = sortAlertTypes(alertTypes);
-  if (alerts.length === 0) {
-    return (
-      <View style={[styles.statusBanner, styles.clearBanner]}>
-        <Ionicons name="shield-checkmark-outline" size={15} color={Colors.loggingActive} />
-        <Text style={[styles.statusText, { color: Colors.loggingActive }]}>
-          {loading ? 'Checking NWS alerts…' : 'No active NWS alerts'}
-        </Text>
-      </View>
-    );
-  }
-
-  const highestColor = toneColor(alerts[0].tone);
-  return (
-    <View style={[styles.alertCard, { borderColor: highestColor }]}> 
-      <View style={styles.headerRow}>
-        <Ionicons name="warning" size={17} color={highestColor} />
-        <Text style={[styles.headerText, { color: highestColor }]}>ACTIVE NWS ALERTS</Text>
-      </View>
-      {alerts.map((alert) => {
-        const color = toneColor(alert.tone);
-        return (
-          <View key={alert.event} style={styles.alertRow}>
-            <View style={[styles.alertDot, { backgroundColor: color }]} />
-            <Text style={[styles.alertText, { color }]}>{alert.event}</Text>
+  if (latitude != null && longitude != null) {
+    if (!lookupAvailable) {
+      nwsContent = (
+        <View style={[styles.statusBanner, styles.unavailableBanner]}>
+          <Ionicons name="warning-outline" size={15} color={Colors.warning} />
+          <Text style={[styles.statusText, { color: Colors.warning }]}>NWS alerts unavailable</Text>
+        </View>
+      );
+    } else {
+      const alerts = sortAlertTypes(alertTypes);
+      if (alerts.length === 0) {
+        nwsContent = (
+          <View style={[styles.statusBanner, styles.clearBanner]}>
+            <Ionicons name="shield-checkmark-outline" size={15} color={Colors.loggingActive} />
+            <Text style={[styles.statusText, { color: Colors.loggingActive }]}>
+              {loading ? 'Checking NWS alerts…' : 'No active NWS alerts'}
+            </Text>
           </View>
         );
-      })}
-    </View>
+      } else {
+        const highestColor = toneColor(alerts[0].tone);
+        nwsContent = (
+          <View style={[styles.alertCard, { borderColor: highestColor }]}>
+            <View style={styles.headerRow}>
+              <Ionicons name="warning" size={17} color={highestColor} />
+              <Text style={[styles.headerText, { color: highestColor }]}>ACTIVE NWS ALERTS</Text>
+            </View>
+            {alerts.map((alert) => {
+              const color = toneColor(alert.tone);
+              return (
+                <View key={alert.event} style={styles.alertRow}>
+                  <View style={[styles.alertDot, { backgroundColor: color }]} />
+                  <Text style={[styles.alertText, { color }]}>{alert.event}</Text>
+                </View>
+              );
+            })}
+          </View>
+        );
+      }
+    }
+  }
+
+  return (
+    <>
+      {nwsContent}
+      <LightningSafetyBanner />
+    </>
   );
 }
 

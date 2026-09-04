@@ -1,21 +1,21 @@
 // ============================================================
 // Lightning Service — Module-level singleton wiring
-//
-// Phase 4: Connects LightningCoordinator to real dependencies.
-// Exposes convenience functions for callers.
 // ============================================================
 
-import { BlitzortungAdapter } from './providers/blitzortungAdapter';
 import {
   LightningCoordinator,
   type LightningCollectionContext,
   type LightningCollectionResult,
 } from './lightningCoordinator';
-import {
-  insertLightningEvents,
-} from '../../database/lightningEvents';
+import { insertLightningEvents } from '../../database/lightningEvents';
+import { HttpLightningAdapter } from './providers/httpLightningAdapter';
+import type { LightningProviderAdapter } from './lightningProviderAdapter';
 
-const adapter = new BlitzortungAdapter();
+const LIGHTNING_PROXY_URL = process.env.EXPO_PUBLIC_STORMLOG_LIGHTNING_URL?.trim() || null;
+
+const adapter: LightningProviderAdapter | null = LIGHTNING_PROXY_URL
+  ? new HttpLightningAdapter(LIGHTNING_PROXY_URL)
+  : null;
 
 const coordinator = new LightningCoordinator({
   adapter,
@@ -24,7 +24,17 @@ const coordinator = new LightningCoordinator({
   },
 });
 
-// ---- Public convenience functions ----
+export type LightningProviderStatus = {
+  configured: boolean;
+  providerName: string | null;
+};
+
+export function getLightningProviderStatus(): LightningProviderStatus {
+  return {
+    configured: adapter != null,
+    providerName: adapter?.providerName ?? null,
+  };
+}
 
 export async function collectLightning(
   context: LightningCollectionContext,

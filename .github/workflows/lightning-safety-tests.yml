@@ -1,0 +1,56 @@
+name: StormLog Lightning Safety Tests
+
+on:
+  push:
+    branches:
+      - master
+      - lightning-safety-rollout
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22.16.0"
+
+jobs:
+  validate-lightning-safety:
+    name: Validate lightning safety rollout
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "${{ env.NODE_VERSION }}"
+          cache: npm
+
+      - name: Install locked dependencies
+        env:
+          NPM_CONFIG_LEGACY_PEER_DEPS: "true"
+        run: npm ci
+
+      - name: TypeScript validation
+        run: npm run typecheck
+
+      - name: Compile lightning safety runtime test
+        run: |
+          rm -rf /tmp/stormlog-lightning-tests
+          npx tsc \
+            --ignoreConfig \
+            src/services/lightning/lightningSafety.ts \
+            src/services/lightning/__tests__/lightningSafety.runtime.test.ts \
+            --module commonjs \
+            --target ES2022 \
+            --moduleResolution node \
+            --types node \
+            --ignoreDeprecations 6.0 \
+            --esModuleInterop \
+            --skipLibCheck \
+            --outDir /tmp/stormlog-lightning-tests
+
+      - name: Run lightning safety runtime test
+        run: node /tmp/stormlog-lightning-tests/__tests__/lightningSafety.runtime.test.js
