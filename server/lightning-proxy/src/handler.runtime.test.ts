@@ -10,10 +10,12 @@ function assert(condition: boolean, message: string): void {
 
 async function run(): Promise<void> {
   let upstreamUrl = '';
+  let upstreamOrigin = '';
   const env: ProxyEnv = {
     XWEATHER_CLIENT_ID: 'server-id',
     XWEATHER_CLIENT_SECRET: 'server-secret',
     STORMLOG_CLIENT_TOKEN: 'app-token',
+    XWEATHER_NAMESPACE_ORIGIN: 'https://stormlog.example',
   };
 
   const unauthorized = await handleLightningProxy(
@@ -27,8 +29,9 @@ async function run(): Promise<void> {
       headers: { 'x-stormlog-client-token': 'app-token' },
     }),
     env,
-    async (input) => {
+    async (input, init) => {
       upstreamUrl = String(input);
+      upstreamOrigin = new Headers(init?.headers).get('origin') ?? '';
       return new Response(JSON.stringify({
         success: true,
         error: null,
@@ -46,10 +49,10 @@ async function run(): Promise<void> {
         headers: {
           'content-type': 'application/json',
           'x-cost-tokens': '10',
-          'x-ratelimit-period-limit': '15000',
-          'x-ratelimit-period-remaining': '14990',
-          'x-ratelimit-period-reset': '12345',
-          'x-ratelimit-period-type': 'month',
+          'x-ratelimit-limit-period': '15000',
+          'x-ratelimit-remaining-period': '14990',
+          'x-ratelimit-reset-period': '12345',
+          'x-ratelimit-limit-period-type': 'month',
         },
       });
     },
@@ -63,6 +66,7 @@ async function run(): Promise<void> {
   assertEqual(called.searchParams.get('client_secret'), 'server-secret');
   assertEqual(called.searchParams.get('from'), '-5minutes');
   assertEqual(called.searchParams.get('to'), 'now');
+  assertEqual(upstreamOrigin, 'https://stormlog.example');
   assert(Number(called.searchParams.get('radius')!.replace('km', '')) <= 40.234, 'radius must be hard-capped to 25 miles');
   assertEqual(called.searchParams.has('sinceMs'), false);
   assertEqual(called.searchParams.has('untilMs'), false);
@@ -73,6 +77,7 @@ async function run(): Promise<void> {
   assertEqual(payload.events[0].classification, 'CG');
   assertEqual(payload.events[0].polarity, 'negative');
   assertEqual(response.headers.get('x-cost-tokens'), '10');
+  assertEqual(response.headers.get('x-ratelimit-remaining-period'), '14990');
   assertEqual(JSON.stringify(payload).includes('server-secret'), false, 'provider secret must never be returned to the phone');
 
   let stored = JSON.stringify({ remaining: 1500 });
