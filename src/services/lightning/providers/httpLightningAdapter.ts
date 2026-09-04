@@ -23,6 +23,27 @@ function numberHeader(headers: Headers, name: string): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
+function compactErrorBody(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? trimmed.slice(0, 180) : null;
+  }
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const parts = [record.error, record.code, record.description]
+      .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+      .map((part) => part.trim());
+    if (parts.length > 0) return parts.join(': ').slice(0, 180);
+    try {
+      return JSON.stringify(value).slice(0, 180);
+    } catch {
+      return null;
+    }
+  }
+  return String(value).slice(0, 180);
+}
+
 export class HttpLightningAdapter implements LightningProviderAdapter {
   readonly providerName = 'StormLog Lightning Proxy';
 
@@ -56,7 +77,20 @@ export class HttpLightningAdapter implements LightningProviderAdapter {
     });
 
     if (!response.ok) {
-      const error = new Error(`Lightning provider HTTP ${response.status}`) as Error & {
+      let responseDetail: string | null = null;
+      try {
+        const contentType = response.headers.get('content-type') ?? '';
+        if (contentType.includes('application/json')) {
+          responseDetail = compactErrorBody(await response.json());
+        } else {
+          responseDetail = compactErrorBody(await response.text());
+        }
+      } catch {
+        responseDetail = null;
+      }
+
+      const suffix = responseDetail ? ` — ${responseDetail}` : '';
+      const error = new Error(`Lightning provider HTTP ${response.status}${suffix}`) as Error & {
         status?: number;
         retryAfterMs?: number;
       };
