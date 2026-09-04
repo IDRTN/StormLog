@@ -6,6 +6,8 @@
 // The coordinator never knows provider-specific details.
 // ============================================================
 
+import type { LightningUsageHeaders } from './lightningUsageGuard';
+
 // ---- Normalized provider event ----
 
 export interface LightningProviderEvent {
@@ -29,6 +31,7 @@ export interface LightningProviderResult {
   events: LightningProviderEvent[];
   fetchedAt: number;
   rateLimitRetryAfterMs?: number;
+  usage?: LightningUsageHeaders;
 }
 
 // ---- Provider adapter contract ----

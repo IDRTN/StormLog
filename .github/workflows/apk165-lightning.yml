@@ -1,0 +1,124 @@
+name: StormLog APK 165 Lightning
+
+on:
+  push:
+    branches:
+      - lightning-safety-rollout
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  EXPO_PUBLIC_STORMLOG_LIGHTNING_URL: "https://stormlog-lightning-proxy.idontrememberthename74.workers.dev"
+  EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN: ${{ secrets.STORMLOG_LIGHTNING_TOKEN }}
+  NPM_CONFIG_LEGACY_PEER_DEPS: "true"
+
+jobs:
+  build-apk165:
+    name: Build APK 165 with lightning
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out lightning rollout
+        uses: actions/checkout@v4
+
+      - name: Require lightning client token
+        shell: bash
+        run: |
+          if [[ -z "${EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN:-}" ]]; then
+            echo "::error title=Missing lightning token::Add repository Actions secret STORMLOG_LIGHTNING_TOKEN with the same value stored as Cloudflare STORMLOG_CLIENT_TOKEN."
+            exit 1
+          fi
+
+      - name: Verify live lightning proxy authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESPONSE_FILE="$(mktemp)"
+          STATUS="$(curl -sS -o "$RESPONSE_FILE" -w '%{http_code}' \
+            -H 'accept: application/json' \
+            -H "x-stormlog-client-token: ${EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN}" \
+            "${EXPO_PUBLIC_STORMLOG_LIGHTNING_URL}/events?latitude=40&longitude=-82.5&radiusKm=1&sinceMs=0&untilMs=0")"
+          echo "Lightning proxy HTTP status: $STATUS"
+          if [[ "$STATUS" != "200" ]]; then
+            BODY="$(head -c 500 "$RESPONSE_FILE" | tr '\n' ' ')"
+            echo "::error title=Lightning proxy live check failed::Worker returned HTTP $STATUS: $BODY"
+            exit 1
+          fi
+          node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if(!Array.isArray(p.events)){throw new Error("Worker 200 response is missing events array")}' "$RESPONSE_FILE"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.16.0"
+          cache: npm
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build components
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006" "cmake;3.22.1"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript validation
+        run: npm run typecheck
+
+      - name: Generate Android project
+        env:
+          CI: "1"
+          EXPO_NO_TELEMETRY: "1"
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Enable embedded JS bundle for standalone debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          GRADLE_FILE="android/app/build.gradle"
+          test -f "$GRADLE_FILE"
+          test "$(grep -Eic '^[[:space:]]*react[[:space:]]*\{[[:space:]]*$' "$GRADLE_FILE")" -eq 1
+          TEMP_GRADLE="$(mktemp)"
+          awk '
+            BEGIN { inserted = 0 }
+            !inserted && $0 ~ /^[[:space:]]*react[[:space:]]*\{[[:space:]]*$/ {
+              print
+              print "    debuggableVariants = []"
+              inserted = 1
+              next
+            }
+            { print }
+            END { if (!inserted) exit 1 }
+          ' "$GRADLE_FILE" > "$TEMP_GRADLE"
+          mv "$TEMP_GRADLE" "$GRADLE_FILE"
+          test "$(grep -cF 'debuggableVariants = []' "$GRADLE_FILE")" -eq 1
+
+      - name: Build standalone debug APK 165
+        working-directory: android
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
+
+      - name: Verify APK exists
+        shell: bash
+        run: |
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          sha256sum "$APK"
+          cp "$APK" StormLog-APK-165-lightning.apk
+
+      - name: Upload APK 165 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StormLog-APK-165-lightning
+          path: StormLog-APK-165-lightning.apk
+          if-no-files-found: error
+          retention-days: 14

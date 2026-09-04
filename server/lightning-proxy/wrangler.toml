@@ -1,0 +1,12 @@
+name = "stormlog-lightning-proxy"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+workers_dev = true
+
+# Create a KV namespace and bind it as LIGHTNING_USAGE_KV before deployment.
+# Never put XWEATHER_CLIENT_ID, XWEATHER_CLIENT_SECRET, or STORMLOG_CLIENT_TOKEN here.
+# Add them with `wrangler secret put ...` so they remain server-side only.
+
+# [[kv_namespaces]]
+# binding = "LIGHTNING_USAGE_KV"
+# id = "REPLACE_WITH_KV_NAMESPACE_ID"

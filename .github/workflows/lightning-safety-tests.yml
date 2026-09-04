@@ -1,0 +1,73 @@
+name: StormLog Lightning Safety Tests
+
+on:
+  push:
+    branches:
+      - master
+      - lightning-safety-rollout
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22.16.0"
+
+jobs:
+  validate-lightning-safety:
+    name: Validate lightning safety rollout
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "${{ env.NODE_VERSION }}"
+          cache: npm
+
+      - name: Install locked dependencies
+        env:
+          NPM_CONFIG_LEGACY_PEER_DEPS: "true"
+        run: npm ci
+
+      - name: TypeScript validation
+        run: npm run typecheck
+
+      - name: Compile lightning runtime tests
+        run: |
+          rm -rf /tmp/stormlog-lightning-tests
+          npx tsc \
+            --ignoreConfig \
+            src/services/lightning/lightningSafety.ts \
+            src/services/lightning/lightningUsageGuard.ts \
+            src/services/lightning/providers/httpLightningAdapter.ts \
+            src/services/lightning/lightningProviderAdapter.ts \
+            src/services/lightning/__tests__/lightningSafety.runtime.test.ts \
+            src/services/lightning/__tests__/lightningUsageGuard.runtime.test.ts \
+            src/services/lightning/__tests__/httpLightningAdapter.runtime.test.ts \
+            server/lightning-proxy/src/handler.ts \
+            server/lightning-proxy/src/handler.runtime.test.ts \
+            --module commonjs \
+            --target ES2022 \
+            --moduleResolution node \
+            --types node \
+            --lib ES2022,DOM \
+            --ignoreDeprecations 6.0 \
+            --esModuleInterop \
+            --skipLibCheck \
+            --outDir /tmp/stormlog-lightning-tests
+
+      - name: Run lightning safety runtime test
+        run: node /tmp/stormlog-lightning-tests/src/services/lightning/__tests__/lightningSafety.runtime.test.js
+
+      - name: Run lightning usage guard runtime test
+        run: node /tmp/stormlog-lightning-tests/src/services/lightning/__tests__/lightningUsageGuard.runtime.test.js
+
+      - name: Run lightning provider adapter runtime test
+        run: node /tmp/stormlog-lightning-tests/src/services/lightning/__tests__/httpLightningAdapter.runtime.test.js
+
+      - name: Run secured lightning proxy runtime test
+        run: node /tmp/stormlog-lightning-tests/server/lightning-proxy/src/handler.runtime.test.js
