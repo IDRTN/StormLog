@@ -36,17 +36,21 @@ jobs:
       - name: TypeScript validation
         run: npm run typecheck
 
-      - name: Compile lightning safety runtime test
+      - name: Compile lightning runtime tests
         run: |
           rm -rf /tmp/stormlog-lightning-tests
           npx tsc \
             --ignoreConfig \
             src/services/lightning/lightningSafety.ts \
+            src/services/lightning/providers/httpLightningAdapter.ts \
+            src/services/lightning/lightningProviderAdapter.ts \
             src/services/lightning/__tests__/lightningSafety.runtime.test.ts \
+            src/services/lightning/__tests__/httpLightningAdapter.runtime.test.ts \
             --module commonjs \
             --target ES2022 \
             --moduleResolution node \
             --types node \
+            --lib ES2022,DOM \
             --ignoreDeprecations 6.0 \
             --esModuleInterop \
             --skipLibCheck \
@@ -54,3 +58,6 @@ jobs:
 
       - name: Run lightning safety runtime test
         run: node /tmp/stormlog-lightning-tests/__tests__/lightningSafety.runtime.test.js
+
+      - name: Run lightning provider adapter runtime test
+        run: node /tmp/stormlog-lightning-tests/__tests__/httpLightningAdapter.runtime.test.js
