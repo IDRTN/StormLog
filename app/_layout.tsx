@@ -5,8 +5,10 @@ import * as Notifications from 'expo-notifications';
 import type { EventSubscription } from 'expo-modules-core';
 import { Colors } from '../src/constants/theme';
 import { ensureNotificationChannels, requestNotificationPermission } from '../src/services/notifications';
-// Keep background task definitions in the root module graph so Android can
-// initialize them when a headless/background task starts without opening a route.
+import { initializeDailyMonitorCoordinator } from '../src/services/background/dailyMonitor';
+
+// Importing the module at root keeps TaskManager/headless definitions in the
+// startup graph. Runtime repair is also explicitly initialized once below.
 import '../src/services/background/dailyMonitor';
 
 export default function RootLayout() {
@@ -14,9 +16,20 @@ export default function RootLayout() {
   const responseListener = useRef<EventSubscription | null>(null);
 
   useEffect(() => {
-    (async () => {
-      await ensureNotificationChannels();
-      await requestNotificationPermission();
+    void (async () => {
+      try {
+        await ensureNotificationChannels();
+        await requestNotificationPermission();
+      } catch (error) {
+        console.warn('[ROOT] Notification setup failed:', error);
+      }
+
+      try {
+        await initializeDailyMonitorCoordinator();
+        console.log('[ROOT] Daily Monitor runtime initialized');
+      } catch (error) {
+        console.error('[ROOT] Daily Monitor runtime initialization failed:', error);
+      }
     })();
 
     notificationListener.current = Notifications.addNotificationReceivedListener(notification => {
@@ -28,14 +41,10 @@ export default function RootLayout() {
     });
 
     return () => {
-      if (notificationListener.current) {
-        notificationListener.current.remove();
-        notificationListener.current = null;
-      }
-      if (responseListener.current) {
-        responseListener.current.remove();
-        responseListener.current = null;
-      }
+      notificationListener.current?.remove();
+      responseListener.current?.remove();
+      notificationListener.current = null;
+      responseListener.current = null;
     };
   }, []);
 
