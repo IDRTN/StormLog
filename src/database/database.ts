@@ -5,12 +5,31 @@ const DB_NAME = 'stormlog.db';
 const CURRENT_VERSION = CURRENT_SCHEMA_VERSION;
 
 let db: SQLite.SQLiteDatabase | null = null;
+let dbInitialization: Promise<SQLite.SQLiteDatabase> | null = null;
 
 export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
   if (db) return db;
-  db = await SQLite.openDatabaseAsync(DB_NAME);
-  await migrateDatabase(db);
-  return db;
+  if (dbInitialization) return dbInitialization;
+
+  dbInitialization = (async () => {
+    const opened = await SQLite.openDatabaseAsync(DB_NAME);
+    try {
+      await migrateDatabase(opened);
+      db = opened;
+      return opened;
+    } catch (error) {
+      try {
+        await opened.closeAsync();
+      } catch {
+        // Best-effort cleanup only. Preserve the original initialization error.
+      }
+      throw error;
+    } finally {
+      dbInitialization = null;
+    }
+  })();
+
+  return dbInitialization;
 }
 
 async function migrateDatabase(database: SQLite.SQLiteDatabase): Promise<void> {
