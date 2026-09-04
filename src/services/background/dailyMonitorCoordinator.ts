@@ -83,7 +83,6 @@ export class DailyMonitorCoordinator {
     await this.writeStorage(DAILY_MONITOR_INTERVAL_EXPORT, interval.toString());
     this.patchState({ isActive: true, intervalMinutes: interval });
     await this.ensureForegroundRuntime();
-    // Preserve the established Start Log behavior: begin with an immediate observation.
     const result = await this.collectManual();
     if (!result.success) console.warn('[Coordinator] Initial Start Log collection failed:', result.error);
   }
@@ -121,17 +120,48 @@ export class DailyMonitorCoordinator {
     }
   }
 
+  private async commitAutomaticSuccess(completedAtMs: number): Promise<void> {
+    if (!this.dependencies.foregroundService) return;
+    try {
+      const module = await import('./dailyMonitorClaim');
+      await module.markDailyMonitorCollectionSucceeded(completedAtMs);
+    } catch (error) {
+      console.warn('[Coordinator] Automatic success gate commit unavailable:', error);
+    }
+  }
+
+  private async releaseAutomaticLease(): Promise<void> {
+    if (!this.dependencies.foregroundService) return;
+    try {
+      const module = await import('./dailyMonitorClaim');
+      await module.releaseAutomaticCollectionLease();
+    } catch (error) {
+      console.warn('[Coordinator] Automatic lease release unavailable:', error);
+    }
+  }
+
   async collectAutomatic(): Promise<DailyCollectionResult> {
     await this.initializeForAutomatic();
     if (this.inFlight) return this.inFlight.then((result) => ({ ...result, outcome: 'shared' }));
     const nowMs = this.now();
     const intervalMs = this.state.intervalMinutes * 60 * 1000;
-    if (this.lastAutomaticAttemptMs > 0 && nowMs - this.lastAutomaticAttemptMs < intervalMs) return { success: true, outcome: 'skipped_recent_automatic' };
+
+    // A successful automatic run remains interval-gated locally. Failed runs
+    // clear this timestamp in recordCollectionResult so they can be retried.
+    if (this.lastAutomaticAttemptMs > 0 && nowMs - this.lastAutomaticAttemptMs < intervalMs) {
+      return { success: true, outcome: 'skipped_recent_automatic' };
+    }
+
     const claim = await this.resolveAutomaticClaim();
     if (claim) {
       try {
         const claimed = await claim(nowMs, intervalMs);
-        if (!claimed) { this.lastAutomaticAttemptMs = nowMs; return { success: true, outcome: 'skipped_recent_automatic' }; }
+        if (!claimed) {
+          // Do NOT advance lastAutomaticAttemptMs here. Another process may
+          // merely hold a short in-progress lease. Treating that denial as a
+          // completed interval was the root cause of silent missed cycles.
+          return { success: true, outcome: 'skipped_recent_automatic' };
+        }
       } catch (error) {
         console.warn('[Coordinator] Atomic automatic claim unavailable; using local gate:', error);
       }
@@ -201,12 +231,31 @@ export class DailyMonitorCoordinator {
     if (result.success) {
       await this.writeStorage(LAST_COLLECTION_KEY_EXPORT, completedAt.toString());
       await this.removeStorage(LAST_ERROR_EXPORT);
-      if (mode === 'automatic') await this.writeStorage(LAST_AUTOMATIC_COLLECTION_KEY, (automaticAttemptAt ?? completedAt).toString());
+      if (mode === 'automatic') {
+        await this.writeStorage(LAST_AUTOMATIC_COLLECTION_KEY, (automaticAttemptAt ?? completedAt).toString());
+        await this.commitAutomaticSuccess(completedAt);
+      } else {
+        // A manual collection is still a real successful observation. Commit
+        // it to the cross-process gate so an automatic task does not duplicate
+        // it moments later.
+        await this.commitAutomaticSuccess(completedAt);
+      }
       this.patchState({ lastCollectionTime: completedAt, lastError: null });
       return;
     }
+
     const error = result.error || 'Unknown collection error';
     await this.writeStorage(LAST_ERROR_EXPORT, error);
+
+    if (mode === 'automatic') {
+      // Critical hardening: a failed attempt is not a completed interval.
+      // Clear both the local/persisted attempt gate and the SQLite lease so a
+      // watchdog/background/native trigger can retry instead of waiting 15m.
+      this.lastAutomaticAttemptMs = 0;
+      await this.removeStorage(LAST_AUTOMATIC_ATTEMPT_KEY);
+      await this.releaseAutomaticLease();
+    }
+
     this.patchState({ lastError: error });
   }
 
