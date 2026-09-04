@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getLightningCoordinator, getLightningProviderStatus } from '../services/lightning/lightningService';
+import {
+  getLightningCoordinator,
+  getLightningProviderStatus,
+  getLightningUsageSnapshot,
+} from '../services/lightning/lightningService';
 import { getLightningSafetySnapshot } from '../services/lightning/lightningSafetyRepository';
 import { getLightningSafetyState, type LightningSafetyState } from '../services/lightning/lightningSafety';
+import type { LightningUsageSnapshot } from '../services/lightning/lightningUsageGuard';
 
 export type LightningSafetyHookState = {
   safety: LightningSafetyState;
+  usage: LightningUsageSnapshot | null;
   loading: boolean;
   lastRefreshMs: number | null;
   error: string | null;
@@ -24,6 +30,7 @@ const INITIAL_SAFETY = getLightningSafetyState({
 export function useLightningSafety(): LightningSafetyHookState & { refresh: () => void } {
   const [state, setState] = useState<LightningSafetyHookState>({
     safety: INITIAL_SAFETY,
+    usage: null,
     loading: false,
     lastRefreshMs: null,
     error: null,
@@ -38,7 +45,10 @@ export function useLightningSafety(): LightningSafetyHookState & { refresh: () =
     try {
       const coordinatorState = getLightningCoordinator().getState();
       const providerStatus = getLightningProviderStatus();
-      const snapshot = await getLightningSafetySnapshot(Date.now());
+      const [snapshot, usage] = await Promise.all([
+        getLightningSafetySnapshot(Date.now()),
+        getLightningUsageSnapshot(),
+      ]);
       const safety = getLightningSafetyState({
         nowMs: Date.now(),
         providerConfigured: providerStatus.configured,
@@ -49,7 +59,7 @@ export function useLightningSafety(): LightningSafetyHookState & { refresh: () =
         lastAttemptMs: coordinatorState.lastAttemptMs,
         lastError: coordinatorState.lastResult?.error ?? null,
       });
-      setState({ safety, loading: false, lastRefreshMs: Date.now(), error: null });
+      setState({ safety, usage, loading: false, lastRefreshMs: Date.now(), error: null });
     } catch (error: any) {
       setState((current) => ({
         ...current,
