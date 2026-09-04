@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Colors, SPACING, BORDER_RADIUS } from '../constants/theme';
 import { useLightningSafety } from '../hooks/useLightningSafety';
 import type { LightningSafetyLevel } from '../services/lightning/lightningSafety';
+import { getEffectiveRemaining } from '../services/lightning/lightningUsageGuard';
 
 function tone(level: LightningSafetyLevel): string {
   switch (level) {
@@ -30,18 +31,27 @@ function icon(level: LightningSafetyLevel): keyof typeof Ionicons.glyphMap {
 }
 
 export function LightningSafetyBanner() {
-  const { safety, loading, error } = useLightningSafety();
+  const { safety, usage, loading, error } = useLightningSafety();
   const color = tone(safety.level);
   const proximity = safety.nearestDistanceMiles != null
     ? `${safety.nearestDistanceMiles.toFixed(1)} mi${safety.direction ? ` ${safety.direction}` : ''}`
     : null;
   const ageMinutes = safety.dataAgeMs == null ? null : Math.round(safety.dataAgeMs / 60_000);
+  const usageKnown = usage?.lastUpdatedAtMs != null;
+  const remaining = usageKnown && usage ? getEffectiveRemaining(usage) : null;
+  const limit = usageKnown && usage ? usage.periodLimit : null;
+  const remainingPct = remaining != null && limit != null && limit > 0
+    ? Math.round((remaining / limit) * 100)
+    : null;
+  const usageText = remaining != null
+    ? `Lightning API: ${remaining.toLocaleString()} accesses left${remainingPct != null ? ` (${remainingPct}%)` : ''}`
+    : 'Lightning API usage: awaiting first live check';
 
   return (
     <View
       style={[styles.container, { borderColor: color, backgroundColor: color + '12' }]}
       accessible
-      accessibilityLabel={`Lightning safety. ${safety.title}. ${proximity ?? safety.detail}`}
+      accessibilityLabel={`Lightning safety. ${safety.title}. ${proximity ?? safety.detail}. ${usageText}`}
     >
       <Ionicons name={icon(safety.level)} size={23} color={color} />
       <View style={styles.content}>
@@ -54,6 +64,7 @@ export function LightningSafetyBanner() {
         {ageMinutes != null ? (
           <Text style={styles.age}>Lightning data age: {ageMinutes} min</Text>
         ) : null}
+        <Text style={styles.usage}>{usageText}</Text>
         <Text style={styles.disclaimer}>Safety aid only — use official warnings and move indoors when thunder is heard.</Text>
       </View>
     </View>
@@ -77,5 +88,6 @@ const styles = StyleSheet.create({
   proximity: { color: Colors.white, fontSize: 19, fontWeight: '800', marginTop: 2 },
   detail: { color: Colors.text, fontSize: 12, marginTop: 2 },
   age: { color: Colors.textSecondary, fontSize: 10, marginTop: 4 },
+  usage: { color: Colors.textSecondary, fontSize: 10, marginTop: 4, fontWeight: '600' },
   disclaimer: { color: Colors.textSecondary, fontSize: 9, marginTop: 5, lineHeight: 12 },
 });
