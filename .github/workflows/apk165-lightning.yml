@@ -1,0 +1,132 @@
+name: StormLog APK 165 Lightning
+
+on:
+  push:
+    branches:
+      - lightning-safety-rollout
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  EXPO_PUBLIC_STORMLOG_LIGHTNING_URL: "https://stormlog-lightning-proxy.idontrememberthename74.workers.dev"
+  EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN: ${{ secrets.STORMLOG_LIGHTNING_TOKEN }}
+  NPM_CONFIG_LEGACY_PEER_DEPS: "true"
+
+jobs:
+  build-apk165:
+    name: Build APK 165 with lightning
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out lightning rollout
+        uses: actions/checkout@v4
+
+      - name: Require lightning client token
+        shell: bash
+        run: |
+          if [[ -z "${EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN:-}" ]]; then
+            echo "::error title=Missing lightning token::Add repository Actions secret STORMLOG_LIGHTNING_TOKEN with the same value stored as Cloudflare STORMLOG_CLIENT_TOKEN."
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.16.0"
+          cache: npm
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build components
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006" "cmake;3.22.1"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript validation
+        run: npm run typecheck
+
+      - name: Generate Android project
+        env:
+          CI: "1"
+          EXPO_NO_TELEMETRY: "1"
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Configure release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          STORMLOG_RELEASE_KEYSTORE: ${{ runner.temp }}/stormlog-release.keystore
+          STORMLOG_RELEASE_SIGNING_GRADLE: ${{ runner.temp }}/stormlog-release-signing.gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variable in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [[ -z "${!variable:-}" ]]; then
+              echo "::error title=Release signing missing::GitHub secret ${variable} is required."
+              exit 1
+            fi
+          done
+
+          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | tr -d '\r\n' | base64 --decode > "${STORMLOG_RELEASE_KEYSTORE}"
+          chmod 600 "${STORMLOG_RELEASE_KEYSTORE}"
+
+          cat > "${STORMLOG_RELEASE_SIGNING_GRADLE}" <<'GRADLE'
+          android {
+            signingConfigs {
+              stormlogRelease {
+                storeFile file(System.getenv("STORMLOG_RELEASE_KEYSTORE"))
+                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+              }
+            }
+            buildTypes {
+              release {
+                signingConfig signingConfigs.stormlogRelease
+              }
+            }
+          }
+          GRADLE
+
+          printf '\napply from: "%s"\n' "${STORMLOG_RELEASE_SIGNING_GRADLE}" >> android/app/build.gradle
+
+      - name: Build release APK 165
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          STORMLOG_RELEASE_KEYSTORE: ${{ runner.temp }}/stormlog-release.keystore
+          STORMLOG_RELEASE_SIGNING_GRADLE: ${{ runner.temp }}/stormlog-release-signing.gradle
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
+
+      - name: Verify APK exists
+        shell: bash
+        run: |
+          APK="android/app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+          sha256sum "$APK"
+          cp "$APK" StormLog-APK-165-lightning.apk
+
+      - name: Upload APK 165 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StormLog-APK-165-lightning
+          path: StormLog-APK-165-lightning.apk
+          if-no-files-found: error
+          retention-days: 14
