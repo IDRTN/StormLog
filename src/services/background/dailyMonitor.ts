@@ -3,12 +3,11 @@ import * as TaskManager from 'expo-task-manager';
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { fetchWeather } from '../weather';
-import { insertDailyRecord } from '../../database/dailyWeather';
-import { getActiveAlertTypes, fetchNwsAlerts } from '../nws/alerts';
+import { insertDailyRecordIdempotent } from '../../database/dailyWeatherWriter';
+import { fetchNwsAlerts } from '../nws/alerts';
 import { notifyWeatherCollected, notifyCollectionFailed } from '../notifications';
 import {
   processNwsAlertsForStormEvents,
-  withNwsAlertProcessingFailures,
   type NwsAlertProcessingFailure,
 } from '../stormLogs/nwsWarningTrigger';
 import { dispatchWarningNotification } from '../stormLogs/warningNotificationDecision';
@@ -25,10 +24,6 @@ import {
 } from './dailyMonitorForegroundService';
 import {
   DailyMonitorCoordinator,
-  DAILY_MONITOR_ENABLED_EXPORT,
-  DAILY_MONITOR_INTERVAL_EXPORT,
-  LAST_COLLECTION_KEY_EXPORT,
-  LAST_ERROR_EXPORT,
   type DailyCollectionMode,
   type DailyCollectionResult,
 } from './dailyMonitorCoordinator';
@@ -70,19 +65,15 @@ const dailyMonitorCoordinator = new DailyMonitorCoordinator({
   },
 });
 
-// ============================================================
-// Register foreground location task callback — delegates to coordinator
-// ============================================================
+// Legacy Expo Location fallback only. Production Android uses the native
+// scheduler; this callback remains for unsupported/dev runtimes.
 registerForegroundLocationTask(() => dailyMonitorCoordinator.collectAutomatic());
 
-// ============================================================
-// Background task definition — must be at module top level
-// ============================================================
+// BackgroundFetch is a watchdog/recovery trigger, not the authoritative clock.
 TaskManager.defineTask(DAILY_MONITOR_TASK, async () => {
-  const TAG = '[BG-TASK]';
+  const TAG = '[BG-WATCHDOG]';
   const now = new Date();
   console.log(`${TAG} EXECUTED at ${formatLocalDateTime(now)}`);
-  console.log(`${TAG} Local date: ${getLocalDateString(now)}`);
 
   try {
     const result = await dailyMonitorCoordinator.collectAutomatic();
@@ -106,9 +97,10 @@ TaskManager.defineTask(DAILY_MONITOR_TASK, async () => {
   }
 });
 
-// ============================================================
-// Core collection — works in foreground AND background.
-// ============================================================
+// Core collection pipeline. Once a daily_weather row is safely persisted, the
+// collection counts as successful even if optional NWS/lightning enrichment has
+// a secondary failure. This prevents a successfully-written observation from
+// being retried and duplicated.
 export async function executeDailyCollectionPipeline(): Promise<{ success: boolean; error?: string }> {
   const TAG = '[DAILY-COLLECT]';
   const now = new Date();
@@ -117,21 +109,17 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
   console.log(`${TAG} Timestamp: ${formatLocalDateTime(now)}`);
   console.log(`${TAG} Local date: ${localDate}`);
 
-  // Log if we detect a date transition
   const lastDate = await AsyncStorage.getItem(LAST_COLLECTION_DATE_KEY);
   if (lastDate && lastDate !== localDate) {
     console.log(`${TAG} DATE TRANSITION DETECTED: ${lastDate} → ${localDate}`);
   }
 
-  // Step 1: Location permission
   const { status } = await Location.getForegroundPermissionsAsync();
   console.log(`${TAG} Permission: ${status}`);
   if (status !== 'granted') {
     return { success: false, error: 'Location permission not granted' };
   }
 
-  // Step 2: Resolve a sufficiently fresh location without allowing a slow
-  // moving/background GPS request to stall the entire collection cycle.
   let lat: number;
   let lon: number;
   let locationSource: 'current' | 'os_last_known' | 'stormlog_cached';
@@ -149,7 +137,9 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
         const latitude = Number(cachedLat);
         const longitude = Number(cachedLon);
         const timestampMs = Number(cachedTs);
-        if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !Number.isFinite(timestampMs)) return null;
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !Number.isFinite(timestampMs)) {
+          return null;
+        }
         return { latitude, longitude, timestampMs };
       },
     });
@@ -162,8 +152,6 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
       `[${locationSource}, ${Math.round(resolved.ageMs / 1000)}s old]`,
     );
 
-    // Only a genuine fresh GPS fix advances StormLog's cached location. Using
-    // a fallback must never make an older coordinate appear newly observed.
     if (locationSource === 'current') {
       try {
         await AsyncStorage.setItem(CACHED_LOCATION_LAT_KEY, lat.toString());
@@ -177,7 +165,6 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
     return { success: false, error: `Location: ${msg}` };
   }
 
-  // Step 3: Fetch weather
   console.log(`${TAG} Fetching weather for ${lat.toFixed(4)}, ${lon.toFixed(4)}...`);
   const weatherResult = await fetchWeather(lat, lon);
   if (!weatherResult.success) {
@@ -187,90 +174,65 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
     return { success: false, error: msg };
   }
   console.log(`${TAG} Weather: ${weatherResult.data.temperature}°F, ${weatherResult.data.weatherCondition}`);
-  console.log(`${TAG} Current precip: ${weatherResult.data.precipitation}", Observed daily: ${weatherResult.data.observedDailyPrecipitation}"`);
 
-  // Step 4: NWS alerts
   let alertTypes: string[] = [];
   let alertProcessingFailures: NwsAlertProcessingFailure[] = [];
   let warningBatch: Awaited<ReturnType<typeof processNwsAlertsForStormEvents>> | null = null;
   const alertCycleTime = weatherResult.data.referenceTimeMs ?? now.getTime();
+
   try {
     await expireDueAutomaticWarnings(alertCycleTime);
   } catch (err: any) {
-    alertProcessingFailures.push({
-      alertId: null,
-      error: err,
-    });
+    alertProcessingFailures.push({ alertId: null, error: err });
     console.error(`${TAG} Automatic warning expiration failed:`, err?.message || String(err));
   }
 
   try {
     const alerts = await fetchNwsAlerts(lat, lon, weatherResult.data.referenceTimeMs ?? Date.now());
-    alertTypes = [...new Set(alerts.map(a => a.event))];
+    alertTypes = [...new Set(alerts.map((alert) => alert.event))];
     console.log(`${TAG} NWS alerts: ${alertTypes.length > 0 ? alertTypes.join(', ') : 'none'}`);
 
     try {
-      warningBatch = await processNwsAlertsForStormEvents(
-        alerts,
-        undefined,
-        {
-          notifyWarning: dispatchWarningNotification,
-        }
-      );
-      alertProcessingFailures = warningBatch.failures;
+      warningBatch = await processNwsAlertsForStormEvents(alerts, undefined, {
+        notifyWarning: dispatchWarningNotification,
+      });
+      alertProcessingFailures.push(...warningBatch.failures);
       for (const failure of warningBatch.failures) {
         console.error(
           `${TAG} NWS warning processing failed for ${failure.alertId ?? '<missing-id>'}:`,
-          failure.error
+          failure.error,
         );
       }
     } catch (err: any) {
-      alertProcessingFailures = [{ alertId: null, error: err }];
+      alertProcessingFailures.push({ alertId: null, error: err });
       console.error(`${TAG} NWS warning batch failed:`, err?.message || String(err));
     }
 
     for (const delivered of warningBatch?.results ?? []) {
-      const notification = delivered.notification as
-        | { status?: string; error?: unknown }
-        | undefined;
+      const notification = delivered.notification as { status?: string; error?: unknown } | undefined;
       if (notification?.status === 'failed') {
         console.error(
           `${TAG} Warning notification failed for ${delivered.alertId ?? '<missing-id>'}:`,
-          notification.error
+          notification.error,
         );
       }
     }
   } catch (err: any) {
-    console.log(`${TAG} NWS failed (non-critical): ${err?.message}`);
+    console.log(`${TAG} NWS fetch failed (weather collection continues): ${err?.message || String(err)}`);
   }
 
-  // Step 5: Determine precipitation to store in daily record.
-  //
-  // observedDailyPrecipitation = sum of hourly precipitation from local
-  // midnight through the current hour. This is the OBSERVED accumulation
-  // for today's calendar day, NOT a forecast.
-  //
-  // If unavailable, store null (not 0) to avoid falsely claiming zero rain.
   const observedDailyPrecip = weatherResult.data.observedDailyPrecipitation;
-  const currentPrecip = weatherResult.data.precipitation;
   const precipitationProvenance = weatherResult.data.precipitationSource
     ?? weatherResult.data.pressureSource
     ?? weatherResult.data.currentConditionsSource;
 
-  console.log(
-    `${TAG} Precipitation decision: ` +
-    `observed_daily=${observedDailyPrecip}", current_rate=${currentPrecip}" ` +
-    `→ storing: ${observedDailyPrecip}"`
-  );
-
-  // Step 6: Insert into database
   try {
     const observationTime = weatherResult.data.referenceTimeMs;
     if (observationTime == null) {
       return { success: false, error: 'Weather provider did not return an observation reference time' };
     }
 
-    const rowId = await insertDailyRecord({
+    const write = await insertDailyRecordIdempotent({
       timestamp: observationTime,
       latitude: lat,
       longitude: lon,
@@ -295,31 +257,46 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
       confidence: precipitationProvenance?.confidence ?? null,
       completeness: weatherResult.data.observedDailyPrecipitationIsComplete ? 1 : 0,
     });
-    console.log(`${TAG} DB INSERT OK — row ${rowId}, date: ${localDate}, precip: ${observedDailyPrecip}"`);
 
-    const collectionResult = withNwsAlertProcessingFailures(
-      { success: true },
-      alertProcessingFailures
-    );
-
-    if (collectionResult.success) {
-      await notifyWeatherCollected(weatherResult.data.temperature, weatherResult.data.weatherCondition, Date.now());
+    if (write.inserted) {
+      console.log(`${TAG} DB INSERT OK — row ${write.rowId}, date: ${localDate}`);
     } else {
-      await notifyCollectionFailed(collectionResult.error || 'NWS warning processing failed');
+      console.warn(`${TAG} DUPLICATE SUPPRESSED — existing row ${write.rowId}, timestamp ${observationTime}`);
     }
 
-    // Lightning collection (optional enrichment — must not fail weather)
-    try {
-      const activeEvent = await getActiveStormEvent();
-      await collectLightningAutomatic({
-        location: { latitude: lat, longitude: lon },
-        stormEventId: activeEvent?.isAutomatic === false ? activeEvent.id : null,
-      });
-    } catch (lightningErr) {
-      console.warn('[DAILY-COLLECT] Lightning collection failed:', lightningErr instanceof Error ? lightningErr.message : String(lightningErr));
+    await AsyncStorage.setItem(LAST_COLLECTION_DATE_KEY, localDate);
+
+    if (write.inserted) {
+      if (alertProcessingFailures.length === 0) {
+        await notifyWeatherCollected(
+          weatherResult.data.temperature,
+          weatherResult.data.weatherCondition,
+          Date.now(),
+        );
+      } else {
+        await notifyCollectionFailed(
+          `Weather observation saved; ${alertProcessingFailures.length} NWS warning-processing issue(s) occurred`,
+        );
+      }
+
+      try {
+        const activeEvent = await getActiveStormEvent();
+        await collectLightningAutomatic({
+          location: { latitude: lat, longitude: lon },
+          stormEventId: activeEvent?.isAutomatic === false ? activeEvent.id : null,
+        });
+      } catch (lightningErr) {
+        console.warn(
+          `${TAG} Lightning collection failed (weather observation preserved):`,
+          lightningErr instanceof Error ? lightningErr.message : String(lightningErr),
+        );
+      }
     }
 
-    return collectionResult;
+    // Persistence succeeded (or an identical provider observation already
+    // exists), therefore the interval is complete. Secondary enrichment must
+    // never cause a retry that writes the same weather observation twice.
+    return { success: true };
   } catch (err: any) {
     const msg = `DB insert failed: ${err?.message || String(err)}`;
     console.error(`${TAG} ${msg}`);
@@ -327,9 +304,6 @@ export async function executeDailyCollectionPipeline(): Promise<{ success: boole
   }
 }
 
-// ============================================================
-// Register background task with Android
-// ============================================================
 export function subscribeToDailyMonitor(
   listener: (state: {
     isActive: boolean;
@@ -363,13 +337,13 @@ export async function collectDailyWeatherManually(): Promise<DailyCollectionResu
 }
 
 export async function performDailyCollection(mode: DailyCollectionMode = 'manual'): Promise<DailyCollectionResult> {
-  if (mode === 'automatic') {
-    return dailyMonitorCoordinator.collectAutomatic();
-  }
+  if (mode === 'automatic') return dailyMonitorCoordinator.collectAutomatic();
   return dailyMonitorCoordinator.collectManual();
 }
 
-export async function registerBackgroundTask(intervalMinutes: number = 15): Promise<{ success: boolean; error?: string }> {
+export async function registerBackgroundTask(
+  intervalMinutes: number = 15,
+): Promise<{ success: boolean; error?: string }> {
   try {
     await dailyMonitorCoordinator.registerBackground(intervalMinutes);
     const registered = await TaskManager.isTaskRegisteredAsync(DAILY_MONITOR_TASK);
@@ -395,16 +369,22 @@ export async function getMonitorStatus(): Promise<{
   lastError: string | null;
   totalRecords: number;
 }> {
-  const isActive = await isBackgroundTaskRegistered();
-  const lastCollectionStr = await AsyncStorage.getItem(LAST_COLLECTION_KEY);
-  const lastError = await AsyncStorage.getItem(LAST_ERROR_KEY);
+  const [backgroundRegistered, foregroundRunning, enabled, lastCollectionStr, lastError] = await Promise.all([
+    isBackgroundTaskRegistered(),
+    isForegroundLocationServiceRunning().catch(() => false),
+    AsyncStorage.getItem(DAILY_MONITOR_ENABLED_KEY),
+    AsyncStorage.getItem(LAST_COLLECTION_KEY),
+    AsyncStorage.getItem(LAST_ERROR_KEY),
+  ]);
+
   let totalRecords = 0;
   try {
     const { getDailyRecordCount } = await import('../../database/dailyWeather');
     totalRecords = await getDailyRecordCount();
   } catch {}
+
   return {
-    isActive,
+    isActive: enabled === 'true' && (backgroundRegistered || foregroundRunning),
     lastCollection: lastCollectionStr ? parseInt(lastCollectionStr, 10) : null,
     lastError,
     totalRecords,
