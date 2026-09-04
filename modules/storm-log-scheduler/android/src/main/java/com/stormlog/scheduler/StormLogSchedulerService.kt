@@ -4,7 +4,6 @@ import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -19,6 +18,7 @@ class StormLogSchedulerService : Service() {
     const val EXTRA_INTERVAL_MINUTES = "intervalMinutes"
     private const val PREFS = "stormlog_daily_monitor_scheduler"
     private const val INTERVAL_KEY = "interval_minutes"
+    private const val ENABLED_KEY = "enabled"
     private const val CHANNEL_ID = "stormlog_daily_monitor"
     private const val NOTIFICATION_ID = 41015
     private const val DEFAULT_INTERVAL_MINUTES = 15
@@ -27,10 +27,20 @@ class StormLogSchedulerService : Service() {
     var isRunning: Boolean = false
       private set
 
+    fun isEnabled(context: Context): Boolean =
+      context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        .getBoolean(ENABLED_KEY, false)
+
+    fun getStoredIntervalMinutes(context: Context): Int =
+      context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        .getInt(INTERVAL_KEY, DEFAULT_INTERVAL_MINUTES)
+        .coerceAtLeast(1)
+
     fun start(context: Context, intervalMinutes: Int) {
       val safeInterval = intervalMinutes.coerceAtLeast(1)
       context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         .edit()
+        .putBoolean(ENABLED_KEY, true)
         .putInt(INTERVAL_KEY, safeInterval)
         .apply()
 
@@ -47,20 +57,20 @@ class StormLogSchedulerService : Service() {
     }
 
     fun stop(context: Context) {
+      context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        .edit()
+        .putBoolean(ENABLED_KEY, false)
+        .apply()
       cancelAlarm(context)
       context.stopService(Intent(context, StormLogSchedulerService::class.java))
     }
 
-    /**
-     * Schedule the next Daily Monitor boundary using AlarmManager in every case.
-     *
-     * Exact alarms are preferred when permission exists. When Android does not
-     * grant exact-alarm access we intentionally fall back to setAndAllowWhileIdle
-     * instead of an in-process Handler. The OS-owned alarm survives process/service
-     * suspension far better than a Handler and therefore remains the authoritative
-     * clock while the phone is moving, idle, or under memory pressure.
-     */
     fun scheduleNextAlarm(context: Context, intervalMinutes: Int) {
+      if (!isEnabled(context)) {
+        cancelAlarm(context)
+        return
+      }
+
       val alarmManager = context.getSystemService(AlarmManager::class.java) ?: return
       val safeInterval = intervalMinutes.coerceAtLeast(1)
       val intervalMs = safeInterval.toLong() * 60_000L
@@ -70,17 +80,9 @@ class StormLogSchedulerService : Service() {
 
       val exactAllowed = Build.VERSION.SDK_INT < Build.VERSION_CODES.S || alarmManager.canScheduleExactAlarms()
       if (exactAllowed) {
-        alarmManager.setExactAndAllowWhileIdle(
-          AlarmManager.RTC_WAKEUP,
-          nextBoundary,
-          pendingIntent
-        )
+        alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, nextBoundary, pendingIntent)
       } else {
-        alarmManager.setAndAllowWhileIdle(
-          AlarmManager.RTC_WAKEUP,
-          nextBoundary,
-          pendingIntent
-        )
+        alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, nextBoundary, pendingIntent)
       }
 
       android.util.Log.d(
@@ -99,8 +101,7 @@ class StormLogSchedulerService : Service() {
 
   override fun onCreate() {
     super.onCreate()
-    intervalMinutes = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-      .getInt(INTERVAL_KEY, DEFAULT_INTERVAL_MINUTES)
+    intervalMinutes = getStoredIntervalMinutes(this)
     createNotificationChannel()
     startForeground(NOTIFICATION_ID, buildNotification())
     isRunning = true
@@ -109,6 +110,12 @@ class StormLogSchedulerService : Service() {
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     if (intent?.action == ACTION_STOP) {
+      stop(this)
+      stopSelf()
+      return START_NOT_STICKY
+    }
+
+    if (!isEnabled(this)) {
       stopSelf()
       return START_NOT_STICKY
     }
@@ -120,17 +127,25 @@ class StormLogSchedulerService : Service() {
         .edit()
         .putInt(INTERVAL_KEY, intervalMinutes)
         .apply()
+      val manager = getSystemService(NotificationManager::class.java)
+      manager.notify(NOTIFICATION_ID, buildNotification())
     }
 
-    // Always refresh the OS-owned alarm. This also repairs the schedule after a
-    // foreground-service restart without creating a second timing owner.
     scheduleNextAlarm(this, intervalMinutes)
     isRunning = true
     return START_STICKY
   }
 
+  override fun onTaskRemoved(rootIntent: Intent?) {
+    // Keep the OS-owned alarm armed even if the user removes the app task.
+    if (isEnabled(this)) scheduleNextAlarm(this, intervalMinutes)
+    super.onTaskRemoved(rootIntent)
+  }
+
   override fun onDestroy() {
     isRunning = false
+    // Android may restart this START_STICKY service. The already-armed alarm is
+    // intentionally preserved while monitoring remains enabled.
     super.onDestroy()
   }
 
@@ -146,17 +161,18 @@ class StormLogSchedulerService : Service() {
         NotificationManager.IMPORTANCE_LOW
       ).apply {
         description = "Keeps StormLog's field observation scheduler active."
+        setShowBadge(false)
       }
     )
   }
 
-  private fun buildNotification(): Notification {
-    return NotificationCompat.Builder(this, CHANNEL_ID)
+  private fun buildNotification(): Notification =
+    NotificationCompat.Builder(this, CHANNEL_ID)
       .setContentTitle("StormLog Daily Monitor")
-      .setContentText("Automatic observations scheduled every $intervalMinutes minutes")
+      .setContentText("Daily Monitor active — collecting every $intervalMinutes min")
       .setSmallIcon(android.R.drawable.ic_menu_myplaces)
       .setOngoing(true)
+      .setOnlyAlertOnce(true)
       .setPriority(NotificationCompat.PRIORITY_LOW)
       .build()
-  }
 }
