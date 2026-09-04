@@ -4,6 +4,7 @@ const SCHEDULER_SERVICE = 'com.stormlog.scheduler.StormLogSchedulerService';
 const HEADLESS_SERVICE = 'com.stormlog.scheduler.StormLogHeadlessTaskService';
 const ALARM_RECEIVER = 'com.stormlog.scheduler.StormLogSchedulerAlarmReceiver';
 const EXACT_ALARM_PERMISSION_RECEIVER = 'com.stormlog.scheduler.StormLogExactAlarmPermissionReceiver';
+const BOOT_RECEIVER = 'com.stormlog.scheduler.StormLogSchedulerBootReceiver';
 
 function ensureService(application, name, attributes = {}) {
   application.service = application.service || [];
@@ -12,12 +13,7 @@ function ensureService(application, name, attributes = {}) {
     existing.$ = { ...existing.$, ...attributes };
     return;
   }
-  application.service.push({
-    $: {
-      'android:name': name,
-      ...attributes,
-    },
-  });
+  application.service.push({ $: { 'android:name': name, ...attributes } });
 }
 
 function ensureReceiver(application, name, attributes = {}, intentFilters = []) {
@@ -32,9 +28,7 @@ function ensureReceiver(application, name, attributes = {}, intentFilters = []) 
         existingFilter.action?.some(action => action.$?.['android:name'] === filter.action)
       );
       if (!alreadyPresent) {
-        receiver['intent-filter'].push({
-          action: [{ $: { 'android:name': filter.action } }],
-        });
+        receiver['intent-filter'].push({ action: [{ $: { 'android:name': filter.action } }] });
       }
     }
   }
@@ -44,9 +38,7 @@ function ensureReceiver(application, name, attributes = {}, intentFilters = []) 
 module.exports = function withStormLogScheduler(config) {
   return withAndroidManifest(config, configWithManifest => {
     const application = configWithManifest.modResults.manifest.application?.[0];
-    if (!application) {
-      throw new Error('StormLog scheduler could not find the Android application manifest entry.');
-    }
+    if (!application) throw new Error('StormLog scheduler could not find the Android application manifest entry.');
 
     ensureService(application, SCHEDULER_SERVICE, {
       'android:enabled': 'true',
@@ -70,6 +62,14 @@ module.exports = function withStormLogScheduler(config) {
       'android:exported': 'false',
     }, [
       { action: 'android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED' },
+    ]);
+
+    ensureReceiver(application, BOOT_RECEIVER, {
+      'android:enabled': 'true',
+      'android:exported': 'true',
+    }, [
+      { action: 'android.intent.action.BOOT_COMPLETED' },
+      { action: 'android.intent.action.MY_PACKAGE_REPLACED' },
     ]);
 
     return configWithManifest;
