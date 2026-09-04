@@ -49,6 +49,9 @@ export function useLightningSafety(): LightningSafetyHookState & { refresh: () =
         getLightningSafetySnapshot(Date.now()),
         getLightningUsageSnapshot(),
       ]);
+      const coordinatorError = coordinatorState.lastResult?.success === false
+        ? coordinatorState.lastResult.error ?? 'Lightning refresh failed'
+        : null;
       const safety = getLightningSafetyState({
         nowMs: Date.now(),
         providerConfigured: providerStatus.configured,
@@ -57,9 +60,15 @@ export function useLightningSafety(): LightningSafetyHookState & { refresh: () =
         latestEventTimestampMs: snapshot.latestEventTimestampMs,
         lastSuccessfulCollectionMs: coordinatorState.lastSuccessfulCollectionMs,
         lastAttemptMs: coordinatorState.lastAttemptMs,
-        lastError: coordinatorState.lastResult?.error ?? null,
+        lastError: coordinatorError,
       });
-      setState({ safety, usage, loading: false, lastRefreshMs: Date.now(), error: null });
+      setState({
+        safety,
+        usage,
+        loading: false,
+        lastRefreshMs: Date.now(),
+        error: coordinatorError,
+      });
     } catch (error: any) {
       setState((current) => ({
         ...current,
