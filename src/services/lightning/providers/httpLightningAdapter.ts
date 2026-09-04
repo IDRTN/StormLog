@@ -29,6 +29,7 @@ export class HttpLightningAdapter implements LightningProviderAdapter {
   constructor(
     private readonly baseUrl: string,
     private readonly fetchImpl: FetchLike = fetch,
+    private readonly clientToken: string | null = null,
   ) {}
 
   async fetchEventsNearPoint(
@@ -46,7 +47,13 @@ export class HttpLightningAdapter implements LightningProviderAdapter {
       sinceMs: String(sinceMs),
       untilMs: String(untilMs),
     });
-    const response = await this.fetchImpl(`${base}/events?${query.toString()}`);
+    const headers: Record<string, string> = { accept: 'application/json' };
+    if (this.clientToken) headers['x-stormlog-client-token'] = this.clientToken;
+
+    const response = await this.fetchImpl(`${base}/events?${query.toString()}`, {
+      method: 'GET',
+      headers,
+    });
 
     if (!response.ok) {
       const error = new Error(`Lightning provider HTTP ${response.status}`) as Error & {
