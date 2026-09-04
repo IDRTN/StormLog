@@ -3,6 +3,7 @@ import type {
   LightningProviderEvent,
   LightningProviderResult,
 } from '../lightningProviderAdapter';
+import { parseXweatherReset } from '../lightningUsageGuard';
 
 type FetchLike = typeof fetch;
 
@@ -14,6 +15,13 @@ type ProxyResponse = {
   events?: ProxyEvent[];
   fetchedAt?: number;
 };
+
+function numberHeader(headers: Headers, name: string): number | null {
+  const value = headers.get(name);
+  if (value == null || value.trim() === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
 
 export class HttpLightningAdapter implements LightningProviderAdapter {
   readonly providerName = 'StormLog Lightning Proxy';
@@ -55,9 +63,17 @@ export class HttpLightningAdapter implements LightningProviderAdapter {
 
     const payload = await response.json() as ProxyResponse;
     const events = Array.isArray(payload.events) ? payload.events : [];
+    const nowMs = Date.now();
 
     return {
-      fetchedAt: typeof payload.fetchedAt === 'number' ? payload.fetchedAt : Date.now(),
+      fetchedAt: typeof payload.fetchedAt === 'number' ? payload.fetchedAt : nowMs,
+      usage: {
+        costTokens: numberHeader(response.headers, 'x-cost-tokens'),
+        periodLimit: numberHeader(response.headers, 'x-ratelimit-limit-period'),
+        periodRemaining: numberHeader(response.headers, 'x-ratelimit-remaining-period'),
+        periodResetAtMs: parseXweatherReset(response.headers.get('x-ratelimit-reset-period'), nowMs),
+        periodType: response.headers.get('x-ratelimit-limit-period-type'),
+      },
       events: events.map((event) => ({
         providerEventId: event.providerEventId ?? (event.id != null ? String(event.id) : null),
         timestamp: Number(event.timestamp),
