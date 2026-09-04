@@ -64,61 +64,36 @@ jobs:
           EXPO_NO_TELEMETRY: "1"
         run: npx expo prebuild --platform android --clean --no-install
 
-      - name: Configure release signing
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          STORMLOG_RELEASE_KEYSTORE: ${{ runner.temp }}/stormlog-release.keystore
-          STORMLOG_RELEASE_SIGNING_GRADLE: ${{ runner.temp }}/stormlog-release-signing.gradle
+      - name: Enable embedded JS bundle for standalone debug APK
         shell: bash
         run: |
           set -euo pipefail
-          for variable in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
-            if [[ -z "${!variable:-}" ]]; then
-              echo "::error title=Release signing missing::GitHub secret ${variable} is required."
-              exit 1
-            fi
-          done
-
-          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | tr -d '\r\n' | base64 --decode > "${STORMLOG_RELEASE_KEYSTORE}"
-          chmod 600 "${STORMLOG_RELEASE_KEYSTORE}"
-
-          cat > "${STORMLOG_RELEASE_SIGNING_GRADLE}" <<'GRADLE'
-          android {
-            signingConfigs {
-              stormlogRelease {
-                storeFile file(System.getenv("STORMLOG_RELEASE_KEYSTORE"))
-                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                keyAlias System.getenv("ANDROID_KEY_ALIAS")
-                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
-              }
+          GRADLE_FILE="android/app/build.gradle"
+          test -f "$GRADLE_FILE"
+          test "$(grep -Eic '^[[:space:]]*react[[:space:]]*\{[[:space:]]*$' "$GRADLE_FILE")" -eq 1
+          TEMP_GRADLE="$(mktemp)"
+          awk '
+            BEGIN { inserted = 0 }
+            !inserted && $0 ~ /^[[:space:]]*react[[:space:]]*\{[[:space:]]*$/ {
+              print
+              print "    debuggableVariants = []"
+              inserted = 1
+              next
             }
-            buildTypes {
-              release {
-                signingConfig signingConfigs.stormlogRelease
-              }
-            }
-          }
-          GRADLE
+            { print }
+            END { if (!inserted) exit 1 }
+          ' "$GRADLE_FILE" > "$TEMP_GRADLE"
+          mv "$TEMP_GRADLE" "$GRADLE_FILE"
+          test "$(grep -cF 'debuggableVariants = []' "$GRADLE_FILE")" -eq 1
 
-          printf '\napply from: "%s"\n' "${STORMLOG_RELEASE_SIGNING_GRADLE}" >> android/app/build.gradle
-
-      - name: Build release APK 165
+      - name: Build standalone debug APK 165
         working-directory: android
-        env:
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          STORMLOG_RELEASE_KEYSTORE: ${{ runner.temp }}/stormlog-release.keystore
-          STORMLOG_RELEASE_SIGNING_GRADLE: ${{ runner.temp }}/stormlog-release-signing.gradle
-        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
 
       - name: Verify APK exists
         shell: bash
         run: |
-          APK="android/app/build/outputs/apk/release/app-release.apk"
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
           test -s "$APK"
           sha256sum "$APK"
           cp "$APK" StormLog-APK-165-lightning.apk
