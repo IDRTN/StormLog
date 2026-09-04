@@ -1,0 +1,97 @@
+name: Daily Monitor Hardening APK
+
+on:
+  push:
+    branches:
+      - daily-monitor-hardening
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NPM_CONFIG_LEGACY_PEER_DEPS: "true"
+  EXPO_PUBLIC_STORMLOG_LIGHTNING_URL: "https://stormlog-lightning-proxy.idontrememberthename74.workers.dev"
+  EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN: ${{ secrets.STORMLOG_LIGHTNING_TOKEN }}
+
+jobs:
+  validate-and-build:
+    name: Validate hardening and build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out hardening branch
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.16.0"
+          cache: npm
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build components
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006" "cmake;3.22.1"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript validation
+        run: npm run typecheck
+
+      - name: Generate Android project
+        env:
+          CI: "1"
+          EXPO_NO_TELEMETRY: "1"
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Enable embedded JS bundle for standalone debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          GRADLE_FILE="android/app/build.gradle"
+          test -f "$GRADLE_FILE"
+          TEMP_GRADLE="$(mktemp)"
+          awk '
+            BEGIN { inserted = 0 }
+            !inserted && $0 ~ /^[[:space:]]*react[[:space:]]*\{[[:space:]]*$/ {
+              print
+              print "    debuggableVariants = []"
+              inserted = 1
+              next
+            }
+            { print }
+            END { if (!inserted) exit 1 }
+          ' "$GRADLE_FILE" > "$TEMP_GRADLE"
+          mv "$TEMP_GRADLE" "$GRADLE_FILE"
+
+      - name: Build hardening debug APK
+        working-directory: android
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
+
+      - name: Verify APK exists
+        shell: bash
+        run: |
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          sha256sum "$APK"
+          cp "$APK" StormLog-daily-monitor-hardening.apk
+
+      - name: Upload hardening APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: StormLog-daily-monitor-hardening
+          path: StormLog-daily-monitor-hardening.apk
+          if-no-files-found: error
+          retention-days: 14
