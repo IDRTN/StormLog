@@ -1,10 +1,11 @@
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import {
+  hasNativeDailyMonitorExactAlarmPermission,
   isNativeDailyMonitorSchedulerAvailable,
+  isNativeDailyMonitorSchedulerRunning,
   startNativeDailyMonitorScheduler,
   stopNativeDailyMonitorScheduler,
-  isNativeDailyMonitorSchedulerRunning,
 } from './dailyMonitorNativeScheduler';
 
 export const DAILY_FOREGROUND_LOCATION_TASK = 'STORM_LOG_DAILY_LOCATION';
@@ -12,49 +13,45 @@ export const DAILY_FOREGROUND_LOCATION_TASK = 'STORM_LOG_DAILY_LOCATION';
 type CollectionResult = { success: boolean; outcome?: string };
 let collectionCallback: (() => Promise<CollectionResult>) | null = null;
 
-export function registerForegroundLocationTask(callback: () => Promise<CollectionResult>): void {
+export function registerForegroundLocationTask(
+  callback: () => Promise<CollectionResult>,
+): void {
   collectionCallback = callback;
-}
-
-async function waitForNativeSchedulerRunning(timeoutMs: number = 2_000): Promise<boolean> {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    if (isNativeDailyMonitorSchedulerRunning()) return true;
-    await new Promise<void>((resolve) => setTimeout(resolve, 100));
-  }
-  return isNativeDailyMonitorSchedulerRunning();
 }
 
 export async function startForegroundLocationService(
   intervalMinutes: number,
 ): Promise<{ success: boolean; error?: string }> {
-  const TAG = '[FG-SERVICE]';
+  const TAG = '[DAILY-SCHEDULER]';
 
-  // Production Android uses the native foreground service + AlarmManager as the
-  // authoritative clock. Expo Location remains compatibility fallback only.
   if (isNativeDailyMonitorSchedulerAvailable()) {
     try {
-      // Remove a location-task clock left behind by an older APK before arming
-      // the native scheduler. This migration is intentionally one-way.
+      // Remove the old expo-location foreground scheduler left by previous APKs.
+      // The new Android path must sleep between AlarmManager wakeups.
       try {
         if (await Location.hasStartedLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK)) {
           await Location.stopLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
         }
       } catch (legacyStopError: any) {
-        console.warn(`${TAG} Legacy location scheduler cleanup warning:`, legacyStopError?.message || String(legacyStopError));
+        console.warn(`${TAG} Legacy location cleanup warning:`, legacyStopError?.message || String(legacyStopError));
       }
 
-      startNativeDailyMonitorScheduler(intervalMinutes);
-
-      // startForegroundService() is asynchronous on Android. The old immediate
-      // isRunning() check could report a false failure while onCreate() was still
-      // starting, which then caused repeated start/re-arm attempts from mounted
-      // screens. Give Android a bounded window to publish service state.
-      if (!await waitForNativeSchedulerRunning()) {
-        return { success: false, error: 'Native Daily Monitor scheduler could not be verified within 2 seconds' };
+      if (!startNativeDailyMonitorScheduler(intervalMinutes)) {
+        return { success: false, error: 'Native Daily Monitor scheduler is unavailable' };
       }
 
-      console.log(`${TAG} Native scheduler started and verified (interval: ${intervalMinutes} min)`);
+      // Alarm registration is synchronous on the native side. A short yield gives
+      // the bridge time to reflect the PendingIntent before verification.
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+      if (!isNativeDailyMonitorSchedulerRunning()) {
+        return { success: false, error: 'Native Daily Monitor alarm could not be verified' };
+      }
+
+      if (!hasNativeDailyMonitorExactAlarmPermission()) {
+        console.warn(`${TAG} Exact-alarm permission is not granted; Android may delay 15-minute observations until permission is granted.`);
+      }
+
+      console.log(`${TAG} AlarmManager scheduler armed (interval: ${intervalMinutes} min)`);
       return { success: true };
     } catch (error: any) {
       const msg = error?.message || String(error);
@@ -63,21 +60,16 @@ export async function startForegroundLocationService(
     }
   }
 
-  // Unsupported/dev fallback. It is never allowed to coexist with the native
-  // scheduler, preventing duplicate interval owners.
+  // Compatibility fallback only. Production Android builds include the native
+  // AlarmManager module, so expo-location must never be the primary interval clock.
   try {
     const { status } = await Location.getForegroundPermissionsAsync();
     if (status !== 'granted') {
-      console.warn(`${TAG} Location permission not granted — cannot start fallback foreground service`);
       return { success: false, error: 'Location permission not granted' };
     }
 
-    if (await isForegroundLocationServiceRunning()) {
-      try {
-        await Location.stopLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
-      } catch (stopError: any) {
-        console.warn(`${TAG} Existing fallback service stop warning:`, stopError?.message || String(stopError));
-      }
+    if (await Location.hasStartedLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK)) {
+      await Location.stopLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
     }
 
     const timeIntervalMs = Math.max(intervalMinutes * 60 * 1000, 60_000);
@@ -96,45 +88,25 @@ export async function startForegroundLocationService(
       },
     });
 
-    if (!await isForegroundLocationServiceRunning()) {
-      return { success: false, error: 'Fallback foreground location service registration could not be verified' };
-    }
-
-    console.log(`${TAG} Fallback foreground location service started and verified (interval: ${intervalMinutes} min)`);
-    return { success: true };
+    return (await Location.hasStartedLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK))
+      ? { success: true }
+      : { success: false, error: 'Fallback location scheduler could not be verified' };
   } catch (error: any) {
-    const msg = error?.message || String(error);
-    console.error(`${TAG} Fallback foreground service failed:`, msg);
-    return { success: false, error: msg };
+    return { success: false, error: error?.message || String(error) };
   }
 }
 
 export async function stopForegroundLocationService(): Promise<void> {
-  const TAG = '[FG-SERVICE]';
-
   if (isNativeDailyMonitorSchedulerAvailable()) {
-    try {
-      stopNativeDailyMonitorScheduler();
-      try {
-        if (await Location.hasStartedLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK)) {
-          await Location.stopLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
-        }
-      } catch (legacyStopError: any) {
-        console.warn(`${TAG} Legacy location scheduler cleanup warning:`, legacyStopError?.message || String(legacyStopError));
-      }
-      console.log(`${TAG} Native scheduler stopped`);
-      return;
-    } catch (error: any) {
-      console.error(`${TAG} Native scheduler stop failed:`, error?.message || String(error));
-    }
+    stopNativeDailyMonitorScheduler();
   }
 
   try {
-    if (!await isForegroundLocationServiceRunning()) return;
-    await Location.stopLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
-    console.log(`${TAG} Fallback foreground location service stopped`);
+    if (await Location.hasStartedLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK)) {
+      await Location.stopLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
+    }
   } catch (error: any) {
-    console.error(`${TAG} Fallback foreground service stop failed:`, error?.message || String(error));
+    console.warn('[DAILY-SCHEDULER] Legacy location stop warning:', error?.message || String(error));
   }
 }
 
@@ -149,7 +121,7 @@ export async function isForegroundLocationServiceRunning(): Promise<boolean> {
   }
 }
 
-// Compatibility fallback for runtimes where the native scheduler is absent.
+// Compatibility fallback for runtimes where the native scheduler is unavailable.
 TaskManager.defineTask(DAILY_FOREGROUND_LOCATION_TASK, async ({ data, error }) => {
   const TAG = '[FG-LOCATION]';
   if (error) {
@@ -158,31 +130,15 @@ TaskManager.defineTask(DAILY_FOREGROUND_LOCATION_TASK, async ({ data, error }) =
   }
 
   const locations = (data as any)?.locations;
-  if (!locations || locations.length === 0) {
-    console.log(`${TAG} No location data received`);
-    return;
-  }
-
-  const location = locations[0];
-  const lat = location?.coords?.latitude;
-  const lon = location?.coords?.longitude;
-  if (lat != null && lon != null) console.log(`${TAG} Location update: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
+  if (!locations || locations.length === 0) return;
 
   try {
     if (!collectionCallback) {
-      console.warn(`${TAG} Collection callback missing — using headless Daily Monitor fallback`);
       const dailyMonitor = await import('./dailyMonitor');
-      const result = await dailyMonitor.performDailyCollection('automatic');
-      console.log(`${TAG} Headless fallback collection: ${result.success ? 'success' : 'failed'}`);
+      await dailyMonitor.performDailyCollection('automatic');
       return;
     }
-
-    const result = await collectionCallback();
-    if (result.outcome === 'skipped_recent_automatic') {
-      console.log(`${TAG} Collection skipped (recent automatic run)`);
-    } else {
-      console.log(`${TAG} Collection triggered: ${result.success ? 'success' : 'failed'}`);
-    }
+    await collectionCallback();
   } catch (collectionError: any) {
     console.error(`${TAG} Collection failed:`, collectionError?.message || String(collectionError));
   }
