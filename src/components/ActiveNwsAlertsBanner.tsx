@@ -4,12 +4,15 @@ import { Ionicons } from '@expo/vector-icons';
 import { Colors, SPACING, BORDER_RADIUS } from '../constants/theme';
 import { getActiveAlertTypes } from '../services/nws/alerts';
 import { sortAlertTypes, type AlertDisplayTone } from '../services/nws/alertDisplay';
+import { collectLightningAutomatic } from '../services/lightning/lightningService';
 import { LightningSafetyBanner } from './LightningSafetyBanner';
 
 type Props = {
   latitude: number | null;
   longitude: number | null;
 };
+
+const HOME_LIGHTNING_REFRESH_MS = 5 * 60_000;
 
 function toneColor(tone: AlertDisplayTone): string {
   if (tone === 'critical') return Colors.danger;
@@ -38,12 +41,42 @@ export function ActiveNwsAlertsBanner({ latitude, longitude }: Props) {
     }
   }, [latitude, longitude]);
 
+  const refreshLightning = useCallback(async () => {
+    if (latitude == null || longitude == null) return;
+    try {
+      const result = await collectLightningAutomatic({
+        location: { latitude, longitude },
+        stormEventId: null,
+      });
+      if (!result.success) {
+        console.warn('[LIGHTNING-HOME] Lightning refresh failed:', result.error ?? 'unknown error');
+      }
+    } catch (error) {
+      console.warn(
+        '[LIGHTNING-HOME] Lightning refresh threw:',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }, [latitude, longitude]);
+
   useEffect(() => {
     if (latitude == null || longitude == null) return;
     void refresh();
     const timer = setInterval(() => void refresh(), 60_000);
     return () => clearInterval(timer);
   }, [latitude, longitude, refresh]);
+
+  useEffect(() => {
+    if (latitude == null || longitude == null) return;
+
+    // Do not wait for the next Daily Monitor cycle before establishing the
+    // lightning safety state on the home screen. The coordinator and usage
+    // guard still own de-duplication, throttling, reserve protection, and
+    // provider backoff.
+    void refreshLightning();
+    const timer = setInterval(() => void refreshLightning(), HOME_LIGHTNING_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [latitude, longitude, refreshLightning]);
 
   let nwsContent: React.ReactNode = null;
 
@@ -61,7 +94,7 @@ export function ActiveNwsAlertsBanner({ latitude, longitude }: Props) {
         nwsContent = (
           <View style={[styles.statusBanner, styles.clearBanner]}>
             <Ionicons name="shield-checkmark-outline" size={15} color={Colors.loggingActive} />
-            <Text style={[styles.statusText, { color: Colors.loggingActive }]}>
+            <Text style={[styles.statusText, { color: Colors.loggingActive }]}> 
               {loading ? 'Checking NWS alerts…' : 'No active NWS alerts'}
             </Text>
           </View>
@@ -69,7 +102,7 @@ export function ActiveNwsAlertsBanner({ latitude, longitude }: Props) {
       } else {
         const highestColor = toneColor(alerts[0].tone);
         nwsContent = (
-          <View style={[styles.alertCard, { borderColor: highestColor }]}>
+          <View style={[styles.alertCard, { borderColor: highestColor }]}> 
             <View style={styles.headerRow}>
               <Ionicons name="warning" size={17} color={highestColor} />
               <Text style={[styles.headerText, { color: highestColor }]}>ACTIVE NWS ALERTS</Text>
