@@ -4,6 +4,7 @@ type StormLogSchedulerNativeModule = {
   start: (intervalMinutes: number) => void;
   stop: () => void;
   isRunning: () => boolean;
+  hasExactAlarmPermission: () => boolean;
 };
 
 const nativeScheduler = requireOptionalNativeModule<StormLogSchedulerNativeModule>('StormLogScheduler');
@@ -26,4 +27,8 @@ export function stopNativeDailyMonitorScheduler(): boolean {
 
 export function isNativeDailyMonitorSchedulerRunning(): boolean {
   return nativeScheduler?.isRunning() ?? false;
+}
+
+export function hasNativeDailyMonitorExactAlarmPermission(): boolean {
+  return nativeScheduler?.hasExactAlarmPermission() ?? false;
 }
