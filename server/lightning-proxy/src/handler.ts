@@ -2,6 +2,7 @@ export type ProxyEnv = {
   XWEATHER_CLIENT_ID: string;
   XWEATHER_CLIENT_SECRET: string;
   STORMLOG_CLIENT_TOKEN?: string;
+  XWEATHER_NAMESPACE_ORIGIN?: string;
   LIGHTNING_USAGE_KV?: {
     get(key: string): Promise<string | null>;
     put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
@@ -138,33 +139,37 @@ export async function handleLightningProxy(
   providerUrl.searchParams.set('client_id', env.XWEATHER_CLIENT_ID);
   providerUrl.searchParams.set('client_secret', env.XWEATHER_CLIENT_SECRET);
 
+  const upstreamHeaders: Record<string, string> = { accept: 'application/json' };
+  if (env.XWEATHER_NAMESPACE_ORIGIN) {
+    upstreamHeaders.origin = env.XWEATHER_NAMESPACE_ORIGIN;
+    upstreamHeaders.referer = `${env.XWEATHER_NAMESPACE_ORIGIN.replace(/\/$/, '')}/`;
+  }
+
   let upstream: Response;
   try {
     upstream = await fetchImpl(providerUrl.toString(), {
       method: 'GET',
-      headers: { accept: 'application/json' },
+      headers: upstreamHeaders,
     });
   } catch {
     return json({ error: 'provider_network_error' }, 502);
   }
 
   const cost = headerNumber(upstream.headers, 'x-cost-tokens');
-  const periodLimit = headerNumber(upstream.headers, 'x-ratelimit-period-limit')
-    ?? headerNumber(upstream.headers, 'x-ratelimit-limit');
-  const periodRemaining = headerNumber(upstream.headers, 'x-ratelimit-period-remaining')
-    ?? headerNumber(upstream.headers, 'x-ratelimit-remaining');
+  const periodLimit = headerNumber(upstream.headers, 'x-ratelimit-limit-period');
+  const periodRemaining = headerNumber(upstream.headers, 'x-ratelimit-remaining-period');
   await saveUsage(env, periodRemaining, periodLimit, cost);
 
   const passthroughHeaders: Record<string, string> = {};
-  const copyHeader = (source: string, target = source) => {
+  const copyHeader = (source: string) => {
     const value = upstream.headers.get(source);
-    if (value) passthroughHeaders[target] = value;
+    if (value) passthroughHeaders[source] = value;
   };
   copyHeader('x-cost-tokens');
-  copyHeader('x-ratelimit-period-limit');
-  copyHeader('x-ratelimit-period-remaining');
-  copyHeader('x-ratelimit-period-reset');
-  copyHeader('x-ratelimit-period-type');
+  copyHeader('x-ratelimit-limit-period');
+  copyHeader('x-ratelimit-remaining-period');
+  copyHeader('x-ratelimit-reset-period');
+  copyHeader('x-ratelimit-limit-period-type');
   copyHeader('retry-after');
 
   let payload: XweatherResponse;
