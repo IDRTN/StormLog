@@ -1,6 +1,5 @@
 package com.stormlog.scheduler
 
-import android.app.AlarmManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -14,25 +13,28 @@ class StormLogSchedulerModule : Module() {
 
     Function("start") { intervalMinutes: Int ->
       val context = requireNotNull(appContext.reactContext)
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        val alarmManager = context.getSystemService(AlarmManager::class.java)
-        if (alarmManager != null && !alarmManager.canScheduleExactAlarms()) {
-          appContext.currentActivity?.startActivity(
-            Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
-              data = Uri.parse("package:${context.packageName}")
-            }
-          )
-        }
+      StormLogAlarmScheduler.start(context, intervalMinutes)
+
+      if (!StormLogAlarmScheduler.hasExactAlarmPermission(context) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        appContext.currentActivity?.startActivity(
+          Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+            data = Uri.parse("package:${context.packageName}")
+          },
+        )
       }
-      StormLogSchedulerService.start(context, intervalMinutes)
     }
 
     Function("stop") {
-      StormLogSchedulerService.stop(requireNotNull(appContext.reactContext))
+      StormLogAlarmScheduler.stop(requireNotNull(appContext.reactContext))
     }
 
     Function("isRunning") {
-      StormLogSchedulerService.isRunning
+      val context = requireNotNull(appContext.reactContext)
+      StormLogAlarmScheduler.hasScheduledAlarm(context)
+    }
+
+    Function("hasExactAlarmPermission") {
+      StormLogAlarmScheduler.hasExactAlarmPermission(requireNotNull(appContext.reactContext))
     }
   }
 }
