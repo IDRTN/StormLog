@@ -12,10 +12,17 @@ export const DAILY_FOREGROUND_LOCATION_TASK = 'STORM_LOG_DAILY_LOCATION';
 type CollectionResult = { success: boolean; outcome?: string };
 let collectionCallback: (() => Promise<CollectionResult>) | null = null;
 
-export function registerForegroundLocationTask(
-  callback: () => Promise<CollectionResult>,
-): void {
+export function registerForegroundLocationTask(callback: () => Promise<CollectionResult>): void {
   collectionCallback = callback;
+}
+
+async function waitForNativeSchedulerRunning(timeoutMs: number = 2_000): Promise<boolean> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (isNativeDailyMonitorSchedulerRunning()) return true;
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+  return isNativeDailyMonitorSchedulerRunning();
 }
 
 export async function startForegroundLocationService(
@@ -23,14 +30,12 @@ export async function startForegroundLocationService(
 ): Promise<{ success: boolean; error?: string }> {
   const TAG = '[FG-SERVICE]';
 
-  // Android's native foreground scheduler is now the authoritative clock.
-  // It runs a native Handler loop and launches the single JS headless
-  // collection entry at each wall-clock interval boundary. This avoids using
-  // Expo Location callbacks as a timer, since those callbacks are OS-deferred.
+  // Production Android uses the native foreground service + AlarmManager as the
+  // authoritative clock. Expo Location remains compatibility fallback only.
   if (isNativeDailyMonitorSchedulerAvailable()) {
     try {
-      // Clean up any foreground-location task left behind by an older APK so
-      // the new native scheduler is the only Android foreground clock.
+      // Remove a location-task clock left behind by an older APK before arming
+      // the native scheduler. This migration is intentionally one-way.
       try {
         if (await Location.hasStartedLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK)) {
           await Location.stopLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
@@ -40,9 +45,15 @@ export async function startForegroundLocationService(
       }
 
       startNativeDailyMonitorScheduler(intervalMinutes);
-      if (!isNativeDailyMonitorSchedulerRunning()) {
-        return { success: false, error: 'Native Daily Monitor scheduler could not be verified' };
+
+      // startForegroundService() is asynchronous on Android. The old immediate
+      // isRunning() check could report a false failure while onCreate() was still
+      // starting, which then caused repeated start/re-arm attempts from mounted
+      // screens. Give Android a bounded window to publish service state.
+      if (!await waitForNativeSchedulerRunning()) {
+        return { success: false, error: 'Native Daily Monitor scheduler could not be verified within 2 seconds' };
       }
+
       console.log(`${TAG} Native scheduler started and verified (interval: ${intervalMinutes} min)`);
       return { success: true };
     } catch (error: any) {
@@ -52,9 +63,8 @@ export async function startForegroundLocationService(
     }
   }
 
-  // Non-Android/dev fallback: retain the existing Expo Location foreground
-  // service so coordinator tests and unsupported runtimes still have a safe
-  // implementation.
+  // Unsupported/dev fallback. It is never allowed to coexist with the native
+  // scheduler, preventing duplicate interval owners.
   try {
     const { status } = await Location.getForegroundPermissionsAsync();
     if (status !== 'granted') {
@@ -62,8 +72,7 @@ export async function startForegroundLocationService(
       return { success: false, error: 'Location permission not granted' };
     }
 
-    const isRunning = await isForegroundLocationServiceRunning();
-    if (isRunning) {
+    if (await isForegroundLocationServiceRunning()) {
       try {
         await Location.stopLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
       } catch (stopError: any) {
@@ -87,8 +96,7 @@ export async function startForegroundLocationService(
       },
     });
 
-    const registered = await isForegroundLocationServiceRunning();
-    if (!registered) {
+    if (!await isForegroundLocationServiceRunning()) {
       return { success: false, error: 'Fallback foreground location service registration could not be verified' };
     }
 
@@ -122,8 +130,7 @@ export async function stopForegroundLocationService(): Promise<void> {
   }
 
   try {
-    const isRunning = await isForegroundLocationServiceRunning();
-    if (!isRunning) return;
+    if (!await isForegroundLocationServiceRunning()) return;
     await Location.stopLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
     console.log(`${TAG} Fallback foreground location service stopped`);
   } catch (error: any) {
@@ -142,12 +149,9 @@ export async function isForegroundLocationServiceRunning(): Promise<boolean> {
   }
 }
 
-// Kept as a compatibility fallback for runtimes where the native scheduler is
-// unavailable. Android builds with the native scheduler never use this task as
-// the Daily Monitor clock.
+// Compatibility fallback for runtimes where the native scheduler is absent.
 TaskManager.defineTask(DAILY_FOREGROUND_LOCATION_TASK, async ({ data, error }) => {
   const TAG = '[FG-LOCATION]';
-
   if (error) {
     console.error(`${TAG} Location task error:`, error.message || String(error));
     return;
@@ -162,9 +166,7 @@ TaskManager.defineTask(DAILY_FOREGROUND_LOCATION_TASK, async ({ data, error }) =
   const location = locations[0];
   const lat = location?.coords?.latitude;
   const lon = location?.coords?.longitude;
-  if (lat != null && lon != null) {
-    console.log(`${TAG} Location update: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
-  }
+  if (lat != null && lon != null) console.log(`${TAG} Location update: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
 
   try {
     if (!collectionCallback) {
