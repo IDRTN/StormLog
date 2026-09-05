@@ -199,14 +199,44 @@ jobs:
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
           test -s "$APK"
           sha256sum "$APK"
+
           if command -v apkanalyzer >/dev/null 2>&1; then
-            apkanalyzer manifest print "$APK" > /tmp/stormlog-apk-manifest.xml
-            grep -q 'StormLogHeadlessTaskService' /tmp/stormlog-apk-manifest.xml
-            grep -q 'dataSync' /tmp/stormlog-apk-manifest.xml
-            grep -q 'StormLogSchedulerAlarmReceiver' /tmp/stormlog-apk-manifest.xml
-            grep -q 'StormLogSchedulerBootReceiver' /tmp/stormlog-apk-manifest.xml
-            ! grep -q 'StormLogSchedulerService' /tmp/stormlog-apk-manifest.xml
+            MANIFEST=/tmp/stormlog-apk-manifest.xml
+            apkanalyzer manifest print "$APK" > "$MANIFEST"
+
+            echo "--- Packaged StormLog scheduler manifest entries ---"
+            grep -nE 'StormLog|foregroundServiceType|FOREGROUND_SERVICE_DATA_SYNC|SCHEDULE_EXACT_ALARM' "$MANIFEST" || true
+            echo "--------------------------------------------------"
+
+            require_manifest_entry() {
+              local pattern="$1"
+              local label="$2"
+              if ! grep -qE "$pattern" "$MANIFEST"; then
+                echo "::error title=APK packaging verification failed::Missing ${label} in packaged AndroidManifest.xml"
+                return 1
+              fi
+            }
+
+            require_manifest_entry 'StormLogHeadlessTaskService' 'headless foreground worker service'
+            require_manifest_entry 'StormLogSchedulerAlarmReceiver' 'alarm receiver'
+            require_manifest_entry 'StormLogSchedulerBootReceiver' 'boot/update recovery receiver'
+            require_manifest_entry 'StormLogExactAlarmPermissionReceiver' 'exact-alarm permission receiver'
+            require_manifest_entry 'android.permission.FOREGROUND_SERVICE_DATA_SYNC' 'FOREGROUND_SERVICE_DATA_SYNC permission'
+            require_manifest_entry 'android.permission.SCHEDULE_EXACT_ALARM' 'SCHEDULE_EXACT_ALARM permission'
+
+            # apkanalyzer may render the enum symbolically (dataSync) or as its
+            # numeric bit value (0x1/1), depending on build-tools version.
+            if ! grep -qE 'foregroundServiceType[^>]*(dataSync|0x0*1|="1")' "$MANIFEST"; then
+              echo "::error title=APK packaging verification failed::Headless worker is missing dataSync foreground-service type"
+              exit 1
+            fi
+
+            if grep -q 'StormLogSchedulerService' "$MANIFEST"; then
+              echo "::error title=APK packaging verification failed::Obsolete always-running scheduler service is still packaged"
+              exit 1
+            fi
           fi
+
           cp "$APK" StormLog-daily-monitor-headless-fgs.apk
 
       - name: Upload verified hardening APK
