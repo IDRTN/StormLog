@@ -11,6 +11,7 @@ type RequestState<T> = {
 };
 
 const requestStates = new Map<string, RequestState<any>>();
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 export class RateLimitError extends Error {
   readonly service: string;
@@ -71,6 +72,28 @@ export function isRateLimitError(error: unknown): error is RateLimitError {
   return error instanceof RateLimitError;
 }
 
+async function executeWithTimeout<T>(
+  service: string,
+  timeoutMs: number,
+  execute: () => Promise<T>,
+): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return execute();
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      execute(),
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${service} timed out after ${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer != null) clearTimeout(timer);
+  }
+}
+
 export async function guardedRequest<T>(options: {
   service: string;
   key: string;
@@ -78,6 +101,7 @@ export async function guardedRequest<T>(options: {
   backoffBaseMs?: number;
   backoffMaxMs?: number;
   cacheIf?: (value: T) => boolean;
+  timeoutMs?: number;
   execute: () => Promise<T>;
 }): Promise<T> {
   const {
@@ -87,6 +111,7 @@ export async function guardedRequest<T>(options: {
     backoffBaseMs = 1000,
     backoffMaxMs = 5 * 60 * 1000,
     cacheIf = () => true,
+    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
     execute,
   } = options;
   const state = getState<T>(`${service}:${key}`);
@@ -117,7 +142,7 @@ export async function guardedRequest<T>(options: {
 
   const promise = (async () => {
     try {
-      const value = await execute();
+      const value = await executeWithTimeout(service, timeoutMs, execute);
       if (cacheTtlMs > 0 && cacheIf(value)) {
         state.cache = {
           expiresAt: Date.now() + cacheTtlMs,
