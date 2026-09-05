@@ -27,7 +27,10 @@ jobs:
       - name: Require lightning client token
         shell: bash
         run: |
-          test -n "${EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN:-}"
+          if [[ -z "${EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN:-}" ]]; then
+            echo "::error title=Missing lightning token::Repository Actions secret STORMLOG_LIGHTNING_TOKEN is required."
+            exit 1
+          fi
 
       - name: Verify live lightning proxy authentication
         shell: bash
@@ -38,8 +41,13 @@ jobs:
             -H 'accept: application/json' \
             -H "x-stormlog-client-token: ${EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN}" \
             "${EXPO_PUBLIC_STORMLOG_LIGHTNING_URL}/events?latitude=40&longitude=-82.5&radiusKm=1&sinceMs=0&untilMs=0")"
-          test "$STATUS" = "200"
-          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!Array.isArray(p.events))throw new Error("events array missing")' "$RESPONSE_FILE"
+          echo "Lightning proxy HTTP status: $STATUS"
+          if [[ "$STATUS" != "200" ]]; then
+            BODY="$(head -c 500 "$RESPONSE_FILE" | tr '\n' ' ')"
+            echo "::error title=Lightning proxy live check failed::Worker returned HTTP $STATUS: $BODY"
+            exit 1
+          fi
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!Array.isArray(p.events))throw new Error("Worker 200 response is missing events array")' "$RESPONSE_FILE"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -112,14 +120,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler/StormLogAlarmScheduler.kt
+          SCHED="modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler/StormLogAlarmScheduler.kt"
+          RECEIVER="modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler/StormLogSchedulerAlarmReceiver.kt"
+          WORKER="modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler/StormLogHeadlessTaskService.kt"
+          test -f "$SCHED"
           test ! -f modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler/StormLogSchedulerService.kt
-          grep -q 'setExactAndAllowWhileIdle' modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler/StormLogAlarmScheduler.kt
-          grep -q 'canScheduleExactAlarms' modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler/StormLogAlarmScheduler.kt
-          grep -q 'setOngoing(true)' modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler/StormLogAlarmScheduler.kt
-          grep -q 'HeadlessJsTaskService.acquireWakeLockNow' modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler/StormLogSchedulerAlarmReceiver.kt
+          grep -q 'setExactAndAllowWhileIdle' "$SCHED"
+          grep -q 'canScheduleExactAlarms' "$SCHED"
+          ! grep -q 'setAndAllowWhileIdle' "$SCHED"
+          grep -q 'Exact alarm access required' "$SCHED"
+          grep -q 'ContextCompat.startForegroundService' "$RECEIVER"
+          grep -q 'startForeground' "$WORKER"
+          grep -q 'stopForeground' "$WORKER"
+          grep -q 'HeadlessJsTaskService.acquireWakeLockNow' "$RECEIVER"
           ! grep -R 'StormLogSchedulerService.start' modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler
-          ! grep -R 'startForegroundService' modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler
 
       - name: Generate Android project
         env:
@@ -135,6 +149,9 @@ jobs:
           npx expo-modules-autolinking resolve --platform android > /tmp/stormlog-autolinking.json
           grep -qi 'storm-log-scheduler' /tmp/stormlog-autolinking.json
           grep -q 'StormLogHeadlessTaskService' android/app/src/main/AndroidManifest.xml
+          grep -q 'android:foregroundServiceType="dataSync"' android/app/src/main/AndroidManifest.xml
+          grep -q 'FOREGROUND_SERVICE_DATA_SYNC' android/app/src/main/AndroidManifest.xml
+          grep -q 'SCHEDULE_EXACT_ALARM' android/app/src/main/AndroidManifest.xml
           grep -q 'StormLogSchedulerAlarmReceiver' android/app/src/main/AndroidManifest.xml
           grep -q 'StormLogExactAlarmPermissionReceiver' android/app/src/main/AndroidManifest.xml
           grep -q 'StormLogSchedulerBootReceiver' android/app/src/main/AndroidManifest.xml
@@ -185,16 +202,17 @@ jobs:
           if command -v apkanalyzer >/dev/null 2>&1; then
             apkanalyzer manifest print "$APK" > /tmp/stormlog-apk-manifest.xml
             grep -q 'StormLogHeadlessTaskService' /tmp/stormlog-apk-manifest.xml
+            grep -q 'dataSync' /tmp/stormlog-apk-manifest.xml
             grep -q 'StormLogSchedulerAlarmReceiver' /tmp/stormlog-apk-manifest.xml
             grep -q 'StormLogSchedulerBootReceiver' /tmp/stormlog-apk-manifest.xml
             ! grep -q 'StormLogSchedulerService' /tmp/stormlog-apk-manifest.xml
           fi
-          cp "$APK" StormLog-daily-monitor-alarm-only.apk
+          cp "$APK" StormLog-daily-monitor-headless-fgs.apk
 
       - name: Upload verified hardening APK
         uses: actions/upload-artifact@v4
         with:
-          name: StormLog-daily-monitor-alarm-only-verified
-          path: StormLog-daily-monitor-alarm-only.apk
+          name: StormLog-daily-monitor-headless-fgs-verified
+          path: StormLog-daily-monitor-headless-fgs.apk
           if-no-files-found: error
           retention-days: 14
