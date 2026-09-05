@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
+import { Platform } from 'react-native';
+import * as Location from 'expo-location';
 import {
   getMonitorStatus,
   initializeDailyMonitorCoordinator,
@@ -76,8 +78,28 @@ export function useDailyMonitor() {
     const interval = intervalMinutes ?? state.intervalMinutes;
     setState((s) => ({ ...s, loading: true, error: null }));
     try {
+      const foreground = await Location.requestForegroundPermissionsAsync();
+      if (foreground.status !== 'granted') {
+        throw new Error('Daily Monitor requires location permission.');
+      }
+
+      if (Platform.OS === 'android') {
+        const background = await Location.requestBackgroundPermissionsAsync();
+        if (background.status !== 'granted') {
+          throw new Error(
+            'Daily Monitor requires Allow all the time location access so scheduled background observations can get a fresh location.',
+          );
+        }
+      }
+
       await startDailyMonitor(INTERVALS.includes(interval) ? interval : 15);
       await refreshFromService();
+    } catch (error: unknown) {
+      setState((s) => ({
+        ...s,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      throw error;
     } finally {
       setState((s) => ({ ...s, loading: false }));
     }
