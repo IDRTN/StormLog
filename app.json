@@ -25,6 +25,7 @@
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
         "FOREGROUND_SERVICE",
         "FOREGROUND_SERVICE_DATA_SYNC",
         "FOREGROUND_SERVICE_LOCATION",
@@ -35,6 +36,7 @@
         "WAKE_LOCK",
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
         "android.permission.RECEIVE_BOOT_COMPLETED",
         "android.permission.WAKE_LOCK"
       ]
@@ -45,7 +47,8 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Allow Storm Log to access your location for weather data."
+          "locationAlwaysAndWhenInUsePermission": "Allow Storm Log to access your location for weather data.",
+          "isAndroidBackgroundLocationEnabled": true
         }
       ],
       [
