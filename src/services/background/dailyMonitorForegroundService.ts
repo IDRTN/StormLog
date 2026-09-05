@@ -26,8 +26,6 @@ export async function startForegroundLocationService(
 
   if (isNativeDailyMonitorSchedulerAvailable()) {
     try {
-      // Remove the old expo-location foreground scheduler left by previous APKs.
-      // The new Android path must sleep between AlarmManager wakeups.
       try {
         if (await Location.hasStartedLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK)) {
           await Location.stopLocationUpdatesAsync(DAILY_FOREGROUND_LOCATION_TASK);
@@ -40,18 +38,23 @@ export async function startForegroundLocationService(
         return { success: false, error: 'Native Daily Monitor scheduler is unavailable' };
       }
 
-      // Alarm registration is synchronous on the native side. A short yield gives
-      // the bridge time to reflect the PendingIntent before verification.
+      // Exact alarm access is a hard requirement for a user-selected 15-minute
+      // cadence. Do not report the monitor healthy while Android is free to batch
+      // alarms into 30+ minute windows. The native start call opens the system
+      // Alarms & reminders settings when this permission is missing.
+      if (!hasNativeDailyMonitorExactAlarmPermission()) {
+        return {
+          success: false,
+          error: 'Exact alarm access is required for reliable Daily Monitor timing. Enable StormLog under Android Alarms & reminders, then restart Daily Monitor.',
+        };
+      }
+
       await new Promise<void>((resolve) => setTimeout(resolve, 150));
       if (!isNativeDailyMonitorSchedulerRunning()) {
-        return { success: false, error: 'Native Daily Monitor alarm could not be verified' };
+        return { success: false, error: 'Native Daily Monitor exact alarm could not be verified' };
       }
 
-      if (!hasNativeDailyMonitorExactAlarmPermission()) {
-        console.warn(`${TAG} Exact-alarm permission is not granted; Android may delay 15-minute observations until permission is granted.`);
-      }
-
-      console.log(`${TAG} AlarmManager scheduler armed (interval: ${intervalMinutes} min)`);
+      console.log(`${TAG} Exact AlarmManager scheduler armed (interval: ${intervalMinutes} min)`);
       return { success: true };
     } catch (error: any) {
       const msg = error?.message || String(error);
@@ -121,7 +124,6 @@ export async function isForegroundLocationServiceRunning(): Promise<boolean> {
   }
 }
 
-// Compatibility fallback for runtimes where the native scheduler is unavailable.
 TaskManager.defineTask(DAILY_FOREGROUND_LOCATION_TASK, async ({ data, error }) => {
   const TAG = '[FG-LOCATION]';
   if (error) {
