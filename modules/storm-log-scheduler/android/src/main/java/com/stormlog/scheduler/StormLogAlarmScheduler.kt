@@ -8,18 +8,14 @@ import android.content.Context
 import android.os.Build
 import androidx.core.app.NotificationCompat
 
-/**
- * Single Android owner for Daily Monitor timing.
- *
- * This deliberately does NOT keep a foreground service or React Native process
- * alive between observations. AlarmManager owns the clock; each alarm wakes a
- * short-lived headless collection and immediately re-arms the next boundary.
- */
 object StormLogAlarmScheduler {
   private const val PREFS = "stormlog_daily_monitor_scheduler"
   private const val INTERVAL_KEY = "interval_minutes"
   private const val ENABLED_KEY = "enabled"
   private const val NEXT_ALARM_AT_KEY = "next_alarm_at"
+  private const val LAST_ALARM_FIRED_AT_KEY = "last_alarm_fired_at"
+  private const val LAST_LAUNCH_FAILURE_AT_KEY = "last_launch_failure_at"
+  private const val LAST_LAUNCH_FAILURE_KEY = "last_launch_failure"
   private const val DEFAULT_INTERVAL_MINUTES = 15
   private const val CHANNEL_ID = "stormlog_daily_monitor"
   private const val NOTIFICATION_ID = 41015
@@ -47,14 +43,24 @@ object StormLogAlarmScheduler {
       .putInt(INTERVAL_KEY, safeInterval)
       .apply()
 
-    postStatusNotification(context, safeInterval)
-    scheduleNext(context, safeInterval)
+    if (hasExactAlarmPermission(context)) {
+      postStatusNotification(context, safeInterval, precise = true)
+      scheduleNext(context, safeInterval)
+    } else {
+      cancelAlarm(context)
+      postStatusNotification(context, safeInterval, precise = false)
+    }
   }
 
   fun restore(context: Context) {
     if (!isEnabled(context)) return
     val intervalMinutes = getStoredIntervalMinutes(context)
-    postStatusNotification(context, intervalMinutes)
+    if (!hasExactAlarmPermission(context)) {
+      cancelAlarm(context)
+      postStatusNotification(context, intervalMinutes, precise = false)
+      return
+    }
+    postStatusNotification(context, intervalMinutes, precise = true)
     scheduleNext(context, intervalMinutes)
   }
 
@@ -73,6 +79,12 @@ object StormLogAlarmScheduler {
       cancelAlarm(context)
       return
     }
+    if (!hasExactAlarmPermission(context)) {
+      cancelAlarm(context)
+      postStatusNotification(context, intervalMinutes, precise = false)
+      android.util.Log.w("StormLogScheduler", "Exact alarm access missing; precise Daily Monitor schedule not armed")
+      return
+    }
 
     val alarmManager = context.getSystemService(AlarmManager::class.java) ?: return
     val safeInterval = intervalMinutes.coerceAtLeast(1)
@@ -80,25 +92,12 @@ object StormLogAlarmScheduler {
     val now = System.currentTimeMillis()
     val nextBoundary = ((now / intervalMs) + 1L) * intervalMs
     val pendingIntent = StormLogSchedulerAlarmReceiver.pendingIntent(context)
-    val exactAllowed = hasExactAlarmPermission(context)
 
-    // Exact permission is the reliable path. The inexact fallback exists only
-    // so monitoring degrades instead of silently stopping while the user grants
-    // special access; app state exposes permission so this is never mistaken for
-    // guaranteed 15-minute timing.
-    if (exactAllowed) {
-      alarmManager.setExactAndAllowWhileIdle(
-        AlarmManager.RTC_WAKEUP,
-        nextBoundary,
-        pendingIntent,
-      )
-    } else {
-      alarmManager.setAndAllowWhileIdle(
-        AlarmManager.RTC_WAKEUP,
-        nextBoundary,
-        pendingIntent,
-      )
-    }
+    alarmManager.setExactAndAllowWhileIdle(
+      AlarmManager.RTC_WAKEUP,
+      nextBoundary,
+      pendingIntent,
+    )
 
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
       .edit()
@@ -107,12 +106,12 @@ object StormLogAlarmScheduler {
 
     android.util.Log.i(
       "StormLogScheduler",
-      "Alarm armed for $nextBoundary (interval=${safeInterval}m, exact=$exactAllowed)",
+      "Exact alarm armed for $nextBoundary (interval=${safeInterval}m)",
     )
   }
 
   fun hasScheduledAlarm(context: Context): Boolean {
-    if (!isEnabled(context)) return false
+    if (!isEnabled(context) || !hasExactAlarmPermission(context)) return false
     val pending = PendingIntent.getBroadcast(
       context,
       StormLogSchedulerAlarmReceiver.REQUEST_CODE,
@@ -122,12 +121,29 @@ object StormLogAlarmScheduler {
     return pending != null
   }
 
+  fun recordAlarmFired(context: Context, firedAt: Long) {
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+      .edit()
+      .putLong(LAST_ALARM_FIRED_AT_KEY, firedAt)
+      .remove(LAST_LAUNCH_FAILURE_AT_KEY)
+      .remove(LAST_LAUNCH_FAILURE_KEY)
+      .apply()
+  }
+
+  fun recordLaunchFailure(context: Context, failedAt: Long, message: String) {
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+      .edit()
+      .putLong(LAST_LAUNCH_FAILURE_AT_KEY, failedAt)
+      .putString(LAST_LAUNCH_FAILURE_KEY, message)
+      .apply()
+  }
+
   private fun cancelAlarm(context: Context) {
     val alarmManager = context.getSystemService(AlarmManager::class.java) ?: return
     alarmManager.cancel(StormLogSchedulerAlarmReceiver.pendingIntent(context))
   }
 
-  private fun postStatusNotification(context: Context, intervalMinutes: Int) {
+  private fun postStatusNotification(context: Context, intervalMinutes: Int, precise: Boolean) {
     val manager = context.getSystemService(NotificationManager::class.java) ?: return
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       manager.createNotificationChannel(
@@ -142,9 +158,15 @@ object StormLogAlarmScheduler {
       )
     }
 
+    val body = if (precise) {
+      "Automatic observations enabled — every $intervalMinutes min"
+    } else {
+      "Exact alarm access required for reliable $intervalMinutes min observations"
+    }
+
     val notification = NotificationCompat.Builder(context, CHANNEL_ID)
       .setContentTitle("StormLog Daily Monitor")
-      .setContentText("Automatic observations enabled — every $intervalMinutes min")
+      .setContentText(body)
       .setSmallIcon(android.R.drawable.ic_menu_myplaces)
       .setOngoing(true)
       .setOnlyAlertOnce(true)
