@@ -27,9 +27,17 @@ export type DailyMonitorLocationResolverOptions = {
   maxCachedAgeMs?: number;
 };
 
-const DEFAULT_CURRENT_FIX_TIMEOUT_MS = 8_000;
-const DEFAULT_MAX_LAST_KNOWN_AGE_MS = 5 * 60_000;
-const DEFAULT_MAX_CACHED_AGE_MS = 15 * 60_000;
+// Background GPS can take longer to settle indoors even when Android has
+// granted background location. Give the short-lived foreground worker a real
+// acquisition window before falling back. The worker itself has a 120s cap.
+const DEFAULT_CURRENT_FIX_TIMEOUT_MS = 25_000;
+
+// A weather monitor should not stop completely just because Android cannot get
+// a fresh satellite fix inside a building. Prefer a recent OS/provider fix,
+// then StormLog's last trusted coordinates. Keep both bounded so we never use
+// an arbitrarily old location.
+const DEFAULT_MAX_LAST_KNOWN_AGE_MS = 2 * 60 * 60_000;
+const DEFAULT_MAX_CACHED_AGE_MS = 2 * 60 * 60_000;
 
 function finiteCoordinate(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
@@ -111,5 +119,5 @@ export async function resolveDailyMonitorLocation(
     lastKnown ? `last-known location is ${Math.round(lastKnown.ageMs / 60_000)}m old` : 'last-known location unavailable',
     cached ? `cached location is ${Math.round(cached.ageMs / 60_000)}m old` : 'cached location unavailable',
   ];
-  throw new Error(`No sufficiently fresh location available (${reasons.join('; ')})`);
+  throw new Error(`No usable recent location available (${reasons.join('; ')})`);
 }
