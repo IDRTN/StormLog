@@ -4,6 +4,7 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import androidx.core.content.ContextCompat
 import com.facebook.react.HeadlessJsTaskService
 
 class StormLogSchedulerAlarmReceiver : BroadcastReceiver() {
@@ -17,19 +18,24 @@ class StormLogSchedulerAlarmReceiver : BroadcastReceiver() {
     val scheduledAt = System.currentTimeMillis()
 
     try {
+      // Android background-service limits can reject startService() when the app
+      // task/process is gone. Exact alarms are allowed to launch a foreground
+      // service, so the headless worker is promoted only for the short collection
+      // window and shuts down again when the JS task completes.
       HeadlessJsTaskService.acquireWakeLockNow(context)
-      context.startService(
+      ContextCompat.startForegroundService(
+        context,
         Intent(context, StormLogHeadlessTaskService::class.java).apply {
           putExtra("scheduledAt", scheduledAt)
           putExtra("intervalMinutes", intervalMinutes)
           putExtra("source", "alarm_manager")
         },
       )
+      StormLogAlarmScheduler.recordAlarmFired(context, scheduledAt)
     } catch (error: Exception) {
+      StormLogAlarmScheduler.recordLaunchFailure(context, scheduledAt, error.message ?: error.javaClass.simpleName)
       android.util.Log.e("StormLogScheduler", "Alarm collection launch failed", error)
     } finally {
-      // Re-arm from the receiver itself. No foreground service or UI process is
-      // required to remain alive between observations.
       if (StormLogAlarmScheduler.isEnabled(context)) {
         StormLogAlarmScheduler.scheduleNext(context, intervalMinutes)
       }
