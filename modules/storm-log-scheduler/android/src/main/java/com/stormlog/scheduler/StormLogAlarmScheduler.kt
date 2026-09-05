@@ -90,23 +90,31 @@ object StormLogAlarmScheduler {
     val safeInterval = intervalMinutes.coerceAtLeast(1)
     val intervalMs = safeInterval.toLong() * 60_000L
     val now = System.currentTimeMillis()
-    val nextBoundary = ((now / intervalMs) + 1L) * intervalMs
+
+    // Anchor the next alarm to the actual fire/re-arm time instead of snapping
+    // back to a wall-clock boundary. The old boundary math could create a gap
+    // shorter than the configured interval after even a small Android alarm
+    // delay (for example 14m40s instead of 15m). The JS/SQLite de-dupe gates
+    // then correctly rejected that "too-soon" callback, producing the field
+    // pattern of 15m -> 30m -> 15m. Scheduling from now preserves the user's
+    // requested elapsed cadence and prevents that self-inflicted skipped slot.
+    val nextAlarmAt = now + intervalMs
     val pendingIntent = StormLogSchedulerAlarmReceiver.pendingIntent(context)
 
     alarmManager.setExactAndAllowWhileIdle(
       AlarmManager.RTC_WAKEUP,
-      nextBoundary,
+      nextAlarmAt,
       pendingIntent,
     )
 
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
       .edit()
-      .putLong(NEXT_ALARM_AT_KEY, nextBoundary)
+      .putLong(NEXT_ALARM_AT_KEY, nextAlarmAt)
       .apply()
 
     android.util.Log.i(
       "StormLogScheduler",
-      "Exact alarm armed for $nextBoundary (interval=${safeInterval}m)",
+      "Exact alarm armed for $nextAlarmAt (interval=${safeInterval}m, elapsed-from-now)",
     )
   }
 
