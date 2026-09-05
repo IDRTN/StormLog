@@ -67,16 +67,28 @@ async function run(): Promise<void> {
     getCurrentPosition: async () => null,
     getLastKnownPosition: async () => ({
       coords: { latitude: 40.2, longitude: -82.3 },
-      timestamp: nowMs - 10 * 60_000,
+      timestamp: nowMs - 3 * 60 * 60_000,
     }),
     readCachedLocation: async () => ({
       latitude: 40.17,
       longitude: -82.25,
-      timestampMs: nowMs - 2 * 60_000,
+      timestampMs: nowMs - 90 * 60_000,
     }),
   });
   assertEqual(cached.source, 'stormlog_cached');
   assertEqual(cached.longitude, -82.25);
+
+  const indoorLastKnown = await resolveDailyMonitorLocation({
+    now: () => nowMs,
+    wait: immediateTimeout,
+    getCurrentPosition: () => blockedCurrent,
+    getLastKnownPosition: async () => ({
+      coords: { latitude: 40.18, longitude: -82.26 },
+      timestamp: nowMs - 90 * 60_000,
+    }),
+    readCachedLocation: async () => null,
+  }, { currentFixTimeoutMs: 1_000 });
+  assertEqual(indoorLastKnown.source, 'os_last_known');
 
   await assertRejects(
     () => resolveDailyMonitorLocation({
@@ -85,15 +97,15 @@ async function run(): Promise<void> {
       getCurrentPosition: async () => null,
       getLastKnownPosition: async () => ({
         coords: { latitude: 40.2, longitude: -82.3 },
-        timestamp: nowMs - 10 * 60_000,
+        timestamp: nowMs - 3 * 60 * 60_000,
       }),
       readCachedLocation: async () => ({
         latitude: 40.17,
         longitude: -82.25,
-        timestampMs: nowMs - 20 * 60_000,
+        timestampMs: nowMs - 3 * 60 * 60_000,
       }),
     }),
-    /No sufficiently fresh location available/,
+    /No usable recent location available/,
   );
 
   await assertRejects(
@@ -107,7 +119,7 @@ async function run(): Promise<void> {
       getLastKnownPosition: async () => null,
       readCachedLocation: async () => null,
     }),
-    /No sufficiently fresh location available/,
+    /No usable recent location available/,
   );
 
   console.log('dailyMonitorLocationResolver.runtime.test passed');
