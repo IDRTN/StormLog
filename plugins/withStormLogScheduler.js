@@ -39,12 +39,13 @@ module.exports = function withStormLogScheduler(config) {
     const application = configWithManifest.modResults.manifest.application?.[0];
     if (!application) throw new Error('StormLog scheduler could not find the Android application manifest entry.');
 
-    // There is intentionally no always-running StormLog scheduler service.
-    // AlarmManager owns timing and this headless service exists only while a
-    // collection is executing.
+    // No always-running scheduler service. AlarmManager owns timing; this worker
+    // is promoted to foreground only for the short network/data collection window.
     ensureService(application, HEADLESS_SERVICE, {
       'android:enabled': 'true',
       'android:exported': 'false',
+      'android:foregroundServiceType': 'dataSync',
+      'android:stopWithTask': 'false',
     });
 
     ensureReceiver(application, ALARM_RECEIVER, {
