@@ -133,6 +133,10 @@ jobs:
           grep -q 'startForeground' "$WORKER"
           grep -q 'stopForeground' "$WORKER"
           grep -q 'HeadlessJsTaskService.acquireWakeLockNow' "$RECEIVER"
+          grep -q 'ACCESS_BACKGROUND_LOCATION' app.json
+          grep -q 'isAndroidBackgroundLocationEnabled' app.json
+          grep -q "foregroundServiceType': 'location|dataSync'" plugins/withStormLogScheduler.js
+          grep -q 'requestBackgroundPermissionsAsync' src/hooks/useDailyMonitor.ts
           ! grep -R 'StormLogSchedulerService.start' modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler
 
       - name: Generate Android project
@@ -149,8 +153,10 @@ jobs:
           npx expo-modules-autolinking resolve --platform android > /tmp/stormlog-autolinking.json
           grep -qi 'storm-log-scheduler' /tmp/stormlog-autolinking.json
           grep -q 'StormLogHeadlessTaskService' android/app/src/main/AndroidManifest.xml
-          grep -q 'android:foregroundServiceType="dataSync"' android/app/src/main/AndroidManifest.xml
+          grep -q 'android:foregroundServiceType="location|dataSync"' android/app/src/main/AndroidManifest.xml
           grep -q 'FOREGROUND_SERVICE_DATA_SYNC' android/app/src/main/AndroidManifest.xml
+          grep -q 'FOREGROUND_SERVICE_LOCATION' android/app/src/main/AndroidManifest.xml
+          grep -q 'ACCESS_BACKGROUND_LOCATION' android/app/src/main/AndroidManifest.xml
           grep -q 'SCHEDULE_EXACT_ALARM' android/app/src/main/AndroidManifest.xml
           grep -q 'StormLogSchedulerAlarmReceiver' android/app/src/main/AndroidManifest.xml
           grep -q 'StormLogExactAlarmPermissionReceiver' android/app/src/main/AndroidManifest.xml
@@ -205,7 +211,7 @@ jobs:
             apkanalyzer manifest print "$APK" > "$MANIFEST"
 
             echo "--- Packaged StormLog scheduler manifest entries ---"
-            grep -nE 'StormLog|foregroundServiceType|FOREGROUND_SERVICE_DATA_SYNC|SCHEDULE_EXACT_ALARM' "$MANIFEST" || true
+            grep -nE 'StormLog|foregroundServiceType|FOREGROUND_SERVICE_(DATA_SYNC|LOCATION)|ACCESS_BACKGROUND_LOCATION|SCHEDULE_EXACT_ALARM' "$MANIFEST" || true
             echo "--------------------------------------------------"
 
             require_manifest_entry() {
@@ -222,12 +228,24 @@ jobs:
             require_manifest_entry 'StormLogSchedulerBootReceiver' 'boot/update recovery receiver'
             require_manifest_entry 'StormLogExactAlarmPermissionReceiver' 'exact-alarm permission receiver'
             require_manifest_entry 'android.permission.FOREGROUND_SERVICE_DATA_SYNC' 'FOREGROUND_SERVICE_DATA_SYNC permission'
+            require_manifest_entry 'android.permission.FOREGROUND_SERVICE_LOCATION' 'FOREGROUND_SERVICE_LOCATION permission'
+            require_manifest_entry 'android.permission.ACCESS_BACKGROUND_LOCATION' 'ACCESS_BACKGROUND_LOCATION permission'
             require_manifest_entry 'android.permission.SCHEDULE_EXACT_ALARM' 'SCHEDULE_EXACT_ALARM permission'
 
-            # apkanalyzer may render the enum symbolically (dataSync) or as its
-            # numeric bit value (0x1/1), depending on build-tools version.
-            if ! grep -qE 'foregroundServiceType[^>]*(dataSync|0x0*1|="1")' "$MANIFEST"; then
-              echo "::error title=APK packaging verification failed::Headless worker is missing dataSync foreground-service type"
+            # apkanalyzer can render foreground-service types symbolically or as
+            # a numeric mask. Require both location and dataSync when symbolic;
+            # otherwise accept a nonzero mask only after the explicit permissions
+            # above have independently verified the intended capabilities.
+            SERVICE_LINE="$(grep 'StormLogHeadlessTaskService' "$MANIFEST" || true)"
+            if grep -q 'foregroundServiceType' "$MANIFEST"; then
+              if grep -qE 'foregroundServiceType[^>]*(location.*dataSync|dataSync.*location)' "$MANIFEST"; then
+                :
+              elif ! grep -qE 'foregroundServiceType[^>]*(0x[0-9a-fA-F]+|="[1-9][0-9]*")' "$MANIFEST"; then
+                echo "::error title=APK packaging verification failed::Headless worker is missing location+dataSync foreground-service types"
+                exit 1
+              fi
+            else
+              echo "::error title=APK packaging verification failed::No foregroundServiceType found in packaged manifest"
               exit 1
             fi
 
