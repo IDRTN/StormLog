@@ -3,6 +3,7 @@ import { getDatabase } from '../../database/database';
 const GATE_TABLE = 'daily_monitor_automatic_gate';
 const MAX_LEASE_MS = 2 * 60 * 1000;
 const MIN_LEASE_MS = 30 * 1000;
+const MAX_CADENCE_JITTER_MS = 3 * 60 * 1000;
 
 async function ensureAutomaticGateSchema(db: Awaited<ReturnType<typeof getDatabase>>): Promise<void> {
   await db.execAsync(`
@@ -17,9 +18,6 @@ async function ensureAutomaticGateSchema(db: Awaited<ReturnType<typeof getDataba
   const columns = await db.getAllAsync<{ name: string }>(`PRAGMA table_info(${GATE_TABLE})`);
   const names = new Set(columns.map((column) => column.name));
 
-  // APKs before the hardening pass created this table with only
-  // last_attempt_ms. Migrate it in place so an app update does not require a
-  // database reset or a monitor restart.
   if (!names.has('last_success_ms')) {
     await db.execAsync(`ALTER TABLE ${GATE_TABLE} ADD COLUMN last_success_ms INTEGER NOT NULL DEFAULT 0`);
   }
@@ -33,30 +31,42 @@ async function ensureAutomaticGateSchema(db: Awaited<ReturnType<typeof getDataba
   );
 }
 
+function minimumSuccessAgeMs(intervalMs: number): number {
+  const safeIntervalMs = Math.max(60_000, intervalMs);
+  const jitterAllowanceMs = Math.min(
+    MAX_CADENCE_JITTER_MS,
+    Math.max(30_000, Math.floor(safeIntervalMs / 5)),
+  );
+  return Math.max(30_000, safeIntervalMs - jitterAllowanceMs);
+}
+
 /**
  * Cross-process automatic collection gate backed by SQLite transaction
  * serialization.
  *
- * The old gate treated an ATTEMPT as if it were a successful collection and
- * blocked every other scheduler for the full monitor interval. If location,
- * networking, or JS startup stalled, that consumed the 15-minute slot even
- * though no observation was written. The result was the 30/45/50-minute gaps
- * seen in the field.
+ * A short lease prevents simultaneous triggers from starting duplicate work.
+ * A recent successful collection also suppresses duplicate watchdog callbacks,
+ * but the success guard intentionally allows a small cadence-jitter window.
  *
- * This gate now uses a short in-progress lease for de-duplication and only the
- * last SUCCESSFUL collection suppresses a full interval. A failed/stalled
- * attempt therefore becomes retryable after the lease instead of silently
- * losing the entire interval.
+ * Why the jitter window matters: the native exact alarm is an elapsed cadence,
+ * while a successful observation is committed after location/network/database
+ * work completes. Requiring a full interval from completion time can reject the
+ * next legitimate alarm simply because the prior cycle took 20-90 seconds to
+ * finish. That was one of the mechanisms behind the observed 15/30-minute
+ * alternation. The guard now blocks true duplicates while preserving the next
+ * scheduled interval.
  */
 export async function claimAutomaticCollection(attemptAtMs: number, intervalMs: number): Promise<boolean> {
   const db = await getDatabase();
   await ensureAutomaticGateSchema(db);
 
+  const safeIntervalMs = Math.max(60_000, intervalMs);
   const leaseMs = Math.min(
     MAX_LEASE_MS,
-    Math.max(MIN_LEASE_MS, Math.floor(intervalMs / 4)),
+    Math.max(MIN_LEASE_MS, Math.floor(safeIntervalMs / 4)),
   );
   const leaseUntilMs = attemptAtMs + leaseMs;
+  const minSuccessAgeMs = minimumSuccessAgeMs(safeIntervalMs);
   let claimed = false;
 
   await db.withTransactionAsync(async () => {
@@ -69,7 +79,7 @@ export async function claimAutomaticCollection(attemptAtMs: number, intervalMs: 
       attemptAtMs,
       leaseUntilMs,
       attemptAtMs,
-      intervalMs,
+      minSuccessAgeMs,
       attemptAtMs,
     );
     claimed = result.changes > 0;
@@ -80,9 +90,8 @@ export async function claimAutomaticCollection(attemptAtMs: number, intervalMs: 
 
 /**
  * Commit a successful Daily Monitor observation to the cross-process gate.
- * Manual observations count as success too; this intentionally prevents an
- * automatic scheduler from writing a duplicate observation immediately after
- * the user has just collected one.
+ * Manual observations count as success too; this prevents an automatic
+ * scheduler/watchdog from immediately duplicating a user-triggered collection.
  */
 export async function markDailyMonitorCollectionSucceeded(completedAtMs: number = Date.now()): Promise<void> {
   const db = await getDatabase();
