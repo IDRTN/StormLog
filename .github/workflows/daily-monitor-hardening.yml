@@ -156,6 +156,26 @@ jobs:
           test -n "$TEST_FILE"
           node "$TEST_FILE"
 
+      - name: Compile warning lifecycle integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/stormlog-warning-lifecycle-tests
+          npx tsc --ignoreConfig \
+            src/database/__tests__/warningLifecycle.test.ts \
+            --rootDir src \
+            --module commonjs --target ES2022 --moduleResolution node --types node \
+            --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck \
+            --outDir /tmp/stormlog-warning-lifecycle-tests
+
+      - name: Run warning lifecycle integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEST_FILE="/tmp/stormlog-warning-lifecycle-tests/database/__tests__/warningLifecycle.test.js"
+          test -s "$TEST_FILE"
+          node "$TEST_FILE"
+
       - name: Verify automatic storm lifecycle wiring
         shell: bash
         run: |
