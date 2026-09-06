@@ -257,6 +257,7 @@ async function main(): Promise<void> {
     assertEqual(normalized.status, 'Actual');
     assertEqual(normalized.messageType, 'Update');
     assertEqual(normalized.ends, Date.parse('2026-08-24T01:00:00Z'));
+    assert(Array.isArray(normalized.references), 'normalized references missing');
     assertEqual(normalized.references[0], 'urn:oid:2.49.0.1.840.original');
   });
 
