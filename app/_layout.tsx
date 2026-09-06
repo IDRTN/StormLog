@@ -21,17 +21,75 @@ function eventIdFromNotification(data: Record<string, unknown> | undefined): num
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+function automaticStormResponseKey(response: Notifications.NotificationResponse): string {
+  return `${response.notification.request.identifier}:${response.actionIdentifier}`;
+}
+
+async function processAutomaticStormNotificationResponse(
+  response: Notifications.NotificationResponse,
+): Promise<boolean> {
+  const data = response.notification.request.content.data as Record<string, unknown> | undefined;
+  if (data?.category !== AUTOMATIC_STORM_STOP_CATEGORY) return false;
+
+  const eventId = eventIdFromNotification(data);
+  if (eventId == null) return false;
+  if (response.actionIdentifier !== KEEP_RECORDING_ACTION && response.actionIdentifier !== STOP_RECORDING_ACTION) {
+    return false;
+  }
+
+  await handleAutomaticStormStopAction(response.actionIdentifier, eventId);
+  return true;
+}
+
 export default function RootLayout() {
   const notificationListener = useRef<EventSubscription | null>(null);
   const responseListener = useRef<EventSubscription | null>(null);
+  const lastHandledResponseKey = useRef<string | null>(null);
 
   useEffect(() => {
+    let disposed = false;
+
+    const handleResponse = async (response: Notifications.NotificationResponse) => {
+      const key = automaticStormResponseKey(response);
+      if (lastHandledResponseKey.current === key) return;
+
+      try {
+        const handled = await processAutomaticStormNotificationResponse(response);
+        if (!handled) return;
+        lastHandledResponseKey.current = key;
+        await Notifications.clearLastNotificationResponseAsync();
+      } catch (error) {
+        console.error('[ROOT] Automatic storm decision failed:', error);
+      }
+    };
+
+    // Register the live response listener immediately. Expo also recommends
+    // reading the last response at startup because an Android notification action
+    // can launch a previously-terminated app before this React effect exists.
+    responseListener.current = Notifications.addNotificationResponseReceivedListener(response => {
+      console.log('[ROOT] Notification response:', response.notification.request.content.title, response.actionIdentifier);
+      void handleResponse(response);
+    });
+
+    notificationListener.current = Notifications.addNotificationReceivedListener(notification => {
+      console.log('[ROOT] Notification received:', notification.request.content.title);
+    });
+
     void (async () => {
       try {
         await ensureNotificationChannels();
         await requestNotificationPermission();
       } catch (error) {
         console.warn('[ROOT] Notification setup failed:', error);
+      }
+
+      try {
+        const initialResponse = await Notifications.getLastNotificationResponseAsync();
+        if (!disposed && initialResponse) {
+          await handleResponse(initialResponse);
+        }
+      } catch (error) {
+        console.warn('[ROOT] Initial notification response check failed:', error);
       }
 
       try {
@@ -42,25 +100,8 @@ export default function RootLayout() {
       }
     })();
 
-    notificationListener.current = Notifications.addNotificationReceivedListener(notification => {
-      console.log('[ROOT] Notification received:', notification.request.content.title);
-    });
-
-    responseListener.current = Notifications.addNotificationResponseReceivedListener(response => {
-      const data = response.notification.request.content.data as Record<string, unknown> | undefined;
-      console.log('[ROOT] Notification response:', response.notification.request.content.title, response.actionIdentifier);
-      if (data?.category !== AUTOMATIC_STORM_STOP_CATEGORY) return;
-      const eventId = eventIdFromNotification(data);
-      if (eventId == null) return;
-      if (response.actionIdentifier !== KEEP_RECORDING_ACTION && response.actionIdentifier !== STOP_RECORDING_ACTION) {
-        return;
-      }
-      void handleAutomaticStormStopAction(response.actionIdentifier, eventId).catch((error) => {
-        console.error('[ROOT] Automatic storm decision failed:', error);
-      });
-    });
-
     return () => {
+      disposed = true;
       notificationListener.current?.remove();
       responseListener.current?.remove();
       notificationListener.current = null;
