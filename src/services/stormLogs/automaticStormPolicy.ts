@@ -10,6 +10,13 @@ export const AUTO_STOP_REVIEW_GRACE_MS = 30 * 60_000;
 export const KEEP_RECORDING_SUPPRESS_MS = 60 * 60_000;
 export const NWS_SNAPSHOT_MAX_AGE_MS = 20 * 60_000;
 
+export const AUTOMATIC_NWS_TRIGGER_EVENTS = new Set([
+  'Tornado Warning',
+  'Severe Thunderstorm Warning',
+  'Severe Thunderstorm Watch',
+  'Flash Flood Warning',
+]);
+
 export type LightningProximityEvidence = {
   count: number;
   nearestDistanceKm: number | null;
@@ -17,6 +24,25 @@ export type LightningProximityEvidence = {
 
 export function kmToMiles(distanceKm: number | null): number | null {
   return distanceKm == null ? null : distanceKm / KM_PER_MILE;
+}
+
+export function hasEligibleAutomaticNwsSeverity(event: string, severity: string | null): boolean {
+  if (severity === 'Extreme' || severity === 'Severe') return true;
+  return event === 'Severe Thunderstorm Watch' && severity === 'Moderate';
+}
+
+export function isAutomaticNwsTrigger(input: {
+  id: string | null | undefined;
+  event: string;
+  severity: string | null;
+  status?: string | null;
+  messageType?: string | null;
+}): boolean {
+  if (typeof input.id !== 'string' || input.id.trim().length === 0) return false;
+  if (!AUTOMATIC_NWS_TRIGGER_EVENTS.has(input.event)) return false;
+  if (!hasEligibleAutomaticNwsSeverity(input.event, input.severity)) return false;
+  if (input.status != null && input.status !== 'Actual') return false;
+  return (input.messageType ?? 'Alert').toUpperCase() !== 'CANCEL';
 }
 
 export function isLightningAutoStartCandidate(evidence: LightningProximityEvidence): boolean {
