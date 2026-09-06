@@ -111,26 +111,16 @@ const PROCESSED_WARNING_SELECT = `
   FROM processed_nws_alerts
 `;
 
-function uniqueWarningIds(
-  ...values: Array<string | null | undefined>
-): string[] {
+function uniqueWarningIds(...values: Array<string | null | undefined>): string[] {
   return [...new Set(values.filter((value): value is string =>
     typeof value === 'string' && value.trim().length > 0
   ))];
 }
 
-async function claimWarning(
-  db: StormLogDatabase,
-  input: WarningStormEventInput,
-  now: number
-) {
+async function claimWarning(db: StormLogDatabase, input: WarningStormEventInput, now: number) {
   return db.runAsync(
     `INSERT INTO processed_nws_alerts (
-      nws_alert_id,
-      first_seen_at,
-      processed_at,
-      status,
-      source
+      nws_alert_id, first_seen_at, processed_at, status, source
     ) VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(nws_alert_id) DO NOTHING`,
     [
@@ -148,23 +138,18 @@ async function getRelatedActiveAutomaticWarning(
   identityIds: string[]
 ): Promise<LifecycleStormEventRow | null> {
   if (identityIds.length === 0) return null;
-
   const placeholders = identityIds.map(() => '?').join(', ');
   const rows = await db.getAllAsync<LifecycleStormEventRow>(
-    `SELECT
-       id,
-       nws_alert_id,
-       current_nws_alert_id,
-       is_automatic
-     FROM storm_events
-     WHERE endTime IS NULL
-       AND is_automatic = 1
-       AND (
-         nws_alert_id IN (${placeholders})
-         OR current_nws_alert_id IN (${placeholders})
-       )
-     ORDER BY startTime DESC
-     LIMIT 1`,
+    `SELECT id, nws_alert_id, current_nws_alert_id, is_automatic
+       FROM storm_events
+      WHERE endTime IS NULL
+        AND is_automatic = 1
+        AND (
+          nws_alert_id IN (${placeholders})
+          OR current_nws_alert_id IN (${placeholders})
+        )
+      ORDER BY startTime DESC
+      LIMIT 1`,
     [...identityIds, ...identityIds]
   );
   return rows[0] ?? null;
@@ -179,8 +164,8 @@ async function finishProcessedWarning(
 ): Promise<number> {
   await db.runAsync(
     `UPDATE processed_nws_alerts
-     SET status = ?, processed_at = ?, storm_event_id = ?
-     WHERE nws_alert_id = ?`,
+        SET status = ?, processed_at = ?, storm_event_id = ?
+      WHERE nws_alert_id = ?`,
     [status, now, eventId, nwsAlertId]
   );
   const row = await db.getFirstAsync<{ id: number }>(
@@ -199,18 +184,11 @@ async function applyActiveWarningLifecycle(
 ): Promise<void> {
   const result = await db.runAsync(
     `UPDATE storm_events
-     SET current_nws_alert_id = ?, warning_status = ?, warning_ends_at = ?
-     WHERE id = ? AND endTime IS NULL AND is_automatic = 1`,
-    [
-      currentNwsAlertId,
-      WARNING_EVENT_STATUS_ACTIVE,
-      endsAt,
-      eventId,
-    ]
+        SET current_nws_alert_id = ?, warning_status = ?, warning_ends_at = ?
+      WHERE id = ? AND endTime IS NULL AND is_automatic = 1`,
+    [currentNwsAlertId, WARNING_EVENT_STATUS_ACTIVE, endsAt, eventId]
   );
-  if (result.changes !== 1) {
-    throw new Error(`Automatic warning event not available: ${eventId}`);
-  }
+  if (result.changes !== 1) throw new Error(`Automatic warning event not available: ${eventId}`);
 }
 
 export async function isNwsAlertProcessed(
@@ -219,8 +197,7 @@ export async function isNwsAlertProcessed(
 ): Promise<boolean> {
   const db = database ?? await getDefaultDatabase();
   const row = await db.getFirstAsync<{ id: number }>(
-    'SELECT id FROM processed_nws_alerts WHERE nws_alert_id = ?',
-    [nwsAlertId]
+    'SELECT id FROM processed_nws_alerts WHERE nws_alert_id = ?', [nwsAlertId]
   );
   return row != null;
 }
@@ -233,11 +210,7 @@ export async function recordProcessedNwsAlert(
   const now = Date.now();
   const result = await db.runAsync(
     `INSERT INTO processed_nws_alerts (
-      nws_alert_id,
-      first_seen_at,
-      processed_at,
-      status,
-      source
+      nws_alert_id, first_seen_at, processed_at, status, source
     ) VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(nws_alert_id) DO NOTHING`,
     [
@@ -248,12 +221,9 @@ export async function recordProcessedNwsAlert(
       input.source ?? null,
     ]
   );
-
   if (result.changes === 0) return { recorded: false, processedWarningId: null };
-
   const row = await db.getFirstAsync<{ id: number }>(
-    'SELECT id FROM processed_nws_alerts WHERE nws_alert_id = ?',
-    [input.nwsAlertId]
+    'SELECT id FROM processed_nws_alerts WHERE nws_alert_id = ?', [input.nwsAlertId]
   );
   return { recorded: true, processedWarningId: row?.id ?? null };
 }
@@ -264,8 +234,7 @@ export async function getProcessedNwsAlert(
 ): Promise<ProcessedNwsAlert | null> {
   const db = database ?? await getDefaultDatabase();
   const row = await db.getFirstAsync<ProcessedNwsAlertRow>(
-    `${PROCESSED_WARNING_SELECT} WHERE nws_alert_id = ?`,
-    [nwsAlertId]
+    `${PROCESSED_WARNING_SELECT} WHERE nws_alert_id = ?`, [nwsAlertId]
   );
   return row == null ? null : mapProcessedWarning(row);
 }
@@ -298,59 +267,40 @@ export async function createStormEventForWarning(
         return;
       }
 
-      const closeResult = await db.runAsync(
+      // Cancellation removes the NWS trigger but deliberately leaves the storm
+      // event open. The automatic lifecycle service decides whether lightning or
+      // observed storm conditions justify continuing, and asks the user before
+      // the event is actually closed.
+      const markResult = await db.runAsync(
         `UPDATE storm_events
-         SET endTime = ?, warning_status = ?
-         WHERE id = ? AND endTime IS NULL AND is_automatic = 1`,
-        [now, WARNING_EVENT_STATUS_CANCELED, relatedEvent.id]
+            SET warning_status = ?, warning_ends_at = ?
+          WHERE id = ? AND endTime IS NULL AND is_automatic = 1`,
+        [WARNING_EVENT_STATUS_CANCELED, now, relatedEvent.id]
       );
-      if (closeResult.changes !== 1) {
-        throw new Error(`Automatic warning could not be canceled: ${relatedEvent.id}`);
+      if (markResult.changes !== 1) {
+        throw new Error(`Automatic warning could not be marked canceled: ${relatedEvent.id}`);
       }
 
       const processedWarningId = await finishProcessedWarning(
-        db,
-        input.warning.nwsAlertId,
-        CANCELED_WARNING_STATUS,
-        now,
-        relatedEvent.id
+        db, input.warning.nwsAlertId, CANCELED_WARNING_STATUS, now, relatedEvent.id
       );
-      result = {
-        outcome: 'canceled_event',
-        eventId: relatedEvent.id,
-        processedWarningId,
-      };
+      result = { outcome: 'canceled_event', eventId: relatedEvent.id, processedWarningId };
       return;
     }
 
     if (relatedEvent != null && messageType === 'UPDATE') {
       await applyActiveWarningLifecycle(
-        db,
-        relatedEvent.id,
-        input.warning.nwsAlertId,
-        input.warning.endsAt ?? null
+        db, relatedEvent.id, input.warning.nwsAlertId, input.warning.endsAt ?? null
       );
       const processedWarningId = await finishProcessedWarning(
-        db,
-        input.warning.nwsAlertId,
-        UPDATED_WARNING_STATUS,
-        now,
-        relatedEvent.id
+        db, input.warning.nwsAlertId, UPDATED_WARNING_STATUS, now, relatedEvent.id
       );
-      result = {
-        outcome: 'updated_event',
-        eventId: relatedEvent.id,
-        processedWarningId,
-      };
+      result = { outcome: 'updated_event', eventId: relatedEvent.id, processedWarningId };
       return;
     }
 
     const location = input.location;
-    if (
-      location == null ||
-      !Number.isFinite(location.latitude) ||
-      !Number.isFinite(location.longitude)
-    ) {
+    if (location == null || !Number.isFinite(location.latitude) || !Number.isFinite(location.longitude)) {
       result = { outcome: 'skipped_missing_location' };
       return;
     }
@@ -377,28 +327,22 @@ export async function createStormEventForWarning(
     );
 
     await applyActiveWarningLifecycle(
-      db,
-      eventId,
-      input.warning.nwsAlertId,
-      input.warning.endsAt ?? null
+      db, eventId, input.warning.nwsAlertId, input.warning.endsAt ?? null
     );
     const processedWarningId = await finishProcessedWarning(
-      db,
-      input.warning.nwsAlertId,
-      CREATED_WARNING_STATUS,
-      now,
-      eventId
+      db, input.warning.nwsAlertId, CREATED_WARNING_STATUS, now, eventId
     );
-    result = {
-      outcome: 'created',
-      eventId,
-      processedWarningId,
-    };
+    result = { outcome: 'created', eventId, processedWarningId };
   });
 
   return result!;
 }
 
+/**
+ * Mark due warning lifecycle as expired without ending the storm event. Closing
+ * an automatic event is intentionally deferred to automaticStormLifecycle so a
+ * still-useful storm log is never silently cut off at the NWS expiration time.
+ */
 export async function expireDueAutomaticWarnings(
   nowMs: number = Date.now(),
   database?: StormLogDatabase
@@ -409,37 +353,33 @@ export async function expireDueAutomaticWarnings(
   await db.withTransactionAsync(async () => {
     const dueEvents = await db.getAllAsync<{ id: number }>(
       `SELECT id
-       FROM storm_events
-       WHERE endTime IS NULL
-         AND is_automatic = 1
-         AND warning_ends_at IS NOT NULL
-         AND warning_ends_at <= ?
-       ORDER BY warning_ends_at ASC`,
-      [nowMs]
+         FROM storm_events
+        WHERE endTime IS NULL
+          AND is_automatic = 1
+          AND warning_status = ?
+          AND warning_ends_at IS NOT NULL
+          AND warning_ends_at <= ?
+        ORDER BY warning_ends_at ASC`,
+      [WARNING_EVENT_STATUS_ACTIVE, nowMs]
     );
 
     for (const event of dueEvents) {
       const result = await db.runAsync(
         `UPDATE storm_events
-         SET endTime = warning_ends_at, warning_status = ?
-         WHERE id = ? AND endTime IS NULL AND is_automatic = 1`,
+            SET warning_status = ?
+          WHERE id = ? AND endTime IS NULL AND is_automatic = 1`,
         [WARNING_EVENT_STATUS_EXPIRED, event.id]
       );
       if (result.changes !== 1) {
-        throw new Error(`Automatic warning could not be expired: ${event.id}`);
+        throw new Error(`Automatic warning could not be marked expired: ${event.id}`);
       }
 
       await db.runAsync(
         `UPDATE processed_nws_alerts
-         SET status = ?
-         WHERE storm_event_id = ?
-           AND status IN (?, ?)`,
-        [
-          EXPIRED_WARNING_STATUS,
-          event.id,
-          CREATED_WARNING_STATUS,
-          UPDATED_WARNING_STATUS,
-        ]
+            SET status = ?
+          WHERE storm_event_id = ?
+            AND status IN (?, ?)`,
+        [EXPIRED_WARNING_STATUS, event.id, CREATED_WARNING_STATUS, UPDATED_WARNING_STATUS]
       );
       expiredCount += 1;
     }
