@@ -116,6 +116,45 @@ jobs:
           test -n "$TEST_FILE"
           node "$TEST_FILE"
 
+      - name: Compile automatic storm lifecycle policy tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/stormlog-auto-storm-tests
+          npx tsc --ignoreConfig \
+            src/services/stormLogs/automaticStormPolicy.ts \
+            src/services/stormLogs/__tests__/automaticStormPolicy.runtime.test.ts \
+            --module commonjs --target ES2022 --moduleResolution node --types node \
+            --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck \
+            --outDir /tmp/stormlog-auto-storm-tests
+
+      - name: Run automatic storm lifecycle policy tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEST_FILE="$(find /tmp/stormlog-auto-storm-tests -name automaticStormPolicy.runtime.test.js -print -quit)"
+          test -n "$TEST_FILE"
+          node "$TEST_FILE"
+
+      - name: Verify automatic storm lifecycle wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q "'Severe Thunderstorm Watch'" src/services/stormLogs/processNwsWarning.ts
+          grep -q 'LIGHTNING_AUTO_START_RADIUS_MILES = 20' src/services/stormLogs/automaticStormPolicy.ts
+          grep -q 'LIGHTNING_AUTO_STOP_RADIUS_MILES = 30' src/services/stormLogs/automaticStormPolicy.ts
+          grep -q 'AUTO_STOP_REVIEW_GRACE_MS = 30' src/services/stormLogs/automaticStormPolicy.ts
+          grep -q "LIGHTNING_TRIGGER_SOURCE = 'LIGHTNING_PROXIMITY'" src/services/lightning/lightningService.ts
+          grep -q 'isLightningAutoStartCandidate' src/services/lightning/lightningService.ts
+          grep -q 'evaluateAutomaticStormStop' src/services/lightning/lightningService.ts
+          grep -q 'KEEP_RECORDING_ACTION' app/_layout.tsx
+          grep -q 'STOP_RECORDING_ACTION' app/_layout.tsx
+          grep -q 'categoryIdentifier: AUTOMATIC_STORM_STOP_CATEGORY' src/services/notifications.ts
+          if grep -q 'SET endTime = warning_ends_at' src/database/warningEvents.ts; then
+            echo "::error title=Automatic storm lifecycle regression::NWS expiry still closes the event directly"
+            exit 1
+          fi
+
       - name: Verify scheduler source architecture
         shell: bash
         run: |
@@ -232,11 +271,6 @@ jobs:
             require_manifest_entry 'android.permission.ACCESS_BACKGROUND_LOCATION' 'ACCESS_BACKGROUND_LOCATION permission'
             require_manifest_entry 'android.permission.SCHEDULE_EXACT_ALARM' 'SCHEDULE_EXACT_ALARM permission'
 
-            # apkanalyzer can render foreground-service types symbolically or as
-            # a numeric mask. Require both location and dataSync when symbolic;
-            # otherwise accept a nonzero mask only after the explicit permissions
-            # above have independently verified the intended capabilities.
-            SERVICE_LINE="$(grep 'StormLogHeadlessTaskService' "$MANIFEST" || true)"
             if grep -q 'foregroundServiceType' "$MANIFEST"; then
               if grep -qE 'foregroundServiceType[^>]*(location.*dataSync|dataSync.*location)' "$MANIFEST"; then
                 :
