@@ -3,6 +3,7 @@ import {
   processNwsWarningForStormEvent,
   type ProcessNwsWarningResult,
 } from './processNwsWarning';
+import { recordAutomaticNwsTriggerSnapshot } from './automaticStormLifecycle';
 
 export type NwsWarningProcessor = (
   alert: NormalizedNwsAlert
@@ -43,6 +44,15 @@ export async function processNwsAlertsForStormEvents(
 ): Promise<NwsAlertBatchResult> {
   const results: NwsAlertBatchResult['results'] = [];
   const failures: NwsAlertProcessingFailure[] = [];
+
+  // Persist the complete successful NWS fetch before processing individual
+  // products. The stop lifecycle can then distinguish a real all-clear from a
+  // failed/stale network request without making another NWS request.
+  try {
+    await recordAutomaticNwsTriggerSnapshot(alerts, Date.now());
+  } catch (error) {
+    failures.push({ alertId: null, error });
+  }
 
   for (const alert of alerts) {
     try {
