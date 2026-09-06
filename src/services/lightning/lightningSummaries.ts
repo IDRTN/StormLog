@@ -1,17 +1,11 @@
 // ============================================================
 // Lightning Summaries — Derived summary queries
-//
-// Phase 5: Summary/query primitives.
-// All summaries are calculated from raw lightning_events.
-// Trend logic is in lightningTrend.ts (pure, no database).
 // ============================================================
 
 import { getDatabase } from '../../database/database';
 import { calculateTrend, type LightningTrend } from './lightningTrend';
 
 export type { LightningTrend };
-
-// ---- Summary result ----
 
 export type LightningSummary = {
   totalCount: number;
@@ -28,12 +22,13 @@ export type LightningSummary = {
   trend: LightningTrend;
 };
 
-// ---- SQL aggregation helpers ----
+export type RecentLightningProximity = {
+  count: number;
+  nearestDistanceKm: number | null;
+  latestTimestampMs: number | null;
+};
 
-async function countByWhere(
-  whereClause: string,
-  params: any[],
-): Promise<number> {
+async function countByWhere(whereClause: string, params: any[]): Promise<number> {
   const db = await getDatabase();
   const result = await db.getFirstAsync<{ count: number }>(
     `SELECT COUNT(*) as count FROM lightning_events WHERE ${whereClause}`,
@@ -42,10 +37,7 @@ async function countByWhere(
   return result?.count ?? 0;
 }
 
-async function minDistance(
-  whereClause: string,
-  params: any[],
-): Promise<number | null> {
+async function minDistance(whereClause: string, params: any[]): Promise<number | null> {
   const db = await getDatabase();
   const result = await db.getFirstAsync<{ min_dist: number | null }>(
     `SELECT MIN(distanceToObserverKm) as min_dist FROM lightning_events WHERE ${whereClause}`,
@@ -54,24 +46,13 @@ async function minDistance(
   return result?.min_dist ?? null;
 }
 
-// ---- Public summary function ----
-
-/**
- * Calculate a lightning summary for a storm event.
- * All counts are derived from raw lightning_events via SQL aggregation.
- * Trend is calculated deterministically from two 5-minute windows.
- */
 export async function getLightningSummary(
   stormEventId: number,
-  options: {
-    nowMs: number;
-    nearbyRadiusKm?: number;
-  },
+  options: { nowMs: number; nearbyRadiusKm?: number },
 ): Promise<LightningSummary> {
   const { nowMs, nearbyRadiusKm = 50 } = options;
   const storm = 'stormEventId = ?';
   const stormParams = [stormEventId];
-
   const since1m = nowMs - 60_000;
   const since5m = nowMs - 300_000;
   const since10m = nowMs - 600_000;
@@ -110,4 +91,56 @@ export async function getLightningSummary(
     ratePerMinute: recent5m / 5,
     trend: calculateTrend(recentWindow, priorWindow),
   };
+}
+
+/**
+ * Read only recent lightning belonging to one event, or unassigned lightning
+ * when stormEventId is null. This is the lifecycle primitive used for the
+ * 20-mile auto-start / 30-mile clear hysteresis without mixing old storms.
+ */
+export async function getRecentLightningProximity(
+  stormEventId: number | null,
+  options: { nowMs: number; lookbackMs: number },
+): Promise<RecentLightningProximity> {
+  const db = await getDatabase();
+  const sinceMs = options.nowMs - Math.max(0, options.lookbackMs);
+  const ownership = stormEventId == null ? 'stormEventId IS NULL' : 'stormEventId = ?';
+  const ownershipParams = stormEventId == null ? [] : [stormEventId];
+  const row = await db.getFirstAsync<{
+    count: number;
+    nearest: number | null;
+    latest: number | null;
+  }>(
+    `SELECT COUNT(*) AS count,
+            MIN(distanceToObserverKm) AS nearest,
+            MAX(timestamp) AS latest
+       FROM lightning_events
+      WHERE ${ownership}
+        AND timestamp >= ?
+        AND timestamp <= ?`,
+    [...ownershipParams, sinceMs, options.nowMs],
+  );
+  return {
+    count: row?.count ?? 0,
+    nearestDistanceKm: row?.nearest ?? null,
+    latestTimestampMs: row?.latest ?? null,
+  };
+}
+
+/** Attach the detection window that caused an automatic lightning event. */
+export async function attachRecentUnassignedLightningToStormEvent(
+  stormEventId: number,
+  sinceMs: number,
+  untilMs: number,
+): Promise<number> {
+  const db = await getDatabase();
+  const result = await db.runAsync(
+    `UPDATE lightning_events
+        SET stormEventId = ?
+      WHERE stormEventId IS NULL
+        AND timestamp >= ?
+        AND timestamp <= ?`,
+    [stormEventId, sinceMs, untilMs],
+  );
+  return result.changes;
 }
