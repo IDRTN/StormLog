@@ -16,7 +16,8 @@ export interface StormEventWithWarningMetadata extends StormEvent {
 }
 
 export interface StormEventWarningMetadata {
-  nwsAlertId: string;
+  /** Null for automatic events that were triggered by non-NWS evidence. */
+  nwsAlertId: string | null;
   triggerSource: string;
   isAutomatic: boolean;
 }
@@ -71,7 +72,6 @@ export async function createStormEvent(
   database?: Pick<SQLite.SQLiteDatabase, 'runAsync'>
 ): Promise<number> {
   if (database) return createWithDatabase(database, startLatitude, startLongitude, eventName, warningMetadata);
-  const { getDatabase } = await import('./database');
   return createWithDatabase(await getDefaultDatabase(), startLatitude, startLongitude, eventName, warningMetadata);
 }
 
@@ -122,12 +122,8 @@ export async function endStormEvent(
 export async function getAllStormEvents(
   database?: Pick<SQLite.SQLiteDatabase, 'getAllAsync'>
 ): Promise<StormEventWithWarningMetadata[]> {
-  if (!database) {
-    const { getDatabase } = await import('./database');
-    database = await getDefaultDatabase();
-  }
-  const db = database;
-  const rows = await db.getAllAsync<StormEventRow>(
+  if (!database) database = await getDefaultDatabase();
+  const rows = await database.getAllAsync<StormEventRow>(
     `${STORM_EVENT_SELECT} ORDER BY startTime DESC`
   );
   return rows.map(mapStormEvent);
@@ -135,10 +131,7 @@ export async function getAllStormEvents(
 
 export async function getStormEventById(id: number): Promise<StormEventWithWarningMetadata | null> {
   const db = await getDefaultDatabase();
-  const results = await db.getAllAsync<StormEventRow>(
-    `${STORM_EVENT_SELECT} WHERE id = ?`,
-    [id]
-  );
+  const results = await db.getAllAsync<StormEventRow>(`${STORM_EVENT_SELECT} WHERE id = ?`, [id]);
   return results.length > 0 ? mapStormEvent(results[0]) : null;
 }
 
