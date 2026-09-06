@@ -151,15 +151,46 @@ jobs:
           grep -q 'STOP_RECORDING_ACTION' app/_layout.tsx
           grep -q 'categoryIdentifier: AUTOMATIC_STORM_STOP_CATEGORY' src/services/notifications.ts
 
-          # Only inspect the expiry routine itself. Other lifecycle tests/migrations may
-          # legitimately contain historical endTime SQL strings and must not trip this gate.
-          EXPIRY_BODY="$(sed -n '/export async function expireDueAutomaticWarnings/,/^}/p' src/database/warningEvents.ts)"
-          if grep -Eq 'SET[[:space:]]+endTime' <<< "$EXPIRY_BODY"; then
-            echo "::error title=Automatic storm lifecycle regression::NWS expiry closes the event directly"
-            exit 1
-          fi
-          grep -q 'SET warning_status = ?' <<< "$EXPIRY_BODY"
-          grep -q 'WARNING_EVENT_STATUS_EXPIRED' <<< "$EXPIRY_BODY"
+          node <<'NODE'
+          const fs = require('fs');
+          const ts = require('typescript');
+
+          const filePath = 'src/database/warningEvents.ts';
+          const sourceText = fs.readFileSync(filePath, 'utf8');
+          const sourceFile = ts.createSourceFile(
+            filePath,
+            sourceText,
+            ts.ScriptTarget.Latest,
+            true,
+            ts.ScriptKind.TS
+          );
+
+          const expiryFunction = sourceFile.statements.find(
+            (statement) =>
+              ts.isFunctionDeclaration(statement) &&
+              statement.name?.text === 'expireDueAutomaticWarnings'
+          );
+
+          if (!expiryFunction || !expiryFunction.body) {
+            console.error('::error title=Automatic storm lifecycle wiring missing::expireDueAutomaticWarnings function was not found');
+            process.exit(1);
+          }
+
+          const expiryBody = expiryFunction.body.getText(sourceFile);
+
+          if (/SET\s+endTime/i.test(expiryBody)) {
+            console.error('::error title=Automatic storm lifecycle regression::NWS expiry closes the event directly');
+            process.exit(1);
+          }
+          if (!/SET\s+warning_status\s*=\s*\?/i.test(expiryBody)) {
+            console.error('::error title=Automatic storm lifecycle wiring missing::Expiry routine does not update warning_status');
+            process.exit(1);
+          }
+          if (!/WARNING_EVENT_STATUS_EXPIRED/.test(expiryBody)) {
+            console.error('::error title=Automatic storm lifecycle wiring missing::Expiry routine does not use WARNING_EVENT_STATUS_EXPIRED');
+            process.exit(1);
+          }
+          NODE
 
       - name: Verify scheduler source architecture
         shell: bash
