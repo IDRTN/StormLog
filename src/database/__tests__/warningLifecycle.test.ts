@@ -233,8 +233,8 @@ function warningInput(overrides: Partial<WarningStormEventInput['warning']> & { 
 }
 
 async function main(): Promise<void> {
-  await test('schema version includes warning lifecycle fields', () => {
-    assertEqual(CURRENT_SCHEMA_VERSION, 7);
+  await test('schema is at or beyond warning lifecycle migration', () => {
+    assert(CURRENT_SCHEMA_VERSION >= 7, `warning lifecycle requires schema v7+, got v${CURRENT_SCHEMA_VERSION}`);
   });
 
   await test('normalizes NWS lifecycle fields and references', () => {
