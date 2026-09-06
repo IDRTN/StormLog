@@ -1,7 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { endStormEvent, getActiveAutomaticStormEvent } from '../../database/stormEvents';
 import type { NormalizedNwsAlert } from '../nws/alerts';
-import { isEligibleNwsWarning } from './processNwsWarning';
 import { notifyAutomaticStormStopReview } from '../notifications';
 import type { RecentLightningProximity } from '../lightning/lightningSummaries';
 import {
@@ -10,6 +9,7 @@ import {
   LIGHTNING_CLEAR_LOOKBACK_MS,
   NWS_SNAPSHOT_MAX_AGE_MS,
   classifyAutomaticStormEvidence,
+  isAutomaticNwsTrigger,
   isLightningStillRelevant,
   isStopReviewGraceExpired,
   kmToMiles,
@@ -47,12 +47,13 @@ function parseReview(value: string | null): AutomaticStormStopReview | null {
 }
 
 export function hasActiveAutomaticNwsTrigger(alerts: NormalizedNwsAlert[]): boolean {
-  return alerts.some((alert) => {
-    if (!isEligibleNwsWarning(alert)) return false;
-    if (alert.status != null && alert.status !== 'Actual') return false;
-    const messageType = (alert.messageType ?? 'Alert').toUpperCase();
-    return messageType !== 'CANCEL';
-  });
+  return alerts.some((alert) => isAutomaticNwsTrigger({
+    id: alert.id,
+    event: alert.event,
+    severity: alert.severity,
+    status: alert.status,
+    messageType: alert.messageType,
+  }));
 }
 
 export async function recordAutomaticNwsTriggerSnapshot(
