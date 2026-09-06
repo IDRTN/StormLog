@@ -4,12 +4,22 @@ import { StatusBar } from 'expo-status-bar';
 import * as Notifications from 'expo-notifications';
 import type { EventSubscription } from 'expo-modules-core';
 import { Colors } from '../src/constants/theme';
-import { ensureNotificationChannels, requestNotificationPermission } from '../src/services/notifications';
+import {
+  AUTOMATIC_STORM_STOP_CATEGORY,
+  KEEP_RECORDING_ACTION,
+  STOP_RECORDING_ACTION,
+  ensureNotificationChannels,
+  requestNotificationPermission,
+} from '../src/services/notifications';
+import { handleAutomaticStormStopAction } from '../src/services/stormLogs/automaticStormLifecycle';
 import { initializeDailyMonitorCoordinator } from '../src/services/background/dailyMonitor';
 
-// Importing the module at root keeps TaskManager/headless definitions in the
-// startup graph. Runtime repair is also explicitly initialized once below.
 import '../src/services/background/dailyMonitor';
+
+function eventIdFromNotification(data: Record<string, unknown> | undefined): number | null {
+  const value = Number(data?.stormEventId);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
 
 export default function RootLayout() {
   const notificationListener = useRef<EventSubscription | null>(null);
@@ -37,7 +47,17 @@ export default function RootLayout() {
     });
 
     responseListener.current = Notifications.addNotificationResponseReceivedListener(response => {
-      console.log('[ROOT] Notification tapped:', response.notification.request.content.title);
+      const data = response.notification.request.content.data as Record<string, unknown> | undefined;
+      console.log('[ROOT] Notification response:', response.notification.request.content.title, response.actionIdentifier);
+      if (data?.category !== AUTOMATIC_STORM_STOP_CATEGORY) return;
+      const eventId = eventIdFromNotification(data);
+      if (eventId == null) return;
+      if (response.actionIdentifier !== KEEP_RECORDING_ACTION && response.actionIdentifier !== STOP_RECORDING_ACTION) {
+        return;
+      }
+      void handleAutomaticStormStopAction(response.actionIdentifier, eventId).catch((error) => {
+        console.error('[ROOT] Automatic storm decision failed:', error);
+      });
     });
 
     return () => {
