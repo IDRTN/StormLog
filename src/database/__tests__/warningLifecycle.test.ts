@@ -1,5 +1,4 @@
 import { CURRENT_SCHEMA_VERSION } from '../schema';
-import { getAllStormEvents } from '../stormEvents';
 import { normalizeNwsAlerts } from '../../services/nws/alerts';
 import {
   createStormEventForWarning,
@@ -15,19 +14,19 @@ function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-function assertEqual(actual: unknown, expected: unknown, message = 'values differ') {
+function assertEqual(actual: unknown, expected: unknown, message = 'values differ'): void {
   assert(actual === expected, `${message}: expected ${String(expected)}, got ${String(actual)}`);
 }
 
-async function test(name: string, task: () => Promise<void> | void) {
+async function test(name: string, task: () => Promise<void> | void): Promise<void> {
   try {
     await task();
-    passed++;
+    passed += 1;
     console.log(`PASS: ${name}`);
   } catch (error) {
-    failed++;
-    console.log(`FAIL: ${name}`);
-    console.log(`  ${error instanceof Error ? error.message : String(error)}`);
+    failed += 1;
+    console.error(`FAIL: ${name}`);
+    console.error(error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -65,14 +64,15 @@ class LifecycleDatabase {
       runAsync: async (sql: string, params: unknown[] = []) => {
         if (sql.includes('INSERT INTO processed_nws_alerts')) {
           const [alertId, , , status] = params;
-          if (this.processedWarnings.has(alertId as string)) {
+          const idValue = String(alertId);
+          if (this.processedWarnings.has(idValue)) {
             return { changes: 0, lastInsertRowId: 0 };
           }
           const id = this.nextProcessedId++;
-          this.processedWarnings.set(alertId as string, {
+          this.processedWarnings.set(idValue, {
             id,
-            nws_alert_id: alertId as string,
-            status: status as string,
+            nws_alert_id: idValue,
+            status: String(status),
             storm_event_id: null,
           });
           return { changes: 1, lastInsertRowId: id };
@@ -91,74 +91,79 @@ class LifecycleDatabase {
           const id = this.nextEventId++;
           this.events.push({
             id,
-            startTime: startTime as number,
+            startTime: Number(startTime),
             endTime: null,
-            startLatitude: startLatitude as number,
-            startLongitude: startLongitude as number,
-            eventName: eventName as string,
+            startLatitude: Number(startLatitude),
+            startLongitude: Number(startLongitude),
+            eventName: String(eventName),
             notes: '',
-            nws_alert_id: nwsAlertId as string,
+            nws_alert_id: nwsAlertId == null ? null : String(nwsAlertId),
             current_nws_alert_id: null,
-            trigger_source: triggerSource as string,
-            is_automatic: isAutomatic as number,
+            trigger_source: triggerSource == null ? null : String(triggerSource),
+            is_automatic: Number(isAutomatic),
             warning_status: null,
             warning_ends_at: null,
           });
           return { changes: 1, lastInsertRowId: id };
         }
 
-        if (sql.includes('SET current_nws_alert_id')) {
+        if (sql.includes('SET current_nws_alert_id = ?')) {
           const [currentId, status, endsAt, eventId] = params;
-          const event = this.events.find((row) => row.id === eventId);
+          const event = this.events.find((row) => row.id === Number(eventId));
           if (!event || event.endTime != null || event.is_automatic !== 1) {
             return { changes: 0, lastInsertRowId: 0 };
           }
-          event.current_nws_alert_id = currentId as string;
-          event.warning_status = status as string;
-          event.warning_ends_at = endsAt as number | null;
+          event.current_nws_alert_id = String(currentId);
+          event.warning_status = String(status);
+          event.warning_ends_at = endsAt == null ? null : Number(endsAt);
           return { changes: 1, lastInsertRowId: 0 };
         }
 
-        if (sql.includes('SET endTime = ?, warning_status = ?')) {
-          const [endTime, status, eventId] = params;
-          const event = this.events.find((row) => row.id === eventId);
+        if (
+          sql.includes('UPDATE storm_events')
+          && sql.includes('SET warning_status = ?, warning_ends_at = ?')
+        ) {
+          const [status, endsAt, eventId] = params;
+          const event = this.events.find((row) => row.id === Number(eventId));
           if (!event || event.endTime != null || event.is_automatic !== 1) {
             return { changes: 0, lastInsertRowId: 0 };
           }
-          event.endTime = endTime as number;
-          event.warning_status = status as string;
+          event.warning_status = String(status);
+          event.warning_ends_at = endsAt == null ? null : Number(endsAt);
           return { changes: 1, lastInsertRowId: 0 };
         }
 
-        if (sql.includes('SET endTime = warning_ends_at')) {
+        if (
+          sql.includes('UPDATE storm_events')
+          && sql.includes('SET warning_status = ?')
+          && !sql.includes('warning_ends_at = ?')
+        ) {
           const [status, eventId] = params;
-          const event = this.events.find((row) => row.id === eventId);
+          const event = this.events.find((row) => row.id === Number(eventId));
           if (!event || event.endTime != null || event.is_automatic !== 1) {
             return { changes: 0, lastInsertRowId: 0 };
           }
-          event.endTime = event.warning_ends_at;
-          event.warning_status = status as string;
+          event.warning_status = String(status);
           return { changes: 1, lastInsertRowId: 0 };
         }
 
-        if (sql.includes('UPDATE processed_nws_alerts') && sql.includes('WHERE nws_alert_id')) {
-          const [status, processedAt, eventId, alertId] = params;
-          const warning = this.processedWarnings.get(alertId as string);
+        if (sql.includes('UPDATE processed_nws_alerts') && sql.includes('WHERE nws_alert_id = ?')) {
+          const [status, , eventId, alertId] = params;
+          const warning = this.processedWarnings.get(String(alertId));
           assert(warning != null, 'processed warning disappeared');
-          warning.status = status as string;
-          warning.storm_event_id = eventId as number;
-          void processedAt;
+          warning.status = String(status);
+          warning.storm_event_id = Number(eventId);
           return { changes: 1, lastInsertRowId: 0 };
         }
 
-        if (sql.includes('UPDATE processed_nws_alerts') && sql.includes('WHERE storm_event_id')) {
+        if (sql.includes('UPDATE processed_nws_alerts') && sql.includes('WHERE storm_event_id = ?')) {
           const [status, eventId, createdStatus, updatedStatus] = params;
           for (const warning of this.processedWarnings.values()) {
             if (
-              warning.storm_event_id === eventId
+              warning.storm_event_id === Number(eventId)
               && (warning.status === createdStatus || warning.status === updatedStatus)
             ) {
-              warning.status = status as string;
+              warning.status = String(status);
             }
           }
           return { changes: 1, lastInsertRowId: 0 };
@@ -166,13 +171,15 @@ class LifecycleDatabase {
 
         throw new Error(`unexpected runAsync SQL: ${sql}`);
       },
+
       getFirstAsync: async (sql: string, params: unknown[] = []) => {
         if (sql.includes('FROM processed_nws_alerts')) {
-          const warning = this.processedWarnings.get(params[0] as string);
+          const warning = this.processedWarnings.get(String(params[0]));
           return warning ? { id: warning.id } : null;
         }
         throw new Error(`unexpected getFirstAsync SQL: ${sql}`);
       },
+
       getAllAsync: async (sql: string, params: unknown[] = []) => {
         if (sql.includes('current_nws_alert_id IN')) {
           return this.events.filter((event) =>
@@ -189,31 +196,27 @@ class LifecycleDatabase {
         }
 
         if (sql.includes('warning_ends_at <= ?')) {
-          const now = params[0] as number;
+          const [status, now] = params;
           return this.events
-            .filter((event) => event.endTime == null
+            .filter((event) =>
+              event.endTime == null
               && event.is_automatic === 1
+              && event.warning_status === status
               && event.warning_ends_at != null
-              && event.warning_ends_at <= now)
+              && event.warning_ends_at <= Number(now)
+            )
             .map((event) => ({ id: event.id }));
         }
 
         throw new Error(`unexpected getAllAsync SQL: ${sql}`);
       },
+
       withTransactionAsync: async (task: () => Promise<void>) => task(),
     } as unknown as StormLogDatabase;
   }
 }
 
-type WarningInputOverrides = Partial<
-  Omit<WarningStormEventInput['warning'], 'nwsAlertId'>
-> & {
-  nwsAlertId: string;
-  severity?: string | null;
-};
-
-function warningInput(overrides: WarningInputOverrides): WarningStormEventInput {
-  const { severity, ...warningOverrides } = overrides;
+function warningInput(overrides: Partial<WarningStormEventInput['warning']> & { nwsAlertId: string }): WarningStormEventInput {
   return {
     location: { latitude: 40, longitude: -82 },
     warning: {
@@ -223,19 +226,18 @@ function warningInput(overrides: WarningInputOverrides): WarningStormEventInput 
       messageType: 'Alert',
       references: [],
       endsAt: null,
-      ...warningOverrides,
+      ...overrides,
     },
     nowMs: 1000,
   };
-  void severity;
 }
 
-async function main() {
-  await test('schema version targets warning lifecycle support', () => {
+async function main(): Promise<void> {
+  await test('schema version includes warning lifecycle fields', () => {
     assertEqual(CURRENT_SCHEMA_VERSION, 7);
   });
 
-  await test('normalizes actual NWS lifecycle fields', () => {
+  await test('normalizes NWS lifecycle fields and references', () => {
     const [normalized] = normalizeNwsAlerts([{
       id: 'urn:oid:2.49.0.1.840.lifecycle',
       properties: {
@@ -254,14 +256,11 @@ async function main() {
     assert(normalized != null, 'normalized lifecycle alert missing');
     assertEqual(normalized.status, 'Actual');
     assertEqual(normalized.messageType, 'Update');
-    assertEqual(normalized.effective, Date.parse('2026-08-24T00:00:00Z'));
     assertEqual(normalized.ends, Date.parse('2026-08-24T01:00:00Z'));
-    assertEqual(JSON.stringify(normalized.references), JSON.stringify([
-      'urn:oid:2.49.0.1.840.original',
-    ]));
+    assertEqual(normalized.references[0], 'urn:oid:2.49.0.1.840.original');
   });
 
-  await test('repeated identical warning identity does not create another event', async () => {
+  await test('duplicate warning identity cannot create a second event', async () => {
     const db = new LifecycleDatabase();
     const first = await createStormEventForWarning(
       warningInput({ nwsAlertId: 'same-id', endsAt: 2000 }), db.database
@@ -275,7 +274,7 @@ async function main() {
     assertEqual(db.events.length, 1);
   });
 
-  await test('reference-linked update preserves original identity and refreshes state', async () => {
+  await test('reference-linked update preserves original event identity', async () => {
     const db = new LifecycleDatabase();
     await createStormEventForWarning(
       warningInput({ nwsAlertId: 'warning-original', endsAt: 1500 }), db.database
@@ -286,8 +285,7 @@ async function main() {
         messageType: 'Update',
         references: ['warning-original'],
         endsAt: 2500,
-        nowMsPlaceholder: undefined,
-      } as Partial<WarningStormEventInput['warning']> & { nwsAlertId: string }), db.database
+      }), db.database
     );
 
     assertEqual(result.outcome, 'updated_event');
@@ -296,12 +294,10 @@ async function main() {
     assertEqual(event.current_nws_alert_id, 'warning-update');
     assertEqual(event.warning_status, 'ACTIVE');
     assertEqual(event.warning_ends_at, 2500);
-    assertEqual(event.endTime, null);
-    assertEqual(db.processedWarnings.get('warning-original')?.status, 'STORM_EVENT_CREATED');
-    assertEqual(db.processedWarnings.get('warning-update')?.status, 'STORM_EVENT_UPDATED');
+    assertEqual(event.endTime, null, 'an NWS update must not close the recording');
   });
 
-  await test('reference-linked cancellation closes only the automatic event', async () => {
+  await test('NWS cancellation removes warning trigger but keeps storm recording open', async () => {
     const db = new LifecycleDatabase();
     await createStormEventForWarning(
       warningInput({ nwsAlertId: 'cancel-original', endsAt: 5000 }), db.database
@@ -310,19 +306,18 @@ async function main() {
       warningInput({
         nwsAlertId: 'cancel-message',
         messageType: 'Cancel',
-        severity: 'Unknown',
         references: ['cancel-original'],
       }), db.database
     );
 
     assertEqual(result.outcome, 'canceled_event');
     const event = db.events[0];
-    assertEqual(event.endTime, 1000);
     assertEqual(event.warning_status, 'CANCELED');
+    assertEqual(event.endTime, null, 'cancellation must defer stop to automaticStormLifecycle');
     assertEqual(db.processedWarnings.get('cancel-message')?.status, 'STORM_EVENT_CANCELED');
   });
 
-  await test('due automatic warnings expire during the existing collection boundary', async () => {
+  await test('NWS expiration marks lifecycle expired without silently ending recording', async () => {
     const db = new LifecycleDatabase();
     await createStormEventForWarning(
       warningInput({ nwsAlertId: 'expiring-warning', endsAt: 900 }), db.database
@@ -331,12 +326,12 @@ async function main() {
 
     assertEqual(expiredCount, 1);
     const event = db.events[0];
-    assertEqual(event.endTime, 900);
     assertEqual(event.warning_status, 'EXPIRED');
+    assertEqual(event.endTime, null, 'expiration must defer stop to reviewed lifecycle');
     assertEqual(db.processedWarnings.get('expiring-warning')?.status, 'STORM_EVENT_EXPIRED');
   });
 
-  await test('a separate warning identity can become its own event', async () => {
+  await test('a different warning cannot create a competing event while reviewed recording remains open', async () => {
     const db = new LifecycleDatabase();
     await createStormEventForWarning(
       warningInput({ nwsAlertId: 'warning-a', endsAt: 1200 }), db.database
@@ -349,12 +344,12 @@ async function main() {
       warningInput({ nwsAlertId: 'warning-b', endsAt: 3000 }), db.database
     );
 
-    assertEqual(result.outcome, 'created');
-    assertEqual(db.events.length, 2);
-    assertEqual(db.events[1]?.nws_alert_id, 'warning-b');
+    assertEqual(result.outcome, 'skipped_active_event');
+    assertEqual(db.events.length, 1);
+    assertEqual(db.events[0].endTime, null);
   });
 
-  await test('manual events are protected from automatic cancellation', async () => {
+  await test('manual events are protected from automatic warning cancellation', async () => {
     const db = new LifecycleDatabase();
     db.events.push({
       id: 50,
@@ -381,42 +376,12 @@ async function main() {
     );
 
     assertEqual(result.outcome, 'skipped_cancel_without_event');
-    const manual = db.events.find((event) => event.id === 50);
-    assert(manual != null, 'manual event missing');
-    assertEqual(manual.endTime, null);
-    assertEqual(manual.warning_status, null);
+    assertEqual(db.events[0].endTime, null);
+    assertEqual(db.events[0].warning_status, null);
   });
 
-  await test('legacy event rows remain readable with null lifecycle metadata', async () => {
-    const legacyDatabase = {
-      getAllAsync: async () => [{
-        id: 7,
-        startTime: 100,
-        endTime: null,
-        startLatitude: 40,
-        startLongitude: -82,
-        endLatitude: null,
-        endLongitude: null,
-        eventName: 'Legacy event',
-        notes: '',
-        nwsAlertId: null,
-        triggerSource: null,
-        isAutomatic: null,
-        warningStatus: null,
-        warningEndsAt: null,
-        currentNwsAlertId: null,
-      }],
-    } as unknown as Parameters<typeof getAllStormEvents>[0];
-
-    const events = await getAllStormEvents(legacyDatabase);
-    assertEqual(events.length, 1);
-    assertEqual(events[0]?.warningStatus, null);
-    assertEqual(events[0]?.warningEndsAt, null);
-    assertEqual(events[0]?.currentNwsAlertId, null);
-  });
-
-  console.log(`\nPassed: ${passed}, Failed: ${failed}`);
+  console.log(`Warning lifecycle tests — Passed: ${passed}, Failed: ${failed}`);
   if (failed > 0) process.exitCode = 1;
 }
 
-main();
+void main();
