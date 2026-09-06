@@ -20,6 +20,10 @@ import {
   attachRecentUnassignedLightningToStormEvent,
   getRecentLightningProximity,
 } from './lightningSummaries';
+import {
+  evaluateAutomaticStormStop,
+  LIGHTNING_CLEAR_LOOKBACK_MS,
+} from '../stormLogs/automaticStormLifecycle';
 
 const LIGHTNING_PROXY_URL = process.env.EXPO_PUBLIC_STORMLOG_LIGHTNING_URL?.trim() || null;
 const LIGHTNING_PROXY_TOKEN = process.env.EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN?.trim() || null;
@@ -70,13 +74,28 @@ export async function collectLightning(
   return coordinator.collectLightning(context);
 }
 
+async function evaluateLifecycleAfterFreshLightning(nowMs: number): Promise<void> {
+  const active = await getActiveStormEvent();
+  if (!active || active.isAutomatic !== true) return;
+  const proximity = await getRecentLightningProximity(active.id, {
+    nowMs,
+    lookbackMs: LIGHTNING_CLEAR_LOOKBACK_MS,
+  });
+  const outcome = await evaluateAutomaticStormStop({
+    lightning: proximity,
+    lightningFresh: true,
+    nowMs,
+  });
+  console.log(`[LIGHTNING-AUTO] Lifecycle evaluation: ${outcome}`);
+}
+
 /**
- * Automatic collection is also the lightning auto-start integration point.
- *
- * Existing active events always own new lightning rows, including automatic
- * NWS watch/warning events. If there is no event, lightning is first stored as
- * unassigned evidence; a recent strike/flash within 20 miles creates exactly
- * one automatic event and the triggering evidence is attached to it.
+ * Automatic collection is also the lightning auto-start/lifecycle integration
+ * point. Existing active events always own new lightning rows, including NWS
+ * watch/warning events. With no active event, evidence inside 20 miles creates
+ * exactly one automatic event. A successful refresh then evaluates the 30-mile
+ * sustained-clear stop threshold; failed lightning refreshes never count as an
+ * all-clear.
  */
 export async function collectLightningAutomatic(
   context: Omit<LightningCollectionContext, 'reason'>,
@@ -88,55 +107,61 @@ export async function collectLightningAutomatic(
     stormEventId: effectiveEventId,
   });
 
-  if (!result.success || effectiveEventId != null || result.providerEventCount <= 0) {
-    return result;
-  }
-
+  if (!result.success) return result;
   const nowMs = result.collectionTimestampMs;
-  const proximity = await getRecentLightningProximity(null, {
-    nowMs,
-    lookbackMs: LIGHTNING_AUTO_START_LOOKBACK_MS,
-  });
-  if (
-    proximity.count <= 0
-    || proximity.nearestDistanceKm == null
-    || proximity.nearestDistanceKm > LIGHTNING_AUTO_START_RADIUS_KM
-  ) {
-    return result;
-  }
 
-  // Re-check after provider/database I/O so an NWS trigger racing this path wins
-  // instead of creating a second event.
-  const activeAfter = await getActiveStormEvent();
-  if (activeAfter) {
-    await attachRecentUnassignedLightningToStormEvent(
-      activeAfter.id,
-      nowMs - LIGHTNING_AUTO_START_LOOKBACK_MS,
+  if (effectiveEventId == null && result.providerEventCount > 0) {
+    const proximity = await getRecentLightningProximity(null, {
       nowMs,
-    );
-    return result;
+      lookbackMs: LIGHTNING_AUTO_START_LOOKBACK_MS,
+    });
+
+    if (
+      proximity.count > 0
+      && proximity.nearestDistanceKm != null
+      && proximity.nearestDistanceKm <= LIGHTNING_AUTO_START_RADIUS_KM
+    ) {
+      const activeAfterProvider = await getActiveStormEvent();
+      if (activeAfterProvider) {
+        await attachRecentUnassignedLightningToStormEvent(
+          activeAfterProvider.id,
+          nowMs - LIGHTNING_AUTO_START_LOOKBACK_MS,
+          nowMs,
+        );
+      } else {
+        const eventId = await createStormEvent(
+          context.location.latitude,
+          context.location.longitude,
+          'Automatic Lightning Proximity',
+          {
+            nwsAlertId: null,
+            triggerSource: LIGHTNING_TRIGGER_SOURCE,
+            isAutomatic: true,
+          },
+        );
+        await attachRecentUnassignedLightningToStormEvent(
+          eventId,
+          nowMs - LIGHTNING_AUTO_START_LOOKBACK_MS,
+          nowMs,
+        );
+        console.log(
+          `[LIGHTNING-AUTO] Started storm event ${eventId}; nearest recent lightning ` +
+          `${(proximity.nearestDistanceKm / KM_PER_MILE).toFixed(1)} mi away`,
+        );
+      }
+    }
   }
 
-  const eventId = await createStormEvent(
-    context.location.latitude,
-    context.location.longitude,
-    'Automatic Lightning Proximity',
-    {
-      nwsAlertId: null,
-      triggerSource: LIGHTNING_TRIGGER_SOURCE,
-      isAutomatic: true,
-    },
-  );
-  await attachRecentUnassignedLightningToStormEvent(
-    eventId,
-    nowMs - LIGHTNING_AUTO_START_LOOKBACK_MS,
-    nowMs,
-  );
-
-  console.log(
-    `[LIGHTNING-AUTO] Started storm event ${eventId}; nearest recent lightning ` +
-    `${(proximity.nearestDistanceKm / KM_PER_MILE).toFixed(1)} mi away`,
-  );
+  try {
+    await evaluateLifecycleAfterFreshLightning(nowMs);
+  } catch (error) {
+    // Lifecycle prompting is secondary to lightning ingestion. Never turn a
+    // successful provider/database refresh into a failed weather cycle.
+    console.warn(
+      '[LIGHTNING-AUTO] Lifecycle evaluation failed:',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
   return result;
 }
 
