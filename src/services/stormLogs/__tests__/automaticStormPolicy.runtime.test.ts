@@ -3,6 +3,7 @@ import {
   LIGHTNING_AUTO_START_RADIUS_KM,
   LIGHTNING_AUTO_STOP_RADIUS_KM,
   classifyAutomaticStormEvidence,
+  isAutomaticNwsTrigger,
   isLightningAutoStartCandidate,
   isLightningStillRelevant,
   isStopReviewGraceExpired,
@@ -20,6 +21,40 @@ function test(name: string, fn: () => void): void {
   fn();
   console.log(`PASS: ${name}`);
 }
+
+test('Severe Thunderstorm Watch is an automatic trigger', () => {
+  assertEqual(isAutomaticNwsTrigger({
+    id: 'watch-1',
+    event: 'Severe Thunderstorm Watch',
+    severity: 'Moderate',
+    status: 'Actual',
+    messageType: 'Alert',
+  }), true, 'moderate severe thunderstorm watch');
+  assertEqual(isAutomaticNwsTrigger({
+    id: 'watch-2',
+    event: 'Severe Thunderstorm Watch',
+    severity: 'Severe',
+    status: 'Actual',
+    messageType: 'Update',
+  }), true, 'updated severe thunderstorm watch');
+  assertEqual(isAutomaticNwsTrigger({
+    id: 'watch-cancel',
+    event: 'Severe Thunderstorm Watch',
+    severity: 'Moderate',
+    status: 'Actual',
+    messageType: 'Cancel',
+  }), false, 'canceled watch must not remain active');
+});
+
+test('unsupported watches do not auto-start StormLog', () => {
+  assertEqual(isAutomaticNwsTrigger({
+    id: 'watch-other',
+    event: 'Tornado Watch',
+    severity: 'Severe',
+    status: 'Actual',
+    messageType: 'Alert',
+  }), false, 'unsupported watch');
+});
 
 test('20-mile boundary auto-starts and anything farther does not', () => {
   assertEqual(
