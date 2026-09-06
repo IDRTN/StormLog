@@ -4,14 +4,18 @@ import type { NormalizedNwsAlert } from '../nws/alerts';
 import { isEligibleNwsWarning } from './processNwsWarning';
 import { notifyAutomaticStormStopReview } from '../notifications';
 import type { RecentLightningProximity } from '../lightning/lightningSummaries';
+import {
+  AUTO_STOP_REVIEW_GRACE_MS,
+  KEEP_RECORDING_SUPPRESS_MS,
+  LIGHTNING_CLEAR_LOOKBACK_MS,
+  NWS_SNAPSHOT_MAX_AGE_MS,
+  classifyAutomaticStormEvidence,
+  isLightningStillRelevant,
+  isStopReviewGraceExpired,
+  kmToMiles,
+} from './automaticStormPolicy';
 
-const KM_PER_MILE = 1.609344;
-export const LIGHTNING_AUTO_STOP_RADIUS_MILES = 30;
-export const LIGHTNING_AUTO_STOP_RADIUS_KM = LIGHTNING_AUTO_STOP_RADIUS_MILES * KM_PER_MILE;
-export const LIGHTNING_CLEAR_LOOKBACK_MS = 30 * 60_000;
-export const AUTO_STOP_REVIEW_GRACE_MS = 30 * 60_000;
-const KEEP_RECORDING_SUPPRESS_MS = 60 * 60_000;
-const NWS_SNAPSHOT_MAX_AGE_MS = 20 * 60_000;
+export { AUTO_STOP_REVIEW_GRACE_MS, LIGHTNING_CLEAR_LOOKBACK_MS } from './automaticStormPolicy';
 
 const PENDING_REVIEW_KEY = 'automatic_storm_stop_review';
 const KEEP_UNTIL_KEY = 'automatic_storm_keep_until';
@@ -80,12 +84,6 @@ async function readAutomaticNwsTriggerSnapshot(nowMs: number): Promise<{
   }
 }
 
-export function isLightningStillRelevant(proximity: RecentLightningProximity): boolean {
-  return proximity.count > 0
-    && proximity.nearestDistanceKm != null
-    && proximity.nearestDistanceKm <= LIGHTNING_AUTO_STOP_RADIUS_KM;
-}
-
 export async function getPendingAutomaticStormStopReview(): Promise<AutomaticStormStopReview | null> {
   return parseReview(await AsyncStorage.getItem(PENDING_REVIEW_KEY));
 }
@@ -115,9 +113,7 @@ export async function requestAutomaticStormStopReview(input: {
     eventId: input.eventId,
     reason: input.reason,
     requestedAtMs: input.nowMs,
-    nearestLightningMiles: input.nearestLightningKm == null
-      ? null
-      : input.nearestLightningKm / KM_PER_MILE,
+    nearestLightningMiles: kmToMiles(input.nearestLightningKm),
   };
   await AsyncStorage.setItem(PENDING_REVIEW_KEY, JSON.stringify(review));
   await notifyAutomaticStormStopReview(review);
@@ -157,12 +153,6 @@ export async function handleAutomaticStormStopAction(
   await stopAutomaticStormRecording(eventId);
 }
 
-/**
- * Fresh NWS or lightning evidence always cancels a pending stop. When both
- * streams show clear conditions, StormLog asks first. If the user does not
- * respond and no trigger returns for 30 more minutes, the automatic event is
- * closed so an abandoned log cannot run indefinitely.
- */
 export async function evaluateAutomaticStormStop(input: {
   lightning: RecentLightningProximity;
   lightningFresh: boolean;
@@ -175,20 +165,22 @@ export async function evaluateAutomaticStormStop(input: {
   }
 
   const nws = await readAutomaticNwsTriggerSnapshot(input.nowMs);
-  const lightningActive = input.lightningFresh && isLightningStillRelevant(input.lightning);
+  const evidence = classifyAutomaticStormEvidence({
+    nwsFresh: nws.fresh,
+    nwsActive: nws.active,
+    lightningFresh: input.lightningFresh,
+    lightningRelevant: isLightningStillRelevant(input.lightning),
+  });
 
-  if ((nws.fresh && nws.active) || lightningActive) {
+  if (evidence === 'active') {
     await clearReviewState();
     return 'active';
   }
-
-  // Missing/stale evidence is not an all-clear and cannot start or advance the
-  // automatic shutdown clock.
-  if (!nws.fresh || !input.lightningFresh) return 'active';
+  if (evidence === 'unknown') return 'active';
 
   const pending = await getPendingAutomaticStormStopReview();
   if (pending?.eventId === event.id) {
-    if (input.nowMs - pending.requestedAtMs >= AUTO_STOP_REVIEW_GRACE_MS) {
+    if (isStopReviewGraceExpired(pending.requestedAtMs, input.nowMs)) {
       await stopAutomaticStormRecording(event.id);
       return 'auto_stopped';
     }
