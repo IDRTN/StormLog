@@ -9,6 +9,7 @@ const KM_PER_MILE = 1.609344;
 export const LIGHTNING_AUTO_STOP_RADIUS_MILES = 30;
 export const LIGHTNING_AUTO_STOP_RADIUS_KM = LIGHTNING_AUTO_STOP_RADIUS_MILES * KM_PER_MILE;
 export const LIGHTNING_CLEAR_LOOKBACK_MS = 30 * 60_000;
+export const AUTO_STOP_REVIEW_GRACE_MS = 30 * 60_000;
 const KEEP_RECORDING_SUPPRESS_MS = 60 * 60_000;
 const NWS_SNAPSHOT_MAX_AGE_MS = 20 * 60_000;
 
@@ -50,7 +51,6 @@ export function hasActiveAutomaticNwsTrigger(alerts: NormalizedNwsAlert[]): bool
   });
 }
 
-/** Persist the whole-cycle NWS result so lightning/lifecycle work can consume it without a second network request. */
 export async function recordAutomaticNwsTriggerSnapshot(
   alerts: NormalizedNwsAlert[],
   capturedAtMs: number = Date.now(),
@@ -158,15 +158,16 @@ export async function handleAutomaticStormStopAction(
 }
 
 /**
- * Evaluate stop eligibility using only fresh evidence. If NWS or lightning data
- * is stale/failed we deliberately keep recording; missing data is never treated
- * as proof that a storm has ended.
+ * Fresh NWS or lightning evidence always cancels a pending stop. When both
+ * streams show clear conditions, StormLog asks first. If the user does not
+ * respond and no trigger returns for 30 more minutes, the automatic event is
+ * closed so an abandoned log cannot run indefinitely.
  */
 export async function evaluateAutomaticStormStop(input: {
   lightning: RecentLightningProximity;
   lightningFresh: boolean;
   nowMs: number;
-}): Promise<'no_event' | 'active' | 'review_pending' | 'review_queued'> {
+}): Promise<'no_event' | 'active' | 'review_pending' | 'review_queued' | 'auto_stopped'> {
   const event = await getActiveAutomaticStormEvent();
   if (!event) {
     await clearReviewState();
@@ -181,8 +182,18 @@ export async function evaluateAutomaticStormStop(input: {
     return 'active';
   }
 
-  // Both evidence streams must be fresh before asking to stop.
+  // Missing/stale evidence is not an all-clear and cannot start or advance the
+  // automatic shutdown clock.
   if (!nws.fresh || !input.lightningFresh) return 'active';
+
+  const pending = await getPendingAutomaticStormStopReview();
+  if (pending?.eventId === event.id) {
+    if (input.nowMs - pending.requestedAtMs >= AUTO_STOP_REVIEW_GRACE_MS) {
+      await stopAutomaticStormRecording(event.id);
+      return 'auto_stopped';
+    }
+    return 'review_pending';
+  }
 
   const reason: AutomaticStormStopReason = event.triggerSource === 'LIGHTNING_PROXIMITY'
     ? 'lightning_clear'
