@@ -5,6 +5,7 @@ import { createAutomaticStormEvent } from './createStormLogEvent';
 const ELIGIBLE_WARNING_EVENTS = new Set([
   'Tornado Warning',
   'Severe Thunderstorm Warning',
+  'Severe Thunderstorm Watch',
   'Flash Flood Warning',
 ]);
 
