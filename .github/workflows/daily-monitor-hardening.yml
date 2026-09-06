@@ -150,10 +150,16 @@ jobs:
           grep -q 'KEEP_RECORDING_ACTION' app/_layout.tsx
           grep -q 'STOP_RECORDING_ACTION' app/_layout.tsx
           grep -q 'categoryIdentifier: AUTOMATIC_STORM_STOP_CATEGORY' src/services/notifications.ts
-          if grep -q 'SET endTime = warning_ends_at' src/database/warningEvents.ts; then
-            echo "::error title=Automatic storm lifecycle regression::NWS expiry still closes the event directly"
+
+          # Only inspect the expiry routine itself. Other lifecycle tests/migrations may
+          # legitimately contain historical endTime SQL strings and must not trip this gate.
+          EXPIRY_BODY="$(sed -n '/export async function expireDueAutomaticWarnings/,/^}/p' src/database/warningEvents.ts)"
+          if grep -Eq 'SET[[:space:]]+endTime' <<< "$EXPIRY_BODY"; then
+            echo "::error title=Automatic storm lifecycle regression::NWS expiry closes the event directly"
             exit 1
           fi
+          grep -q 'SET warning_status = ?' <<< "$EXPIRY_BODY"
+          grep -q 'WARNING_EVENT_STATUS_EXPIRED' <<< "$EXPIRY_BODY"
 
       - name: Verify scheduler source architecture
         shell: bash
