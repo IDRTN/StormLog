@@ -20,18 +20,16 @@ import {
   attachRecentUnassignedLightningToStormEvent,
   getRecentLightningProximity,
 } from './lightningSummaries';
+import { evaluateAutomaticStormStop } from '../stormLogs/automaticStormLifecycle';
 import {
-  evaluateAutomaticStormStop,
+  LIGHTNING_AUTO_START_LOOKBACK_MS,
   LIGHTNING_CLEAR_LOOKBACK_MS,
-} from '../stormLogs/automaticStormLifecycle';
+  isLightningAutoStartCandidate,
+  kmToMiles,
+} from '../stormLogs/automaticStormPolicy';
 
 const LIGHTNING_PROXY_URL = process.env.EXPO_PUBLIC_STORMLOG_LIGHTNING_URL?.trim() || null;
 const LIGHTNING_PROXY_TOKEN = process.env.EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN?.trim() || null;
-
-const KM_PER_MILE = 1.609344;
-export const LIGHTNING_AUTO_START_RADIUS_MILES = 20;
-export const LIGHTNING_AUTO_START_RADIUS_KM = LIGHTNING_AUTO_START_RADIUS_MILES * KM_PER_MILE;
-export const LIGHTNING_AUTO_START_LOOKBACK_MS = 15 * 60_000;
 export const LIGHTNING_TRIGGER_SOURCE = 'LIGHTNING_PROXIMITY';
 
 const rawAdapter: LightningProviderAdapter | null = LIGHTNING_PROXY_URL
@@ -89,14 +87,6 @@ async function evaluateLifecycleAfterFreshLightning(nowMs: number): Promise<void
   console.log(`[LIGHTNING-AUTO] Lifecycle evaluation: ${outcome}`);
 }
 
-/**
- * Automatic collection is also the lightning auto-start/lifecycle integration
- * point. Existing active events always own new lightning rows, including NWS
- * watch/warning events. With no active event, evidence inside 20 miles creates
- * exactly one automatic event. A successful refresh then evaluates the 30-mile
- * sustained-clear stop threshold; failed lightning refreshes never count as an
- * all-clear.
- */
 export async function collectLightningAutomatic(
   context: Omit<LightningCollectionContext, 'reason'>,
 ): Promise<LightningCollectionResult> {
@@ -116,11 +106,7 @@ export async function collectLightningAutomatic(
       lookbackMs: LIGHTNING_AUTO_START_LOOKBACK_MS,
     });
 
-    if (
-      proximity.count > 0
-      && proximity.nearestDistanceKm != null
-      && proximity.nearestDistanceKm <= LIGHTNING_AUTO_START_RADIUS_KM
-    ) {
+    if (isLightningAutoStartCandidate(proximity)) {
       const activeAfterProvider = await getActiveStormEvent();
       if (activeAfterProvider) {
         await attachRecentUnassignedLightningToStormEvent(
@@ -146,7 +132,7 @@ export async function collectLightningAutomatic(
         );
         console.log(
           `[LIGHTNING-AUTO] Started storm event ${eventId}; nearest recent lightning ` +
-          `${(proximity.nearestDistanceKm / KM_PER_MILE).toFixed(1)} mi away`,
+          `${kmToMiles(proximity.nearestDistanceKm)?.toFixed(1)} mi away`,
         );
       }
     }
@@ -155,8 +141,6 @@ export async function collectLightningAutomatic(
   try {
     await evaluateLifecycleAfterFreshLightning(nowMs);
   } catch (error) {
-    // Lifecycle prompting is secondary to lightning ingestion. Never turn a
-    // successful provider/database refresh into a failed weather cycle.
     console.warn(
       '[LIGHTNING-AUTO] Lifecycle evaluation failed:',
       error instanceof Error ? error.message : String(error),
