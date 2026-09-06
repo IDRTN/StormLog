@@ -6,6 +6,10 @@ on:
       - daily-monitor-hardening
   workflow_dispatch:
 
+concurrency:
+  group: daily-monitor-hardening-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -22,7 +26,7 @@ jobs:
 
     steps:
       - name: Check out hardening branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Require lightning client token
         shell: bash
@@ -50,23 +54,26 @@ jobs:
           node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!Array.isArray(p.events))throw new Error("Worker 200 response is missing events array")' "$RESPONSE_FILE"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22.16.0"
           cache: npm
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ""
 
       - name: Install Android build components
+        shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null
+          set -euo pipefail
           sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006" "cmake;3.22.1"
 
       - name: Install dependencies
@@ -84,17 +91,30 @@ jobs:
             src/util/dateUtils.ts \
             src/services/background/dailyMonitorCoordinator.ts \
             src/services/background/__tests__/dailyMonitorHardening.runtime.test.ts \
+            --rootDir src \
             --module commonjs --target ES2022 --moduleResolution node --types node \
             --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck \
             --outDir /tmp/stormlog-hardening-tests
+
+          CLAIM_STUB="/tmp/stormlog-hardening-tests/services/background/dailyMonitorClaim.js"
+          test -f "$CLAIM_STUB"
+          cat > "$CLAIM_STUB" <<'JS'
+          exports.claimAutomaticCollection = async () => true;
+          exports.markDailyMonitorCollectionSucceeded = async () => undefined;
+          exports.releaseAutomaticCollectionLease = async () => undefined;
+          JS
 
       - name: Run Daily Monitor hardening runtime tests
         shell: bash
         run: |
           set -euo pipefail
-          TEST_FILE="$(find /tmp/stormlog-hardening-tests -name dailyMonitorHardening.runtime.test.js -print -quit)"
-          test -n "$TEST_FILE"
-          node "$TEST_FILE"
+          TEST_FILE="/tmp/stormlog-hardening-tests/services/background/__tests__/dailyMonitorHardening.runtime.test.js"
+          test -s "$TEST_FILE"
+          node "$TEST_FILE" 2>&1 | tee /tmp/stormlog-hardening-tests.log
+          if grep -q 'Cannot find module' /tmp/stormlog-hardening-tests.log; then
+            echo "::error title=Daily Monitor test harness leak::Runtime test crossed an unstubbed native-module boundary"
+            exit 1
+          fi
 
       - name: Compile Daily Monitor location fallback tests
         shell: bash
@@ -140,44 +160,45 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          grep -q "'Severe Thunderstorm Watch'" src/services/stormLogs/processNwsWarning.ts
-          grep -q 'LIGHTNING_AUTO_START_RADIUS_MILES = 20' src/services/stormLogs/automaticStormPolicy.ts
-          grep -q 'LIGHTNING_AUTO_STOP_RADIUS_MILES = 30' src/services/stormLogs/automaticStormPolicy.ts
-          grep -q 'AUTO_STOP_REVIEW_GRACE_MS = 30' src/services/stormLogs/automaticStormPolicy.ts
-          grep -q "LIGHTNING_TRIGGER_SOURCE = 'LIGHTNING_PROXIMITY'" src/services/lightning/lightningService.ts
-          grep -q 'isLightningAutoStartCandidate' src/services/lightning/lightningService.ts
-          grep -q 'evaluateAutomaticStormStop' src/services/lightning/lightningService.ts
-          grep -q 'KEEP_RECORDING_ACTION' app/_layout.tsx
-          grep -q 'STOP_RECORDING_ACTION' app/_layout.tsx
-          grep -q 'categoryIdentifier: AUTOMATIC_STORM_STOP_CATEGORY' src/services/notifications.ts
+
+          require_source() {
+            local file="$1"
+            local needle="$2"
+            local label="$3"
+            if ! grep -Fq "$needle" "$file"; then
+              echo "::error title=Automatic storm lifecycle wiring missing::${label} (${file})"
+              exit 1
+            fi
+          }
+
+          require_source src/services/stormLogs/automaticStormPolicy.ts "'Severe Thunderstorm Watch'" "Severe Thunderstorm Watch trigger policy"
+          require_source src/services/stormLogs/processNwsWarning.ts 'AUTOMATIC_NWS_TRIGGER_EVENTS' "NWS warning processor consumes shared automatic-trigger policy"
+          require_source src/services/stormLogs/nwsWarningTrigger.ts 'recordAutomaticNwsTriggerSnapshot' "successful NWS fetch records lifecycle freshness snapshot"
+          require_source src/services/stormLogs/automaticStormPolicy.ts 'LIGHTNING_AUTO_START_RADIUS_MILES = 20' "20-mile lightning auto-start radius"
+          require_source src/services/stormLogs/automaticStormPolicy.ts 'LIGHTNING_AUTO_STOP_RADIUS_MILES = 30' "30-mile lightning clear radius"
+          require_source src/services/stormLogs/automaticStormPolicy.ts 'AUTO_STOP_REVIEW_GRACE_MS = 30' "30-minute unanswered stop-review grace"
+          require_source src/services/lightning/lightningService.ts "LIGHTNING_TRIGGER_SOURCE = 'LIGHTNING_PROXIMITY'" "lightning automatic trigger source"
+          require_source src/services/lightning/lightningService.ts 'isLightningAutoStartCandidate' "lightning proximity auto-start evaluation"
+          require_source src/services/lightning/lightningService.ts 'evaluateAutomaticStormStop' "fresh lightning drives automatic stop lifecycle"
+          require_source app/_layout.tsx 'KEEP_RECORDING_ACTION' "Keep Recording action handler"
+          require_source app/_layout.tsx 'STOP_RECORDING_ACTION' "Stop Recording action handler"
+          require_source app/_layout.tsx 'getLastNotificationResponseAsync' "cold-start notification action recovery"
+          require_source src/services/notifications.ts 'categoryIdentifier: AUTOMATIC_STORM_STOP_CATEGORY' "stop-review notification category"
 
           node <<'NODE'
           const fs = require('fs');
           const ts = require('typescript');
-
           const filePath = 'src/database/warningEvents.ts';
           const sourceText = fs.readFileSync(filePath, 'utf8');
-          const sourceFile = ts.createSourceFile(
-            filePath,
-            sourceText,
-            ts.ScriptTarget.Latest,
-            true,
-            ts.ScriptKind.TS
-          );
-
+          const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
           const expiryFunction = sourceFile.statements.find(
-            (statement) =>
-              ts.isFunctionDeclaration(statement) &&
-              statement.name?.text === 'expireDueAutomaticWarnings'
+            (statement) => ts.isFunctionDeclaration(statement) && statement.name?.text === 'expireDueAutomaticWarnings'
           );
-
           if (!expiryFunction || !expiryFunction.body) {
             console.error('::error title=Automatic storm lifecycle wiring missing::expireDueAutomaticWarnings function was not found');
             process.exit(1);
           }
-
           const expiryBody = expiryFunction.body.getText(sourceFile);
-
           if (/SET\s+endTime/i.test(expiryBody)) {
             console.error('::error title=Automatic storm lifecycle regression::NWS expiry closes the event directly');
             process.exit(1);
@@ -199,21 +220,65 @@ jobs:
           SCHED="modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler/StormLogAlarmScheduler.kt"
           RECEIVER="modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler/StormLogSchedulerAlarmReceiver.kt"
           WORKER="modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler/StormLogHeadlessTaskService.kt"
-          test -f "$SCHED"
-          test ! -f modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler/StormLogSchedulerService.kt
-          grep -q 'setExactAndAllowWhileIdle' "$SCHED"
-          grep -q 'canScheduleExactAlarms' "$SCHED"
-          ! grep -q 'setAndAllowWhileIdle' "$SCHED"
-          grep -q 'Exact alarm access required' "$SCHED"
-          grep -q 'ContextCompat.startForegroundService' "$RECEIVER"
-          grep -q 'startForeground' "$WORKER"
-          grep -q 'stopForeground' "$WORKER"
-          grep -q 'HeadlessJsTaskService.acquireWakeLockNow' "$RECEIVER"
-          grep -q 'ACCESS_BACKGROUND_LOCATION' app.json
-          grep -q 'isAndroidBackgroundLocationEnabled' app.json
-          grep -q "foregroundServiceType': 'location|dataSync'" plugins/withStormLogScheduler.js
-          grep -q 'requestBackgroundPermissionsAsync' src/hooks/useDailyMonitor.ts
-          ! grep -R 'StormLogSchedulerService.start' modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler
+          HEADLESS_JS="src/services/background/dailyMonitorHeadless.ts"
+          INDEX="index.js"
+
+          require_file() {
+            if [[ ! -f "$1" ]]; then
+              echo "::error title=Scheduler architecture missing::Required file $1 does not exist"
+              exit 1
+            fi
+          }
+          require_text() {
+            local file="$1"
+            local needle="$2"
+            local label="$3"
+            if ! grep -Fq "$needle" "$file"; then
+              echo "::error title=Scheduler architecture missing::${label} (${file})"
+              exit 1
+            fi
+          }
+          forbid_text() {
+            local file="$1"
+            local needle="$2"
+            local label="$3"
+            if grep -Fq "$needle" "$file"; then
+              echo "::error title=Scheduler architecture regression::${label} (${file})"
+              exit 1
+            fi
+          }
+
+          require_file "$SCHED"
+          require_file "$RECEIVER"
+          require_file "$WORKER"
+          require_file "$HEADLESS_JS"
+          require_file "$INDEX"
+          if [[ -f modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler/StormLogSchedulerService.kt ]]; then
+            echo "::error title=Scheduler architecture regression::Obsolete always-running scheduler service still exists"
+            exit 1
+          fi
+
+          require_text "$SCHED" 'setExactAndAllowWhileIdle' "exact AlarmManager scheduling"
+          require_text "$SCHED" 'canScheduleExactAlarms' "exact-alarm permission verification"
+          forbid_text "$SCHED" 'setAndAllowWhileIdle' "inexact AlarmManager fallback is forbidden"
+          require_text "$SCHED" 'Exact alarm access required' "user-visible exact-alarm status"
+          require_text "$RECEIVER" 'ContextCompat.startForegroundService' "alarm launches foreground headless worker"
+          require_text "$RECEIVER" 'HeadlessJsTaskService.acquireWakeLockNow' "alarm acquires Headless JS wake lock"
+          require_text "$WORKER" 'startForeground' "headless worker promotes itself immediately"
+          require_text "$WORKER" 'stopForeground' "headless worker removes foreground state after collection"
+          require_text "$WORKER" 'StormLogDailyMonitorHeadless' "native worker task name"
+          require_text "$HEADLESS_JS" 'StormLogDailyMonitorHeadless' "JS headless task name"
+          require_text "$HEADLESS_JS" "performDailyCollection('automatic')" "headless task enters automatic coordinator path"
+          require_text "$INDEX" "import './src/services/background/dailyMonitorHeadless'" "headless task registration loads before router entry"
+          require_text app.json 'ACCESS_BACKGROUND_LOCATION' "background location permission"
+          require_text app.json 'isAndroidBackgroundLocationEnabled' "Expo background location configuration"
+          require_text plugins/withStormLogScheduler.js "'android:foregroundServiceType': 'location|dataSync'" "worker foreground-service types"
+          require_text src/hooks/useDailyMonitor.ts 'requestBackgroundPermissionsAsync' "UI requests background location permission"
+
+          if grep -R -Fq 'StormLogSchedulerService.start' modules/storm-log-scheduler/android/src/main/java/com/stormlog/scheduler; then
+            echo "::error title=Scheduler architecture regression::Obsolete scheduler service start reference remains"
+            exit 1
+          fi
 
       - name: Generate Android project
         env:
@@ -227,26 +292,47 @@ jobs:
           set -euo pipefail
           test -f modules/storm-log-scheduler/android/build.gradle
           npx expo-modules-autolinking resolve --platform android > /tmp/stormlog-autolinking.json
-          grep -qi 'storm-log-scheduler' /tmp/stormlog-autolinking.json
-          grep -q 'StormLogHeadlessTaskService' android/app/src/main/AndroidManifest.xml
-          grep -q 'android:foregroundServiceType="location|dataSync"' android/app/src/main/AndroidManifest.xml
-          grep -q 'FOREGROUND_SERVICE_DATA_SYNC' android/app/src/main/AndroidManifest.xml
-          grep -q 'FOREGROUND_SERVICE_LOCATION' android/app/src/main/AndroidManifest.xml
-          grep -q 'ACCESS_BACKGROUND_LOCATION' android/app/src/main/AndroidManifest.xml
-          grep -q 'SCHEDULE_EXACT_ALARM' android/app/src/main/AndroidManifest.xml
-          grep -q 'StormLogSchedulerAlarmReceiver' android/app/src/main/AndroidManifest.xml
-          grep -q 'StormLogExactAlarmPermissionReceiver' android/app/src/main/AndroidManifest.xml
-          grep -q 'StormLogSchedulerBootReceiver' android/app/src/main/AndroidManifest.xml
-          grep -q 'BOOT_COMPLETED' android/app/src/main/AndroidManifest.xml
-          grep -q 'MY_PACKAGE_REPLACED' android/app/src/main/AndroidManifest.xml
-          ! grep -q 'StormLogSchedulerService' android/app/src/main/AndroidManifest.xml
+          if ! grep -qi 'storm-log-scheduler' /tmp/stormlog-autolinking.json; then
+            echo "::error title=Native scheduler autolinking missing::storm-log-scheduler was not resolved"
+            exit 1
+          fi
+
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          require_manifest() {
+            local needle="$1"
+            local label="$2"
+            if ! grep -Fq "$needle" "$MANIFEST"; then
+              echo "::error title=Generated manifest wiring missing::${label}"
+              exit 1
+            fi
+          }
+
+          require_manifest 'StormLogHeadlessTaskService' 'headless worker service'
+          require_manifest 'android:foregroundServiceType="location|dataSync"' 'location+dataSync foreground-service types'
+          require_manifest 'FOREGROUND_SERVICE_DATA_SYNC' 'data-sync foreground-service permission'
+          require_manifest 'FOREGROUND_SERVICE_LOCATION' 'location foreground-service permission'
+          require_manifest 'ACCESS_BACKGROUND_LOCATION' 'background location permission'
+          require_manifest 'SCHEDULE_EXACT_ALARM' 'exact-alarm permission'
+          require_manifest 'StormLogSchedulerAlarmReceiver' 'alarm receiver'
+          require_manifest 'StormLogExactAlarmPermissionReceiver' 'exact-alarm permission receiver'
+          require_manifest 'StormLogSchedulerBootReceiver' 'boot/update recovery receiver'
+          require_manifest 'BOOT_COMPLETED' 'boot recovery action'
+          require_manifest 'MY_PACKAGE_REPLACED' 'APK update recovery action'
+
+          if grep -Fq 'StormLogSchedulerService' "$MANIFEST"; then
+            echo "::error title=Generated manifest regression::Obsolete always-running scheduler service is still registered"
+            exit 1
+          fi
 
       - name: Verify Gradle includes native scheduler project
         shell: bash
         run: |
           set -euo pipefail
           (cd android && ./gradlew projects --no-daemon) | tee /tmp/stormlog-gradle-projects.txt
-          grep -qi 'storm-log-scheduler' /tmp/stormlog-gradle-projects.txt
+          if ! grep -qi 'storm-log-scheduler' /tmp/stormlog-gradle-projects.txt; then
+            echo "::error title=Gradle autolinking missing::storm-log-scheduler project is absent"
+            exit 1
+          fi
 
       - name: Enable embedded JS bundle for standalone debug APK
         shell: bash
