@@ -1,21 +1,11 @@
 import type { StormLogDatabase, WarningStormEventResult } from '../../database/warningEvents';
 import type { NormalizedNwsAlert } from '../nws/alerts';
 import { createAutomaticStormEvent } from './createStormLogEvent';
-
-const ELIGIBLE_WARNING_EVENTS = new Set([
-  'Tornado Warning',
-  'Severe Thunderstorm Warning',
-  'Severe Thunderstorm Watch',
-  'Flash Flood Warning',
-]);
-
-function hasEligibleSeverity(alert: Pick<NormalizedNwsAlert, 'event' | 'severity'>): boolean {
-  if (alert.severity === 'Extreme' || alert.severity === 'Severe') return true;
-  // Watches are occasionally normalized less aggressively than warnings. The
-  // event identity itself is authoritative enough for this specific opt-in
-  // trigger, while still rejecting unrelated low-severity products.
-  return alert.event === 'Severe Thunderstorm Watch' && alert.severity === 'Moderate';
-}
+import {
+  AUTOMATIC_NWS_TRIGGER_EVENTS,
+  hasEligibleAutomaticNwsSeverity,
+  isAutomaticNwsTrigger,
+} from './automaticStormPolicy';
 
 export type ProcessNwsWarningResult =
   | { outcome: 'skipped_invalid_alert'; reason: 'invalid_alert' | 'missing_id' }
@@ -32,12 +22,11 @@ export type ProcessNwsWarningResult =
 export function isEligibleNwsWarning(
   alert: Pick<NormalizedNwsAlert, 'id' | 'event' | 'severity'>
 ): boolean {
-  return (
-    typeof alert.id === 'string'
-    && alert.id.trim().length > 0
-    && ELIGIBLE_WARNING_EVENTS.has(alert.event)
-    && hasEligibleSeverity(alert)
-  );
+  return isAutomaticNwsTrigger({
+    id: alert.id,
+    event: alert.event,
+    severity: alert.severity,
+  });
 }
 
 export async function processNwsWarningForStormEvent(
@@ -50,7 +39,7 @@ export async function processNwsWarningForStormEvent(
   if (typeof alert.id !== 'string' || alert.id.trim().length === 0) {
     return { outcome: 'skipped_invalid_alert', reason: 'missing_id' };
   }
-  if (!ELIGIBLE_WARNING_EVENTS.has(alert.event)) {
+  if (!AUTOMATIC_NWS_TRIGGER_EVENTS.has(alert.event)) {
     return { outcome: 'skipped_ineligible_alert', reason: 'unsupported_event' };
   }
   if (alert.status != null && alert.status !== 'Actual') {
@@ -62,7 +51,7 @@ export async function processNwsWarningForStormEvent(
     return { outcome: 'skipped_ineligible_alert', reason: 'unsupported_message_type' };
   }
 
-  if (messageType !== 'CANCEL' && !hasEligibleSeverity(alert)) {
+  if (messageType !== 'CANCEL' && !hasEligibleAutomaticNwsSeverity(alert.event, alert.severity)) {
     return { outcome: 'skipped_ineligible_alert', reason: 'unsupported_severity' };
   }
 
