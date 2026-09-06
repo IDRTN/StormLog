@@ -9,6 +9,14 @@ const ELIGIBLE_WARNING_EVENTS = new Set([
   'Flash Flood Warning',
 ]);
 
+function hasEligibleSeverity(alert: Pick<NormalizedNwsAlert, 'event' | 'severity'>): boolean {
+  if (alert.severity === 'Extreme' || alert.severity === 'Severe') return true;
+  // Watches are occasionally normalized less aggressively than warnings. The
+  // event identity itself is authoritative enough for this specific opt-in
+  // trigger, while still rejecting unrelated low-severity products.
+  return alert.event === 'Severe Thunderstorm Watch' && alert.severity === 'Moderate';
+}
+
 export type ProcessNwsWarningResult =
   | { outcome: 'skipped_invalid_alert'; reason: 'invalid_alert' | 'missing_id' }
   | {
@@ -28,7 +36,7 @@ export function isEligibleNwsWarning(
     typeof alert.id === 'string'
     && alert.id.trim().length > 0
     && ELIGIBLE_WARNING_EVENTS.has(alert.event)
-    && (alert.severity === 'Extreme' || alert.severity === 'Severe')
+    && hasEligibleSeverity(alert)
   );
 }
 
@@ -54,11 +62,7 @@ export async function processNwsWarningForStormEvent(
     return { outcome: 'skipped_ineligible_alert', reason: 'unsupported_message_type' };
   }
 
-  if (
-    messageType !== 'CANCEL'
-    && alert.severity !== 'Extreme'
-    && alert.severity !== 'Severe'
-  ) {
+  if (messageType !== 'CANCEL' && !hasEligibleSeverity(alert)) {
     return { outcome: 'skipped_ineligible_alert', reason: 'unsupported_severity' };
   }
 
