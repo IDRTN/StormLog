@@ -10,9 +10,11 @@ export const LIGHTNING_AUTO_STOP_RADIUS_MILES = 30;
 export const LIGHTNING_AUTO_STOP_RADIUS_KM = LIGHTNING_AUTO_STOP_RADIUS_MILES * KM_PER_MILE;
 export const LIGHTNING_CLEAR_LOOKBACK_MS = 30 * 60_000;
 const KEEP_RECORDING_SUPPRESS_MS = 60 * 60_000;
+const NWS_SNAPSHOT_MAX_AGE_MS = 20 * 60_000;
 
 const PENDING_REVIEW_KEY = 'automatic_storm_stop_review';
 const KEEP_UNTIL_KEY = 'automatic_storm_keep_until';
+const NWS_TRIGGER_SNAPSHOT_KEY = 'automatic_storm_nws_trigger_snapshot';
 
 export type AutomaticStormStopReason = 'nws_clear' | 'lightning_clear' | 'all_clear';
 
@@ -21,6 +23,11 @@ export type AutomaticStormStopReview = {
   reason: AutomaticStormStopReason;
   requestedAtMs: number;
   nearestLightningMiles: number | null;
+};
+
+type NwsTriggerSnapshot = {
+  capturedAtMs: number;
+  active: boolean;
 };
 
 function parseReview(value: string | null): AutomaticStormStopReview | null {
@@ -43,6 +50,36 @@ export function hasActiveAutomaticNwsTrigger(alerts: NormalizedNwsAlert[]): bool
   });
 }
 
+/** Persist the whole-cycle NWS result so lightning/lifecycle work can consume it without a second network request. */
+export async function recordAutomaticNwsTriggerSnapshot(
+  alerts: NormalizedNwsAlert[],
+  capturedAtMs: number = Date.now(),
+): Promise<void> {
+  const snapshot: NwsTriggerSnapshot = {
+    capturedAtMs,
+    active: hasActiveAutomaticNwsTrigger(alerts),
+  };
+  await AsyncStorage.setItem(NWS_TRIGGER_SNAPSHOT_KEY, JSON.stringify(snapshot));
+}
+
+async function readAutomaticNwsTriggerSnapshot(nowMs: number): Promise<{
+  active: boolean;
+  fresh: boolean;
+}> {
+  const raw = await AsyncStorage.getItem(NWS_TRIGGER_SNAPSHOT_KEY);
+  if (!raw) return { active: false, fresh: false };
+  try {
+    const parsed = JSON.parse(raw) as NwsTriggerSnapshot;
+    if (!Number.isFinite(parsed.capturedAtMs)) return { active: false, fresh: false };
+    return {
+      active: parsed.active === true,
+      fresh: Math.max(0, nowMs - parsed.capturedAtMs) <= NWS_SNAPSHOT_MAX_AGE_MS,
+    };
+  } catch {
+    return { active: false, fresh: false };
+  }
+}
+
 export function isLightningStillRelevant(proximity: RecentLightningProximity): boolean {
   return proximity.count > 0
     && proximity.nearestDistanceKm != null
@@ -57,16 +94,10 @@ async function clearReviewState(): Promise<void> {
   await AsyncStorage.multiRemove([PENDING_REVIEW_KEY, KEEP_UNTIL_KEY]);
 }
 
-/** Called whenever a live watch/warning or nearby lightning becomes active again. */
 export async function clearAutomaticStormStopReview(): Promise<void> {
   await clearReviewState();
 }
 
-/**
- * Queue one decision request instead of silently ending an automatic storm log.
- * A user choosing Keep Recording suppresses repeat prompts for one hour unless a
- * real trigger becomes active again (which clears the suppression immediately).
- */
 export async function requestAutomaticStormStopReview(input: {
   eventId: number;
   reason: AutomaticStormStopReason;
@@ -127,12 +158,11 @@ export async function handleAutomaticStormStopAction(
 }
 
 /**
- * Decide whether an active automatic event is still justified. We fail safe:
- * stale/failed lightning data is represented by `lightningFresh=false` and can
- * never be used as an all-clear. The caller supplies the current NWS alert set.
+ * Evaluate stop eligibility using only fresh evidence. If NWS or lightning data
+ * is stale/failed we deliberately keep recording; missing data is never treated
+ * as proof that a storm has ended.
  */
 export async function evaluateAutomaticStormStop(input: {
-  alerts: NormalizedNwsAlert[];
   lightning: RecentLightningProximity;
   lightningFresh: boolean;
   nowMs: number;
@@ -143,16 +173,16 @@ export async function evaluateAutomaticStormStop(input: {
     return 'no_event';
   }
 
-  const nwsActive = hasActiveAutomaticNwsTrigger(input.alerts);
+  const nws = await readAutomaticNwsTriggerSnapshot(input.nowMs);
   const lightningActive = input.lightningFresh && isLightningStillRelevant(input.lightning);
 
-  if (nwsActive || lightningActive) {
+  if ((nws.fresh && nws.active) || lightningActive) {
     await clearReviewState();
     return 'active';
   }
 
-  // Never infer a storm has cleared from missing/stale lightning data.
-  if (!input.lightningFresh) return 'active';
+  // Both evidence streams must be fresh before asking to stop.
+  if (!nws.fresh || !input.lightningFresh) return 'active';
 
   const reason: AutomaticStormStopReason = event.triggerSource === 'LIGHTNING_PROXIMITY'
     ? 'lightning_clear'
