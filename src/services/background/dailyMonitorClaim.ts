@@ -1,9 +1,9 @@
 import { getDatabase } from '../../database/database';
+import { minimumAutomaticCadenceAgeMs } from './dailyMonitorCadence';
 
 const GATE_TABLE = 'daily_monitor_automatic_gate';
 const MAX_LEASE_MS = 2 * 60 * 1000;
 const MIN_LEASE_MS = 30 * 1000;
-const MAX_CADENCE_JITTER_MS = 3 * 60 * 1000;
 
 async function ensureAutomaticGateSchema(db: Awaited<ReturnType<typeof getDatabase>>): Promise<void> {
   await db.execAsync(`
@@ -31,30 +31,14 @@ async function ensureAutomaticGateSchema(db: Awaited<ReturnType<typeof getDataba
   );
 }
 
-function minimumSuccessAgeMs(intervalMs: number): number {
-  const safeIntervalMs = Math.max(60_000, intervalMs);
-  const jitterAllowanceMs = Math.min(
-    MAX_CADENCE_JITTER_MS,
-    Math.max(30_000, Math.floor(safeIntervalMs / 5)),
-  );
-  return Math.max(30_000, safeIntervalMs - jitterAllowanceMs);
-}
-
 /**
  * Cross-process automatic collection gate backed by SQLite transaction
  * serialization.
  *
  * A short lease prevents simultaneous triggers from starting duplicate work.
- * A recent successful collection also suppresses duplicate watchdog callbacks,
- * but the success guard intentionally allows a small cadence-jitter window.
- *
- * Why the jitter window matters: the native exact alarm is an elapsed cadence,
- * while a successful observation is committed after location/network/database
- * work completes. Requiring a full interval from completion time can reject the
- * next legitimate alarm simply because the prior cycle took 20-90 seconds to
- * finish. That was one of the mechanisms behind the observed 15/30-minute
- * alternation. The guard now blocks true duplicates while preserving the next
- * scheduled interval.
+ * A recent successful collection also suppresses duplicate watchdog callbacks.
+ * The cadence-age rule is shared with DailyMonitorCoordinator so the local and
+ * SQLite gates can never disagree about normal Headless JS startup jitter.
  */
 export async function claimAutomaticCollection(attemptAtMs: number, intervalMs: number): Promise<boolean> {
   const db = await getDatabase();
@@ -66,7 +50,7 @@ export async function claimAutomaticCollection(attemptAtMs: number, intervalMs: 
     Math.max(MIN_LEASE_MS, Math.floor(safeIntervalMs / 4)),
   );
   const leaseUntilMs = attemptAtMs + leaseMs;
-  const minSuccessAgeMs = minimumSuccessAgeMs(safeIntervalMs);
+  const minSuccessAgeMs = minimumAutomaticCadenceAgeMs(safeIntervalMs);
   let claimed = false;
 
   await db.withTransactionAsync(async () => {
