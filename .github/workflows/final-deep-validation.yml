@@ -1,0 +1,191 @@
+name: Final StormLog Deep Validation (No APK)
+
+on:
+  push:
+    branches:
+      - full-weather-accuracy-deepfix-20260909
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NPM_CONFIG_LEGACY_PEER_DEPS: "true"
+  EXPO_PUBLIC_STORMLOG_LIGHTNING_URL: "https://stormlog-lightning-proxy.idontrememberthename74.workers.dev"
+  EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN: ${{ secrets.STORMLOG_LIGHTNING_TOKEN }}
+
+jobs:
+  deep-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.16.0"
+          cache: npm
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: ""
+
+      - name: Install Android build components
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006" "cmake;3.22.1"
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: TypeScript validation
+        run: npm run typecheck
+
+      - name: Verify live NWS location and observation contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          UA='StormLog/1.0 (final-deep-validation)'
+          curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" 'https://api.weather.gov/points/40.039,-82.461' > /tmp/point.json
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const u=p?.properties?.observationStations;if(typeof u!=="string"||!u.startsWith("https://api.weather.gov/"))throw new Error("missing/invalid observationStations URL");fs.writeFileSync("/tmp/stations-url",u)' /tmp/point.json
+          curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" "$(cat /tmp/stations-url)" > /tmp/stations.json
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!Array.isArray(p.features)||!p.features.length)throw new Error("no NWS stations");const f=p.features[0];const id=f?.properties?.stationIdentifier||String(f?.id||"").split("/").pop();const c=f?.geometry?.coordinates;if(!id||!Array.isArray(c)||c.length<2)throw new Error("bad station feature");fs.writeFileSync("/tmp/station-id",id)' /tmp/stations.json
+          curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" "https://api.weather.gov/stations/$(cat /tmp/station-id)/observations/latest" > /tmp/obs.json
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8")).properties;if(!p?.timestamp)throw new Error("missing observation timestamp");for(const k of ["temperature","dewpoint","relativeHumidity","windSpeed","windGust","barometricPressure","seaLevelPressure","visibility","precipitationLastHour"]){if(p[k]&&!("unitCode" in p[k]))throw new Error(`${k} missing unitCode`)}' /tmp/obs.json
+
+      - name: Verify live NOAA MRMS rolling QPE contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://mapservices.weather.noaa.gov/raster/rest/services/obs/mrms_qpe/ImageServer/identify'
+          GEOM='%7B%22x%22%3A-82.461%2C%22y%22%3A40.039%2C%22spatialReference%22%3A%7B%22wkid%22%3A4326%7D%7D'
+          for H in 1 3 6 12 24; do
+            RULE="%7B%22rasterFunction%22%3A%22rft_${H}hr%22%7D"
+            F="/tmp/mrms-${H}.json"
+            curl -fsS "${BASE}?geometry=${GEOM}&geometryType=esriGeometryPoint&renderingRule=${RULE}&returnGeometry=false&returnCatalogItems=true&f=json" > "$F"
+            node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(p.error)throw new Error(JSON.stringify(p.error));const v=Number.parseFloat(String(p.value));if(!Number.isFinite(v)||v< -3)throw new Error(`invalid MRMS value ${p.value}`)' "$F"
+          done
+
+      - name: Verify live lightning proxy authentication and JSON contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN:-}"
+          F="$(mktemp --suffix=.json)"
+          C="$(curl -sS -o "$F" -w '%{http_code}' -H 'accept: application/json' -H "x-stormlog-client-token: ${EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN}" "${EXPO_PUBLIC_STORMLOG_LIGHTNING_URL}/events?latitude=40&longitude=-82.5&radiusKm=1&sinceMs=0&untilMs=0")"
+          test "$C" = "200"
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!Array.isArray(p.events))throw new Error("missing events array");if(!Number.isFinite(Number(p.fetchedAt)))throw new Error("missing fetchedAt")' "$F"
+
+      - name: Run weather provider runtime tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/weather-tests
+          npx tsc --ignoreConfig src/services/weather/__tests__/weatherProvider.runtime.test.ts src/services/weather/stormLogProvider.ts src/services/weather/nwsObservations.ts src/services/weather/nwsForecast.ts src/services/weather/openMeteo.ts src/services/weather/mrms.ts src/services/weather/conversions.ts src/services/network/nwsPoints.ts src/services/network/requestGuard.ts src/models/types.ts --rootDir src --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/weather-tests
+          node /tmp/weather-tests/services/weather/__tests__/weatherProvider.runtime.test.js
+
+      - name: Run Daily Monitor hardening runtime tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/dm-tests
+          npx tsc --ignoreConfig src/util/dateUtils.ts src/services/background/dailyMonitorCoordinator.ts src/services/background/__tests__/dailyMonitorHardening.runtime.test.ts --rootDir src --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/dm-tests
+          cat > /tmp/dm-tests/services/background/dailyMonitorClaim.js <<'JS'
+          exports.claimAutomaticCollection=async()=>true;
+          exports.markDailyMonitorCollectionSucceeded=async()=>undefined;
+          exports.releaseAutomaticCollectionLease=async()=>undefined;
+          JS
+          node /tmp/dm-tests/services/background/__tests__/dailyMonitorHardening.runtime.test.js
+
+      - name: Run Daily Monitor location runtime tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/location-tests
+          npx tsc --ignoreConfig src/services/background/dailyMonitorLocationResolver.ts src/services/background/__tests__/dailyMonitorLocationResolver.runtime.test.ts --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/location-tests
+          TEST="$(find /tmp/location-tests -name dailyMonitorLocationResolver.runtime.test.js -print -quit)"
+          test -n "$TEST"
+          node "$TEST"
+
+      - name: Run automatic storm lifecycle runtime tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/auto-tests
+          npx tsc --ignoreConfig src/services/stormLogs/automaticStormPolicy.ts src/services/stormLogs/__tests__/automaticStormPolicy.runtime.test.ts --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/auto-tests
+          TEST="$(find /tmp/auto-tests -name automaticStormPolicy.runtime.test.js -print -quit)"
+          test -n "$TEST"
+          node "$TEST"
+
+      - name: Run warning lifecycle integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/warning-tests
+          npx tsc --ignoreConfig src/database/__tests__/warningLifecycle.test.ts --rootDir src --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/warning-tests
+          node /tmp/warning-tests/database/__tests__/warningLifecycle.test.js
+
+      - name: Run lightning safety runtime tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/lightning-tests
+          npx tsc --ignoreConfig src/services/lightning/lightningSafety.ts src/services/lightning/lightningUsageGuard.ts src/services/lightning/providers/httpLightningAdapter.ts src/services/lightning/lightningProviderAdapter.ts src/services/lightning/__tests__/lightningSafety.runtime.test.ts src/services/lightning/__tests__/lightningUsageGuard.runtime.test.ts src/services/lightning/__tests__/httpLightningAdapter.runtime.test.ts server/lightning-proxy/src/handler.ts server/lightning-proxy/src/handler.runtime.test.ts --module commonjs --target ES2022 --moduleResolution node --types node --lib ES2022,DOM --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/lightning-tests
+          node /tmp/lightning-tests/src/services/lightning/__tests__/lightningSafety.runtime.test.js
+          node /tmp/lightning-tests/src/services/lightning/__tests__/lightningUsageGuard.runtime.test.js
+          node /tmp/lightning-tests/src/services/lightning/__tests__/httpLightningAdapter.runtime.test.js
+          node /tmp/lightning-tests/server/lightning-proxy/src/handler.runtime.test.js
+
+      - name: Verify weather/data semantics are not hard-coded to KVTA/KZZV
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -E "(PRIMARY_STATION|FALLBACK_STATION).*(KVTA|KZZV)" -n src/services/weather/nwsObservations.ts; then
+            echo '::error::Current-observation station selection is still hard-coded'
+            exit 1
+          fi
+          grep -Fq 'observationStations' src/services/weather/nwsObservations.ts
+          grep -Fq 'MRMS' src/services/weather/stormLogProvider.ts
+
+      - name: Generate Android project
+        env:
+          CI: "1"
+          EXPO_NO_TELEMETRY: "1"
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Verify native scheduler/autostart wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx expo-modules-autolinking resolve --platform android > /tmp/autolinking.json
+          grep -qi 'storm-log-scheduler' /tmp/autolinking.json
+          M=android/app/src/main/AndroidManifest.xml
+          grep -Fq 'StormLogHeadlessTaskService' "$M"
+          grep -Fq 'FOREGROUND_SERVICE_LOCATION' "$M"
+          grep -Fq 'FOREGROUND_SERVICE_DATA_SYNC' "$M"
+          grep -Fq 'ACCESS_BACKGROUND_LOCATION' "$M"
+          grep -Fq 'SCHEDULE_EXACT_ALARM' "$M"
+          grep -Fq 'StormLogSchedulerAlarmReceiver' "$M"
+          grep -Fq 'StormLogSchedulerBootReceiver' "$M"
+          grep -Fq 'BOOT_COMPLETED' "$M"
+          grep -Fq 'MY_PACKAGE_REPLACED' "$M"
+
+      - name: Compile native Android code without assembling APK
+        working-directory: android
+        run: ./gradlew :app:compileDebugKotlin --stacktrace
+
+      - name: Confirm validation did not assemble APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          if find . -type f -name '*.apk' -print -quit | grep -q .; then
+            echo '::error::Validation unexpectedly assembled an APK'
+            exit 1
+          fi
+          echo 'Final deep validation passed; APK build may proceed.'
