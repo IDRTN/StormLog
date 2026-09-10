@@ -73,17 +73,19 @@ jobs:
           GEOM='%7B%22x%22%3A-82.461%2C%22y%22%3A40.039%2C%22spatialReference%22%3A%7B%22wkid%22%3A4326%7D%7D'
           for HOURS in 1 3 6 12 24; do
             RULE="%7B%22rasterFunction%22%3A%22rft_${HOURS}hr%22%7D"
-            curl -fsS "${BASE}?geometry=${GEOM}&geometryType=esriGeometryPoint&renderingRule=${RULE}&returnGeometry=false&returnCatalogItems=true&f=json" > "/tmp/mrms-${HOURS}.json"
-            node - "$HOURS" <<'NODE'
-            const fs=require('fs');
-            const h=process.argv[2];
-            const p=JSON.parse(fs.readFileSync(`/tmp/mrms-${h}.json`,'utf8'));
-            if(p.error) throw new Error(`MRMS ${h}h error: ${JSON.stringify(p.error)}`);
-            const v=Number.parseFloat(String(p.value));
-            if(!Number.isFinite(v)) throw new Error(`MRMS ${h}h returned nonnumeric value: ${String(p.value)}`);
-            if(v < -3) throw new Error(`MRMS ${h}h returned invalid sentinel: ${v}`);
-            console.log(`MRMS ${h}h value=${v}`);
-            NODE
+            FILE="/tmp/mrms-${HOURS}.json"
+            curl -fsS "${BASE}?geometry=${GEOM}&geometryType=esriGeometryPoint&renderingRule=${RULE}&returnGeometry=false&returnCatalogItems=true&f=json" > "$FILE"
+            node -e '
+              const fs=require("fs");
+              const file=process.argv[1];
+              const h=process.argv[2];
+              const p=JSON.parse(fs.readFileSync(file,"utf8"));
+              if(p.error) throw new Error(`MRMS ${h}h error: ${JSON.stringify(p.error)}`);
+              const v=Number.parseFloat(String(p.value));
+              if(!Number.isFinite(v)) throw new Error(`MRMS ${h}h returned nonnumeric value: ${String(p.value)}`);
+              if(v < -3) throw new Error(`MRMS ${h}h returned invalid sentinel: ${v}`);
+              console.log(`MRMS ${h}h value=${v}`);
+            ' "$FILE" "$HOURS"
           done
 
       - name: Compile and run weather provider runtime tests
