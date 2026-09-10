@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   DailyMonitorCoordinator,
   type DailyCollectionResult,
@@ -172,6 +174,83 @@ void (async () => {
     const results = await Promise.all([first, second]);
     assertEqual(results[0].outcome, 'completed', 'owner completes');
     assertEqual(results[1].outcome, 'shared', 'racing trigger shares owner result');
+  });
+
+  await test('normal Headless JS startup jitter does not burn a 15-minute slot', async () => {
+    const previousAttempt = 1_000_000;
+    const now = previousAttempt + (13 * 60_000) + 30_000;
+    const storage = makeStorage({
+      daily_monitor_enabled: 'true',
+      daily_monitor_interval: '15',
+      daily_monitor_last_automatic_attempt: String(previousAttempt),
+    });
+    let runCount = 0;
+    let claimCount = 0;
+
+    const deps: DailyMonitorCoordinatorDependencies = {
+      now: () => now,
+      runCollection: async () => { runCount += 1; return { success: true }; },
+      storage: storage.adapter,
+      scheduler: { setTimeout: () => 1, clearTimeout: () => undefined },
+      background: {
+        isRegistered: async () => true,
+        register: async () => undefined,
+        unregister: async () => undefined,
+      },
+      claimAutomatic: async () => { claimCount += 1; return true; },
+    };
+
+    const coordinator = new DailyMonitorCoordinator(deps);
+    await coordinator.initialize();
+    const result = await coordinator.collectAutomatic();
+
+    assertEqual(result.success, true, 'jittered scheduled callback is admitted');
+    assertEqual(runCount, 1, 'jittered scheduled callback reaches collection pipeline');
+    assertEqual(claimCount, 1, 'SQLite admission gate still arbitrates cross-process ownership');
+  });
+
+  await test('true early duplicate remains blocked by the local cadence gate', async () => {
+    const previousAttempt = 1_000_000;
+    const now = previousAttempt + 5 * 60_000;
+    const storage = makeStorage({
+      daily_monitor_enabled: 'true',
+      daily_monitor_interval: '15',
+      daily_monitor_last_automatic_attempt: String(previousAttempt),
+    });
+    let runCount = 0;
+    let claimCount = 0;
+
+    const deps: DailyMonitorCoordinatorDependencies = {
+      now: () => now,
+      runCollection: async () => { runCount += 1; return { success: true }; },
+      storage: storage.adapter,
+      scheduler: { setTimeout: () => 1, clearTimeout: () => undefined },
+      background: {
+        isRegistered: async () => true,
+        register: async () => undefined,
+        unregister: async () => undefined,
+      },
+      claimAutomatic: async () => { claimCount += 1; return true; },
+    };
+
+    const coordinator = new DailyMonitorCoordinator(deps);
+    await coordinator.initialize();
+    const result = await coordinator.collectAutomatic();
+
+    assertEqual(result.outcome, 'skipped_recent_automatic', 'true early duplicate is skipped');
+    assertEqual(runCount, 0, 'duplicate never reaches collection pipeline');
+    assertEqual(claimCount, 0, 'duplicate is rejected before cross-process DB work');
+  });
+
+  await test('Daily Monitor persistence bridges weather into automatic storm events', async () => {
+    const writerPath = path.join(process.cwd(), 'src/database/dailyWeatherWriter.ts');
+    const source = fs.readFileSync(writerPath, 'utf8');
+
+    assert(source.includes('AFTER INSERT ON daily_weather'), 'daily-weather insert bridge trigger is present');
+    assert(source.includes('AFTER INSERT ON storm_events'), 'automatic-event seed trigger is present');
+    assert(source.includes('WHERE endTime IS NULL AND is_automatic = 1'), 'bridge only targets active automatic events');
+    assert(source.includes('INSERT INTO weather_observations'), 'bridge writes storm-event weather observations');
+    assert(source.includes('trg_auto_storm_seed_daily_weather_v1'), 'new automatic event is seeded from recent Daily Monitor data');
   });
 
   console.log('Daily Monitor hardening runtime tests passed.');
