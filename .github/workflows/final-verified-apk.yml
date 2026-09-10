@@ -1,0 +1,187 @@
+name: Final Verified StormLog APK
+
+on:
+  push:
+    branches:
+      - full-weather-accuracy-deepfix-20260909
+  workflow_dispatch:
+
+concurrency:
+  group: final-verified-stormlog-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NPM_CONFIG_LEGACY_PEER_DEPS: "true"
+  EXPO_PUBLIC_STORMLOG_LIGHTNING_URL: "https://stormlog-lightning-proxy.idontrememberthename74.workers.dev"
+  EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN: ${{ secrets.STORMLOG_LIGHTNING_TOKEN }}
+
+jobs:
+  validate-build-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.16.0"
+          cache: npm
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: ""
+
+      - name: Install Android build components
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006" "cmake;3.22.1"
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: TypeScript validation
+        run: npm run typecheck
+
+      - name: Reverify live NWS, MRMS, and lightning data contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          UA='StormLog/1.0 (verified-apk-build)'
+          curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" 'https://api.weather.gov/points/40.039,-82.461' > /tmp/point.json
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const u=p?.properties?.observationStations;if(typeof u!=="string"||!u.startsWith("https://api.weather.gov/"))throw new Error("invalid NWS observationStations URL");fs.writeFileSync("/tmp/stations-url",u)' /tmp/point.json
+          curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" "$(cat /tmp/stations-url)" > /tmp/stations.json
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!Array.isArray(p.features)||!p.features.length)throw new Error("NWS station list empty");const f=p.features[0];const id=f?.properties?.stationIdentifier||String(f?.id||"").split("/").pop();if(!id)throw new Error("missing station id");fs.writeFileSync("/tmp/station-id",id)' /tmp/stations.json
+          curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" "https://api.weather.gov/stations/$(cat /tmp/station-id)/observations/latest" > /tmp/obs.json
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8")).properties;if(!p?.timestamp)throw new Error("missing NWS observation timestamp")' /tmp/obs.json
+
+          BASE='https://mapservices.weather.noaa.gov/raster/rest/services/obs/mrms_qpe/ImageServer/identify'
+          GEOM='%7B%22x%22%3A-82.461%2C%22y%22%3A40.039%2C%22spatialReference%22%3A%7B%22wkid%22%3A4326%7D%7D'
+          for H in 1 3 6 12 24; do
+            RULE="%7B%22rasterFunction%22%3A%22rft_${H}hr%22%7D"
+            F="/tmp/mrms-${H}.json"
+            curl -fsS "${BASE}?geometry=${GEOM}&geometryType=esriGeometryPoint&renderingRule=${RULE}&returnGeometry=false&returnCatalogItems=true&f=json" > "$F"
+            node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const v=Number.parseFloat(String(p.value));if(p.error||!Number.isFinite(v)||v< -3)throw new Error("invalid MRMS response")' "$F"
+          done
+
+          test -n "${EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN:-}"
+          LF="$(mktemp --suffix=.json)"
+          LC="$(curl -sS -o "$LF" -w '%{http_code}' -H 'accept: application/json' -H "x-stormlog-client-token: ${EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN}" "${EXPO_PUBLIC_STORMLOG_LIGHTNING_URL}/events?latitude=40&longitude=-82.5&radiusKm=1&sinceMs=0&untilMs=0")"
+          test "$LC" = "200"
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!Array.isArray(p.events)||!Number.isFinite(Number(p.fetchedAt)))throw new Error("invalid lightning proxy response")' "$LF"
+
+      - name: Re-run critical weather, monitor, storm, warning, and lightning tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/weather-tests
+          npx tsc --ignoreConfig src/services/weather/__tests__/weatherProvider.runtime.test.ts src/services/weather/stormLogProvider.ts src/services/weather/nwsObservations.ts src/services/weather/nwsForecast.ts src/services/weather/openMeteo.ts src/services/weather/mrms.ts src/services/weather/conversions.ts src/services/network/nwsPoints.ts src/services/network/requestGuard.ts src/models/types.ts --rootDir src --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/weather-tests
+          node /tmp/weather-tests/services/weather/__tests__/weatherProvider.runtime.test.js
+
+          rm -rf /tmp/dm-tests
+          npx tsc --ignoreConfig src/util/dateUtils.ts src/services/background/dailyMonitorCoordinator.ts src/services/background/__tests__/dailyMonitorHardening.runtime.test.ts --rootDir src --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/dm-tests
+          cat > /tmp/dm-tests/services/background/dailyMonitorClaim.js <<'JS'
+          exports.claimAutomaticCollection=async()=>true;
+          exports.markDailyMonitorCollectionSucceeded=async()=>undefined;
+          exports.releaseAutomaticCollectionLease=async()=>undefined;
+          JS
+          node /tmp/dm-tests/services/background/__tests__/dailyMonitorHardening.runtime.test.js
+
+          rm -rf /tmp/location-tests
+          npx tsc --ignoreConfig src/services/background/dailyMonitorLocationResolver.ts src/services/background/__tests__/dailyMonitorLocationResolver.runtime.test.ts --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/location-tests
+          LT="$(find /tmp/location-tests -name dailyMonitorLocationResolver.runtime.test.js -print -quit)"
+          test -n "$LT" && node "$LT"
+
+          rm -rf /tmp/auto-tests
+          npx tsc --ignoreConfig src/services/stormLogs/automaticStormPolicy.ts src/services/stormLogs/__tests__/automaticStormPolicy.runtime.test.ts --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/auto-tests
+          AT="$(find /tmp/auto-tests -name automaticStormPolicy.runtime.test.js -print -quit)"
+          test -n "$AT" && node "$AT"
+
+          rm -rf /tmp/warning-tests
+          npx tsc --ignoreConfig src/database/__tests__/warningLifecycle.test.ts --rootDir src --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/warning-tests
+          node /tmp/warning-tests/database/__tests__/warningLifecycle.test.js
+
+          rm -rf /tmp/lightning-tests
+          npx tsc --ignoreConfig src/services/lightning/lightningSafety.ts src/services/lightning/lightningUsageGuard.ts src/services/lightning/providers/httpLightningAdapter.ts src/services/lightning/lightningProviderAdapter.ts src/services/lightning/__tests__/lightningSafety.runtime.test.ts src/services/lightning/__tests__/lightningUsageGuard.runtime.test.ts src/services/lightning/__tests__/httpLightningAdapter.runtime.test.ts server/lightning-proxy/src/handler.ts server/lightning-proxy/src/handler.runtime.test.ts --module commonjs --target ES2022 --moduleResolution node --types node --lib ES2022,DOM --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/lightning-tests
+          node /tmp/lightning-tests/src/services/lightning/__tests__/lightningSafety.runtime.test.js
+          node /tmp/lightning-tests/src/services/lightning/__tests__/lightningUsageGuard.runtime.test.js
+          node /tmp/lightning-tests/src/services/lightning/__tests__/httpLightningAdapter.runtime.test.js
+          node /tmp/lightning-tests/server/lightning-proxy/src/handler.runtime.test.js
+
+      - name: Generate Android project
+        env:
+          CI: "1"
+          EXPO_NO_TELEMETRY: "1"
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Verify generated scheduler and permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx expo-modules-autolinking resolve --platform android > /tmp/autolinking.json
+          grep -qi 'storm-log-scheduler' /tmp/autolinking.json
+          M=android/app/src/main/AndroidManifest.xml
+          for NEEDLE in StormLogHeadlessTaskService StormLogSchedulerAlarmReceiver StormLogSchedulerBootReceiver SCHEDULE_EXACT_ALARM ACCESS_BACKGROUND_LOCATION FOREGROUND_SERVICE_LOCATION FOREGROUND_SERVICE_DATA_SYNC BOOT_COMPLETED MY_PACKAGE_REPLACED; do
+            grep -Fq "$NEEDLE" "$M" || { echo "Missing manifest wiring: $NEEDLE"; exit 1; }
+          done
+          if grep -Fq 'StormLogSchedulerService' "$M"; then
+            echo 'Obsolete scheduler service is still registered'
+            exit 1
+          fi
+
+      - name: Compile native Android code before assembly
+        working-directory: android
+        run: ./gradlew :app:compileDebugKotlin --no-daemon --stacktrace
+
+      - name: Enable embedded JS bundle for standalone debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          G=android/app/build.gradle
+          test -f "$G"
+          T="$(mktemp)"
+          awk 'BEGIN{i=0} !i && $0 ~ /^[[:space:]]*react[[:space:]]*\{[[:space:]]*$/ {print; print "    debuggableVariants = []"; i=1; next} {print} END{if(!i)exit 1}' "$G" > "$T"
+          mv "$T" "$G"
+          test "$(grep -cF 'debuggableVariants = []' "$G")" -eq 1
+
+      - name: Assemble standalone debug APK
+        working-directory: android
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
+
+      - name: Verify packaged APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK='android/app/build/outputs/apk/debug/app-debug.apk'
+          test -s "$APK"
+          sha256sum "$APK" | tee /tmp/stormlog-apk.sha256
+          if command -v apkanalyzer >/dev/null 2>&1; then
+            apkanalyzer manifest print "$APK" > /tmp/packaged-manifest.xml
+            for NEEDLE in StormLogHeadlessTaskService StormLogSchedulerAlarmReceiver StormLogSchedulerBootReceiver SCHEDULE_EXACT_ALARM ACCESS_BACKGROUND_LOCATION FOREGROUND_SERVICE_LOCATION FOREGROUND_SERVICE_DATA_SYNC; do
+              grep -Fq "$NEEDLE" /tmp/packaged-manifest.xml || { echo "APK missing: $NEEDLE"; exit 1; }
+            done
+            if grep -Fq 'StormLogSchedulerService' /tmp/packaged-manifest.xml; then
+              echo 'APK contains obsolete scheduler service'
+              exit 1
+            fi
+          fi
+          cp "$APK" StormLog-full-weather-accuracy-verified.apk
+          cp /tmp/stormlog-apk.sha256 StormLog-full-weather-accuracy-verified.sha256.txt
+
+      - name: Upload verified APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StormLog-full-weather-accuracy-verified
+          path: |
+            StormLog-full-weather-accuracy-verified.apk
+            StormLog-full-weather-accuracy-verified.sha256.txt
+          if-no-files-found: error
+          retention-days: 14
