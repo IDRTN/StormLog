@@ -39,7 +39,16 @@ export interface DailyWeatherRecord {
   windDirection: number | null;
   windGust: number | null;
   dewPoint: number | null;
+  /** True local-day accumulation only; never a modeled proxy. */
   precipitation: number | null;
+  precipitation1h?: number | null;
+  precipitation3h?: number | null;
+  precipitation6h?: number | null;
+  precipitation12h?: number | null;
+  precipitation24h?: number | null;
+  stationPrecipitation1h?: number | null;
+  precipitationDataKind?: string | null;
+  precipitationSourceDistanceKm?: number | null;
   weatherCondition: string | null;
   nwsAlerts: string | null;
   provider?: string | null;
@@ -62,7 +71,11 @@ export interface DailySummary {
   avgHumidity: number | null;
   minPressure: number | null;
   maxPressure: number | null;
+  /** Exact local-day accumulation when available. */
   totalPrecip: number | null;
+  maxRadarPrecip1h: number | null;
+  maxRadarPrecip3h: number | null;
+  maxRadarPrecip24h: number | null;
   observationCount: number;
   alertCount: number;
   alertTypes: string[];
@@ -80,9 +93,7 @@ export interface WeatherProvenance {
   gridId?: string;
   latitude?: number;
   longitude?: number;
-  /** Distance from the phone/sample point to a point-observation station. */
   distanceKm?: number;
-  /** Whether this value came from a sensor observation, radar estimate, or model grid. */
   dataKind?: WeatherDataKind;
   observationTime?: number;
   retrievedTime: number;
@@ -106,28 +117,17 @@ export interface WeatherData {
   windDirection: number | null;
   windGust: number | null;
   dewPoint: number | null;
-  /** Best current/one-hour precipitation amount for the active source. */
   precipitation: number | null;
-  /**
-   * Accumulation from local midnight to now. This field must only be populated
-   * when the upstream product actually represents that period. A forecast-grid
-   * accumulation must never be presented as an observed daily total.
-   */
   observedDailyPrecipitation: number | null;
-  /** NOAA MRMS radar-only rolling QPE amounts at the phone coordinates. */
   radarPrecipitation1h?: number | null;
   radarPrecipitation3h?: number | null;
   radarPrecipitation6h?: number | null;
   radarPrecipitation12h?: number | null;
   radarPrecipitation24h?: number | null;
-  /** Nearby physical observation-station precipitation for the last hour, when reported. */
   stationPrecipitation1h?: number | null;
   precipitationRateInchesPerHour?: number | null;
-  /** True only when the daily-accumulation period is complete/trustworthy. */
   precipitationIsComplete?: boolean;
-  /** Weather-location UTC offset at observation time (seconds) */
   utcOffsetSeconds?: number;
-  /** Weather-location timezone identifier from API (e.g., 'America/New_York') */
   weatherTimezone?: string;
   weatherCondition: string | null;
   visibility?: number | null;
@@ -146,15 +146,6 @@ export interface WeatherData {
   observedDailyPrecipitationPartialHours?: number;
   currentPartialHourPrecipitation?: number | null;
   referenceTimeMs?: number;
-  /**
-   * Convective Available Potential Energy (CAPE) in J/kg.
-   * Higher values indicate greater atmospheric instability and
-   * severe weather potential. Typically:
-   *   <500: minimal instability
-   *   500-1000: marginal
-   *   1000-2500: moderate
-   *   2500+: high/significant
-   */
   cape: number | null;
 }
 
