@@ -1,4 +1,4 @@
-import { Level2Radar } from 'nexrad-level-2-data';
+import Level2Radar from 'nexrad-level-2-data';
 
 const site = (process.env.RADAR_SITE || 'KILN').toUpperCase().replace(/^([^K])/, 'K$1');
 const base = `https://nomads.ncep.noaa.gov/pub/data/nccf/radar/nexrad_level2/${site}`;
@@ -45,7 +45,7 @@ if (!response.ok) throw new Error(`NOMADS Level II ${name} HTTP ${response.statu
 const bytes = new Uint8Array(await response.arrayBuffer());
 if (bytes.byteLength < 100000) throw new Error(`Level II volume unexpectedly small: ${bytes.byteLength} bytes`);
 
-const radar = await new Level2Radar(bytes, { logger: false });
+const radar = new Level2Radar(bytes, { logger: false });
 const elevations = radar.listElevations().filter(v => Number.isFinite(v));
 if (!elevations.length) throw new Error('Decoded Level II volume has no elevations');
 
