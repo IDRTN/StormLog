@@ -33,10 +33,19 @@ jobs:
           set -euo pipefail
           UA='StormLog/1.0 (weather-integrity-validation)'
           curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" \
-            'https://api.weather.gov/points/40.039,-82.461/stations' > /tmp/stations.json
+            'https://api.weather.gov/points/40.039,-82.461' > /tmp/point.json
+          node <<'NODE'
+          const p=require('/tmp/point.json');
+          const url=p?.properties?.observationStations;
+          if(typeof url!=='string' || !url.startsWith('https://api.weather.gov/')) throw new Error('NWS point response missing observationStations URL');
+          console.log(`Observation stations URL: ${url}`);
+          require('fs').writeFileSync('/tmp/stations-url',url);
+          NODE
+          STATIONS_URL="$(cat /tmp/stations-url)"
+          curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" "$STATIONS_URL" > /tmp/stations.json
           node <<'NODE'
           const p=require('/tmp/stations.json');
-          if(!Array.isArray(p.features)||p.features.length===0) throw new Error('NWS point station discovery returned no features');
+          if(!Array.isArray(p.features)||p.features.length===0) throw new Error('NWS station collection returned no features');
           const first=p.features[0];
           const id=first?.properties?.stationIdentifier || String(first?.id||'').split('/').pop();
           const c=first?.geometry?.coordinates;
@@ -50,7 +59,7 @@ jobs:
           node <<'NODE'
           const p=require('/tmp/observation.json').properties;
           if(!p?.timestamp) throw new Error('NWS observation missing timestamp');
-          for(const key of ['temperature','relativeHumidity','windSpeed','windGust','seaLevelPressure','barometricPressure','altimeter']) {
+          for(const key of ['temperature','relativeHumidity','windSpeed','windGust','seaLevelPressure','barometricPressure','altimeter','precipitationLastHour']) {
             if(p[key] && !('unitCode' in p[key])) throw new Error(`${key} missing unitCode`);
           }
           console.log(`NWS observation time: ${p.timestamp}`);
