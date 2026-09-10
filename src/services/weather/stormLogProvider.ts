@@ -20,6 +20,8 @@ export const WEATHER_FEATURE_FLAGS = {
   MRMS_PRECIPITATION: true,
 } as const satisfies WeatherFeatureFlags;
 
+// Optional custom service can provide exact hourly MRMS buckets. When absent,
+// mrms.ts now uses the public NOAA/NWS MRMS QPE ImageServer directly.
 const MRMS_SERVICE_URL = process.env.EXPO_PUBLIC_STORMLOG_MRMS_URL;
 
 type ObservationFetchJson = FetchJson & ForecastFetchJson;
@@ -28,6 +30,31 @@ export interface StormLogProviderDependencies {
   mrmsProvider?: MrmsProvider;
   fetchJson?: ObservationFetchJson;
   features?: Partial<WeatherFeatureFlags>;
+}
+
+function markOpenMeteoModeled(data: WeatherData): WeatherData {
+  const source = data.precipitationSource
+    ? { ...data.precipitationSource, dataKind: 'modeled' as const }
+    : undefined;
+  const currentSource = data.currentConditionsSource
+    ? { ...data.currentConditionsSource, dataKind: 'modeled' as const }
+    : source;
+  const pressureSource = data.pressureSource
+    ? { ...data.pressureSource, dataKind: 'modeled' as const }
+    : undefined;
+
+  return {
+    ...data,
+    // Open-Meteo hourly forecast-grid precipitation is useful as a fallback,
+    // but it is NOT an observed local-day accumulation. Never expose it as one.
+    observedDailyPrecipitation: null,
+    observedDailyPrecipitationIsComplete: undefined,
+    observedDailyPrecipitationPartialHours: undefined,
+    precipitationIsComplete: false,
+    precipitationSource: source,
+    currentConditionsSource: currentSource,
+    pressureSource,
+  };
 }
 
 function mergeWeatherData(
@@ -51,6 +78,8 @@ function mergeWeatherData(
     cloudLayers: useCurrentConditions ? nws.cloudLayers ?? [] : undefined,
     currentConditionsSource: useCurrentConditions ? nws.currentConditionsSource : openMeteo.currentConditionsSource,
     pressureSource: usePressure ? nws.pressureSource ?? openMeteo.pressureSource : openMeteo.pressureSource,
+    stationPrecipitation1h: nws.stationPrecipitation1h ?? null,
+    stationPrecipitationSource: nws.stationPrecipitationSource,
     valueSources: [...(nws.valueSources ?? []), ...(openMeteo.valueSources ?? [])],
   };
 
@@ -67,13 +96,8 @@ function mergeWeatherData(
 
 function hasUsableCurrentConditions(data: WeatherData | undefined): data is WeatherData {
   if (!data) return false;
-  return [
-    data.temperature,
-    data.humidity,
-    data.pressure,
-    data.windSpeed,
-    data.dewPoint,
-  ].some((value) => typeof value === 'number' && Number.isFinite(value));
+  return [data.temperature, data.humidity, data.pressure, data.windSpeed, data.dewPoint]
+    .some((value) => typeof value === 'number' && Number.isFinite(value));
 }
 
 function providerError(error: unknown): string {
@@ -102,8 +126,6 @@ export function createStormLogWeatherProvider(
           cacheTtlMs: 60 * 1000,
           cacheIf: (result) => result.success,
           execute: async () => {
-            // Provider isolation is intentional. A malformed or unavailable response
-            // from one upstream source must not erase valid data from another source.
             const openMeteoPromise = fetchOpenMeteoSnapshot(
               latitude,
               longitude,
@@ -114,8 +136,11 @@ export function createStormLogWeatherProvider(
               (error) => ({ success: false as const, error }),
             );
 
+            // Current observations must follow the PHONE location. The NWS helper
+            // discovers nearby stations for this point and walks outward until it
+            // finds a fresh usable observation.
             const nwsPromise = features.NWS_CURRENT_CONDITIONS || features.NWS_PRESSURE
-              ? fetchBestNwsObservation(referenceTimeMs, fetchJson)
+              ? fetchBestNwsObservation(latitude, longitude, referenceTimeMs, fetchJson)
               : Promise.resolve({ success: false as const, error: 'disabled' });
 
             const forecastPromise = features.NWS_FORECAST
@@ -132,7 +157,7 @@ export function createStormLogWeatherProvider(
             let openMeteoAvailable = false;
 
             if (openMeteoResult.success) {
-              weatherData = openMeteoResult.value.data;
+              weatherData = markOpenMeteoModeled(openMeteoResult.value.data);
               openMeteoAvailable = true;
             }
 
@@ -171,8 +196,6 @@ export function createStormLogWeatherProvider(
               weatherData.forecastSource = forecastResult.source;
             }
 
-            // MRMS daily accumulation depends on the weather-location UTC offset.
-            // If Open-Meteo is unavailable, skip MRMS instead of guessing an offset.
             if (features.MRMS_PRECIPITATION && openMeteoAvailable) {
               try {
                 const utcOffsetSeconds = weatherData.utcOffsetSeconds ?? 0;
@@ -183,28 +206,53 @@ export function createStormLogWeatherProvider(
                   utcOffsetSeconds,
                 );
 
-                if (mrmsResult) {
+                if (mrmsResult && mrmsResult.source.freshness !== 'stale') {
                   weatherData.precipitation = mrmsResult.currentOneHourInches;
+                  weatherData.radarPrecipitation1h = mrmsResult.radarPrecipitation1hInches ?? mrmsResult.currentOneHourInches;
+                  weatherData.radarPrecipitation3h = mrmsResult.radarPrecipitation3hInches ?? null;
+                  weatherData.radarPrecipitation6h = mrmsResult.radarPrecipitation6hInches ?? null;
+                  weatherData.radarPrecipitation12h = mrmsResult.radarPrecipitation12hInches ?? null;
+                  weatherData.radarPrecipitation24h = mrmsResult.radarPrecipitation24hInches ?? null;
                   weatherData.precipitationRateInchesPerHour = mrmsResult.precipitationRateInchesPerHour;
-                  weatherData.observedDailyPrecipitation = mrmsResult.observedDailyPrecipitationInches;
-                  weatherData.observedDailyPrecipitationIsComplete = mrmsResult.observedDailyIsComplete;
-                  weatherData.precipitationIsComplete = mrmsResult.observedDailyIsComplete;
                   weatherData.currentPartialHourPrecipitation = mrmsResult.currentPartialHourInches;
                   weatherData.precipitationSource = mrmsResult.source;
+
+                  // Only a backend that supplies complete, non-overlapping hourly
+                  // MRMS buckets is allowed to populate a true local-day total.
+                  if (mrmsResult.observedDailyIsComplete && mrmsResult.observedDailyPrecipitationInches != null) {
+                    weatherData.observedDailyPrecipitation = mrmsResult.observedDailyPrecipitationInches;
+                    weatherData.observedDailyPrecipitationIsComplete = true;
+                    weatherData.precipitationIsComplete = true;
+                  } else {
+                    weatherData.observedDailyPrecipitation = null;
+                    weatherData.observedDailyPrecipitationIsComplete = false;
+                    weatherData.precipitationIsComplete = false;
+                  }
+
                   if (mrmsResult.precipitationRateInchesPerHour != null) {
                     weatherData.rainRateSource = mrmsResult.source;
                   }
                 }
               } catch (error) {
-                console.warn('[WEATHER] MRMS unavailable; preserving other weather data:', providerError(error));
+                console.warn('[WEATHER] MRMS unavailable; preserving lower-tier precipitation data:', providerError(error));
               }
+            }
+
+            // If MRMS is unavailable, prefer an actual nearby station's 1-hour
+            // gauge report to the model grid only when the station is reasonably
+            // close. The provenance keeps that distance visible to the UI.
+            if (weatherData.precipitationSource?.provider !== 'NOAA_MRMS'
+              && weatherData.stationPrecipitation1h != null
+              && (weatherData.stationPrecipitationSource?.distanceKm ?? Number.POSITIVE_INFINITY) <= 25) {
+              weatherData.precipitation = weatherData.stationPrecipitation1h;
+              weatherData.precipitationSource = weatherData.stationPrecipitationSource;
             }
 
             if (!openMeteoAvailable) {
               console.warn('[WEATHER] Open-Meteo unavailable; using degraded NWS-only weather data');
             }
             if (!nwsResult.success) {
-              console.warn('[WEATHER] NWS observation unavailable; using Open-Meteo current conditions');
+              console.warn('[WEATHER] NWS observation unavailable; using modeled Open-Meteo current conditions');
             }
             if (!forecastResult.success) {
               console.warn('[WEATHER] NWS forecast unavailable; current conditions remain usable');
