@@ -1,0 +1,12 @@
+{
+  "name": "stormlog-radar-analysis",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "nexrad-level-3-data": "1.0.1"
+  },
+  "scripts": {
+    "probe": "node src/live-probe.mjs"
+  }
+}
