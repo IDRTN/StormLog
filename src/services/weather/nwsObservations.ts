@@ -75,7 +75,7 @@ function distanceMiles(container: any): number | null {
   const unit = unitCode(container);
   if (unit.includes('mi') && !unit.includes('m_s')) return value;
   if (unit.includes('km')) return value * 0.6213711922;
-  if (unit.endsWith(':m') || unit.includes('wmoUnit:m') || !unit) return value * 0.0006213711922;
+  if (unit.endsWith(':m') || unit.includes('wmounit:m') || !unit) return value * 0.0006213711922;
   return null;
 }
 
@@ -85,7 +85,7 @@ function precipitationInches(container: any): number | null {
   const unit = unitCode(container);
   if (unit.includes('in')) return value;
   if (unit.includes('mm')) return value / 25.4;
-  if (unit.endsWith(':m') || unit.includes('wmoUnit:m') || !unit) return value * 39.3700787402;
+  if (unit.endsWith(':m') || unit.includes('wmounit:m') || !unit) return value * 39.3700787402;
   return null;
 }
 
@@ -117,151 +117,70 @@ function parseStationFeature(feature: any, observerLat: number, observerLon: num
   const coords = feature?.geometry?.coordinates;
   const longitude = Array.isArray(coords) && typeof coords[0] === 'number' ? coords[0] : null;
   const latitude = Array.isArray(coords) && typeof coords[1] === 'number' ? coords[1] : null;
-  const stationId = String(
-    properties.stationIdentifier
-      ?? String(feature?.id ?? '').split('/').filter(Boolean).pop()
-      ?? '',
-  ).trim();
+  const stationId = String(properties.stationIdentifier ?? String(feature?.id ?? '').split('/').filter(Boolean).pop() ?? '').trim();
   if (!stationId || latitude == null || longitude == null) return null;
-  return {
-    stationId,
-    name: String(properties.name ?? stationId),
-    latitude,
-    longitude,
-    distanceKm: haversineKm(observerLat, observerLon, latitude, longitude),
-  };
+  return { stationId, name: String(properties.name ?? stationId), latitude, longitude, distanceKm: haversineKm(observerLat, observerLon, latitude, longitude) };
 }
 
-async function fetchNearbyStations(
-  latitude: number,
-  longitude: number,
-  fetchJson: FetchJson,
-): Promise<NwsStationCandidate[]> {
+async function fetchNearbyStations(latitude: number, longitude: number, fetchJson: FetchJson): Promise<NwsStationCandidate[]> {
   const key = `${latitude.toFixed(3)},${longitude.toFixed(3)}`;
   return guardedRequest<NwsStationCandidate[]>({
     service: 'NWS station discovery',
     key,
     cacheTtlMs: 10 * 60 * 1000,
     execute: async () => {
-      const endpoint = `https://api.weather.gov/points/${latitude},${longitude}/stations`;
-      const response = await fetchJson(endpoint, {
-        headers: {
-          Accept: 'application/geo+json',
-          'User-Agent': 'StormLog/1.0 (weather@stormlog.example)',
-        },
-      });
+      const pointEndpoint = `https://api.weather.gov/points/${latitude},${longitude}`;
+      const pointResponse = await fetchJson(pointEndpoint, { headers: { Accept: 'application/geo+json', 'User-Agent': 'StormLog/1.0 (weather@stormlog.example)' } });
+      if (pointResponse.status === 429) throw createRateLimitError('NWS point lookup', pointResponse);
+      if (!pointResponse.ok) throw new Error(`NWS point lookup HTTP ${pointResponse.status}`);
+      const pointPayload = await pointResponse.json();
+      const stationsEndpoint = pointPayload?.properties?.observationStations;
+      if (typeof stationsEndpoint !== 'string' || !stationsEndpoint.startsWith('https://api.weather.gov/')) {
+        throw new Error('NWS point response missing observationStations URL');
+      }
+      const response = await fetchJson(stationsEndpoint, { headers: { Accept: 'application/geo+json', 'User-Agent': 'StormLog/1.0 (weather@stormlog.example)' } });
       if (response.status === 429) throw createRateLimitError('NWS station discovery', response);
       if (!response.ok) throw new Error(`NWS station discovery HTTP ${response.status}`);
       const payload = await response.json();
       const stations = (Array.isArray(payload?.features) ? payload.features : [])
         .map((feature: any) => parseStationFeature(feature, latitude, longitude))
         .filter((station: NwsStationCandidate | null): station is NwsStationCandidate => station != null)
-        .sort((a: NwsStationCandidate, b: NwsStationCandidate) => a.distanceKm - b.distanceKm);
+        .sort((a, b) => a.distanceKm - b.distanceKm);
       if (!stations.length) throw new Error('NWS returned no observation stations for this location');
       return stations;
     },
   });
 }
 
-function provenance(
-  station: NwsStationCandidate,
-  properties: any,
-  referenceTimeMs: number,
-  endpoint: string,
-): WeatherProvenance {
+function provenance(station: NwsStationCandidate, properties: any, referenceTimeMs: number, endpoint: string): WeatherProvenance {
   const observationTime = Date.parse(properties.timestamp);
   const age = Number.isFinite(observationTime) ? referenceTimeMs - observationTime : Number.POSITIVE_INFINITY;
-  const populated = [
-    properties.temperature?.value,
-    properties.relativeHumidity?.value,
-    properties.dewpoint?.value,
-    properties.windSpeed?.value,
-    properties.windDirection?.value,
-    properties.windGust?.value,
-    properties.barometricPressure?.value,
-    properties.seaLevelPressure?.value,
-    properties.altimeter?.value,
-    properties.visibility?.value,
-  ];
+  const populated = [properties.temperature?.value, properties.relativeHumidity?.value, properties.dewpoint?.value, properties.windSpeed?.value, properties.windDirection?.value, properties.windGust?.value, properties.barometricPressure?.value, properties.seaLevelPressure?.value, properties.altimeter?.value, properties.visibility?.value];
   const available = populated.filter((value) => typeof value === 'number').length;
-  return {
-    provider: 'NWS',
-    source: station.name,
-    endpoint,
-    stationId: station.stationId,
-    latitude: station.latitude,
-    longitude: station.longitude,
-    distanceKm: station.distanceKm,
-    dataKind: 'observed',
-    observationTime: Number.isFinite(observationTime) ? observationTime : undefined,
-    retrievedTime: referenceTimeMs,
-    timezone: 'station-local',
-    freshness: age >= 0 && age <= OBSERVATION_MAX_AGE_MS ? 'current' : 'stale',
-    confidence: Math.min(0.95, available / populated.length),
-    completeness: available / populated.length,
-  };
+  return { provider: 'NWS', source: station.name, endpoint, stationId: station.stationId, latitude: station.latitude, longitude: station.longitude, distanceKm: station.distanceKm, dataKind: 'observed', observationTime: Number.isFinite(observationTime) ? observationTime : undefined, retrievedTime: referenceTimeMs, timezone: 'station-local', freshness: age >= 0 && age <= OBSERVATION_MAX_AGE_MS ? 'current' : 'stale', confidence: Math.min(0.95, available / populated.length), completeness: available / populated.length };
 }
 
-async function fetchNwsObservation(
-  station: NwsStationCandidate,
-  referenceTimeMs: number,
-  fetchJson: FetchJson,
-): Promise<NwsObservationResult> {
+async function fetchNwsObservation(station: NwsStationCandidate, referenceTimeMs: number, fetchJson: FetchJson): Promise<NwsObservationResult> {
   try {
     const endpoint = `https://api.weather.gov/stations/${station.stationId}/observations/latest`;
-    const response = await fetchJson(endpoint, {
-      headers: {
-        Accept: 'application/geo+json',
-        'User-Agent': 'StormLog/1.0 (weather@stormlog.example)',
-      },
-    });
+    const response = await fetchJson(endpoint, { headers: { Accept: 'application/geo+json', 'User-Agent': 'StormLog/1.0 (weather@stormlog.example)' } });
     if (response.status === 429) throw createRateLimitError('NWS observation', response);
     if (!response.ok) throw new Error(`NWS observation HTTP ${response.status}`);
     const payload = await response.json();
     const properties = payload?.properties;
     if (!properties?.timestamp) throw new Error('Invalid NWS observation response');
-
     const source = provenance(station, properties, referenceTimeMs, endpoint);
-    if (source.freshness !== 'current') {
-      return { success: false, fresh: false, error: `${station.stationId} observation is stale` };
-    }
-
+    if (source.freshness !== 'current') return { success: false, fresh: false, error: `${station.stationId} observation is stale` };
     const pressure = choosePressure(properties);
-    const presentWeather = Array.isArray(properties.presentWeather)
-      ? properties.presentWeather
-          .map((item: any) => [item.intensity, item.weather, item.modifier].filter(Boolean).join(' '))
-          .filter(Boolean)
-      : [];
-    const cloudLayers = Array.isArray(properties.cloudLayers)
-      ? properties.cloudLayers.map((layer: any) => ({
-          amount: String(layer.amount ?? 'UNKNOWN'),
-          baseFeet: qualityValue(layer.base) != null
-            ? Math.round((qualityValue(layer.base) as number) * 3.280839895)
-            : null,
-        }))
-      : [];
-
+    const presentWeather = Array.isArray(properties.presentWeather) ? properties.presentWeather.map((item: any) => [item.intensity, item.weather, item.modifier].filter(Boolean).join(' ')).filter(Boolean) : [];
+    const cloudLayers = Array.isArray(properties.cloudLayers) ? properties.cloudLayers.map((layer: any) => ({ amount: String(layer.amount ?? 'UNKNOWN'), baseFeet: qualityValue(layer.base) != null ? Math.round((qualityValue(layer.base) as number) * 3.280839895) : null })) : [];
     const stationPrecip1h = precipitationInches(properties.precipitationLastHour);
     const data: WeatherData = {
-      temperature: temperatureF(properties.temperature),
-      humidity: qualityValue(properties.relativeHumidity),
-      pressure: pressure.value != null ? Math.round(pressure.value * 100) / 100 : null,
-      windSpeed: speedMph(properties.windSpeed),
-      windDirection: qualityValue(properties.windDirection),
-      windGust: speedMph(properties.windGust),
-      dewPoint: temperatureF(properties.dewpoint),
-      precipitation: stationPrecip1h,
-      observedDailyPrecipitation: null,
-      stationPrecipitation1h: stationPrecip1h,
-      weatherCondition: properties.textDescription ?? null,
-      cape: null,
-      visibility: distanceMiles(properties.visibility),
-      presentWeather,
-      cloudLayers,
-      currentConditionsSource: source,
-      pressureSource: { ...source, source: `${station.name} (${pressure.kind})` },
-      stationPrecipitationSource: stationPrecip1h != null ? source : undefined,
-      precipitationSource: stationPrecip1h != null ? source : undefined,
+      temperature: temperatureF(properties.temperature), humidity: qualityValue(properties.relativeHumidity), pressure: pressure.value != null ? Math.round(pressure.value * 100) / 100 : null,
+      windSpeed: speedMph(properties.windSpeed), windDirection: qualityValue(properties.windDirection), windGust: speedMph(properties.windGust), dewPoint: temperatureF(properties.dewpoint),
+      precipitation: stationPrecip1h, observedDailyPrecipitation: null, stationPrecipitation1h: stationPrecip1h, weatherCondition: properties.textDescription ?? null, cape: null,
+      visibility: distanceMiles(properties.visibility), presentWeather, cloudLayers, currentConditionsSource: source, pressureSource: { ...source, source: `${station.name} (${pressure.kind})` },
+      stationPrecipitationSource: stationPrecip1h != null ? source : undefined, precipitationSource: stationPrecip1h != null ? source : undefined,
       valueSources: [
         { ...source, field: 'temperature', unit: 'degF', confidence: qualityConfidence(properties.temperature) },
         { ...source, field: 'humidity', unit: '%', confidence: qualityConfidence(properties.relativeHumidity) },
@@ -280,20 +199,13 @@ async function fetchNwsObservation(
   }
 }
 
-export async function fetchBestNwsObservation(
-  latitude: number,
-  longitude: number,
-  referenceTimeMs: number,
-  fetchJson: FetchJson = fetch,
-): Promise<NwsObservationResult> {
+export async function fetchBestNwsObservation(latitude: number, longitude: number, referenceTimeMs: number, fetchJson: FetchJson = fetch): Promise<NwsObservationResult> {
   let stations: NwsStationCandidate[];
-  try {
-    stations = await fetchNearbyStations(latitude, longitude, fetchJson);
-  } catch (error: any) {
+  try { stations = await fetchNearbyStations(latitude, longitude, fetchJson); }
+  catch (error: any) {
     if (isRateLimitError(error)) return { success: false, rateLimited: true, error: error.message };
     return { success: false, error: error?.message ?? 'NWS station discovery failed' };
   }
-
   const errors: string[] = [];
   for (const station of stations.slice(0, MAX_STATIONS_TO_TRY)) {
     const result = await fetchNwsObservation(station, referenceTimeMs, fetchJson);
@@ -301,9 +213,5 @@ export async function fetchBestNwsObservation(
     if (result.rateLimited) return result;
     errors.push(result.error ?? `${station.stationId} unavailable`);
   }
-  return {
-    success: false,
-    fresh: false,
-    error: `No fresh usable NWS observation among ${Math.min(stations.length, MAX_STATIONS_TO_TRY)} nearest stations: ${errors.join('; ')}`,
-  };
+  return { success: false, fresh: false, error: `No fresh usable NWS observation among ${Math.min(stations.length, MAX_STATIONS_TO_TRY)} nearest stations: ${errors.join('; ')}` };
 }
