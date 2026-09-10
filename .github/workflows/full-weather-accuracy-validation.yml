@@ -1,0 +1,108 @@
+name: Full Weather Accuracy Validation (No APK)
+
+on:
+  push:
+    branches:
+      - full-weather-accuracy-deepfix-20260909
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-weather-integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.16.0"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript validation
+        run: npm run typecheck
+
+      - name: Verify live NWS point-based station discovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          UA='StormLog/1.0 (weather-integrity-validation)'
+          curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" \
+            'https://api.weather.gov/points/40.039,-82.461/stations' > /tmp/stations.json
+          node <<'NODE'
+          const p=require('/tmp/stations.json');
+          if(!Array.isArray(p.features)||p.features.length===0) throw new Error('NWS point station discovery returned no features');
+          const first=p.features[0];
+          const id=first?.properties?.stationIdentifier || String(first?.id||'').split('/').pop();
+          const c=first?.geometry?.coordinates;
+          if(!id || !Array.isArray(c) || c.length<2) throw new Error('NWS station feature missing ID/coordinates');
+          console.log(`Nearest NWS candidate: ${id} @ ${c[1]},${c[0]}`);
+          require('fs').writeFileSync('/tmp/station-id',id);
+          NODE
+          STATION="$(cat /tmp/station-id)"
+          curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" \
+            "https://api.weather.gov/stations/${STATION}/observations/latest" > /tmp/observation.json
+          node <<'NODE'
+          const p=require('/tmp/observation.json').properties;
+          if(!p?.timestamp) throw new Error('NWS observation missing timestamp');
+          for(const key of ['temperature','relativeHumidity','windSpeed','windGust','seaLevelPressure','barometricPressure','altimeter']) {
+            if(p[key] && !('unitCode' in p[key])) throw new Error(`${key} missing unitCode`);
+          }
+          console.log(`NWS observation time: ${p.timestamp}`);
+          NODE
+
+      - name: Verify live NOAA MRMS rolling QPE identify contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://mapservices.weather.noaa.gov/raster/rest/services/obs/mrms_qpe/ImageServer/identify'
+          GEOM='%7B%22x%22%3A-82.461%2C%22y%22%3A40.039%2C%22spatialReference%22%3A%7B%22wkid%22%3A4326%7D%7D'
+          for HOURS in 1 3 6 12 24; do
+            RULE="%7B%22rasterFunction%22%3A%22rft_${HOURS}hr%22%7D"
+            curl -fsS "${BASE}?geometry=${GEOM}&geometryType=esriGeometryPoint&renderingRule=${RULE}&returnGeometry=false&returnCatalogItems=true&f=json" > "/tmp/mrms-${HOURS}.json"
+            node - "$HOURS" <<'NODE'
+            const fs=require('fs');
+            const h=process.argv[2];
+            const p=JSON.parse(fs.readFileSync(`/tmp/mrms-${h}.json`,'utf8'));
+            if(p.error) throw new Error(`MRMS ${h}h error: ${JSON.stringify(p.error)}`);
+            const v=Number.parseFloat(String(p.value));
+            if(!Number.isFinite(v)) throw new Error(`MRMS ${h}h returned nonnumeric value: ${String(p.value)}`);
+            if(v < -3) throw new Error(`MRMS ${h}h returned invalid sentinel: ${v}`);
+            console.log(`MRMS ${h}h value=${v}`);
+            NODE
+          done
+
+      - name: Compile and run weather provider runtime tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/weather-tests
+          npx tsc --ignoreConfig \
+            src/services/weather/__tests__/weatherProvider.runtime.test.ts \
+            src/services/weather/stormLogProvider.ts \
+            src/services/weather/nwsObservations.ts \
+            src/services/weather/nwsForecast.ts \
+            src/services/weather/openMeteo.ts \
+            src/services/weather/mrms.ts \
+            src/services/weather/conversions.ts \
+            src/services/network/nwsPoints.ts \
+            src/services/network/requestGuard.ts \
+            src/models/types.ts \
+            --rootDir src --module commonjs --target ES2022 --moduleResolution node --types node \
+            --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/weather-tests
+          node /tmp/weather-tests/services/weather/__tests__/weatherProvider.runtime.test.js
+
+      - name: Confirm no APK was assembled
+        shell: bash
+        run: |
+          set -euo pipefail
+          if find . -type f -name '*.apk' -print -quit | grep -q .; then
+            echo '::error::Validation-only workflow unexpectedly assembled an APK'
+            exit 1
+          fi
+          echo 'No APK assembled; validation barrier preserved.'
