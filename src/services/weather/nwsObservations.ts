@@ -145,7 +145,7 @@ async function fetchNearbyStations(latitude: number, longitude: number, fetchJso
       const stations = (Array.isArray(payload?.features) ? payload.features : [])
         .map((feature: any) => parseStationFeature(feature, latitude, longitude))
         .filter((station: NwsStationCandidate | null): station is NwsStationCandidate => station != null)
-        .sort((a, b) => a.distanceKm - b.distanceKm);
+        .sort((a: NwsStationCandidate, b: NwsStationCandidate) => a.distanceKm - b.distanceKm);
       if (!stations.length) throw new Error('NWS returned no observation stations for this location');
       return stations;
     },
