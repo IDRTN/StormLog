@@ -70,6 +70,7 @@ export interface DailySummary {
 
 export type WeatherProviderName = 'NWS' | 'NOAA_MRMS' | 'OPEN_METEO' | 'RAINVIEWER' | 'UNKNOWN';
 export type WeatherFreshness = 'current' | 'stale' | 'unavailable';
+export type WeatherDataKind = 'observed' | 'radar_estimated' | 'modeled';
 
 export interface WeatherProvenance {
   provider: WeatherProviderName;
@@ -79,6 +80,10 @@ export interface WeatherProvenance {
   gridId?: string;
   latitude?: number;
   longitude?: number;
+  /** Distance from the phone/sample point to a point-observation station. */
+  distanceKm?: number;
+  /** Whether this value came from a sensor observation, radar estimate, or model grid. */
+  dataKind?: WeatherDataKind;
   observationTime?: number;
   retrievedTime: number;
   timezone?: string;
@@ -101,21 +106,24 @@ export interface WeatherData {
   windDirection: number | null;
   windGust: number | null;
   dewPoint: number | null;
-  /**
-   * Current precipitation — what Open-Meteo reports as "current.precipitation".
-   * This is precipitation in the preceding hour. Useful for the main weather
-   * display to show "is it raining right now?"
-   */
+  /** Best current/one-hour precipitation amount for the active source. */
   precipitation: number | null;
   /**
-   * Observed accumulated precipitation for the current local calendar day.
-   * Calculated by summing hourly precipitation values from local midnight
-   * through the most recent hour. This is the value stored in daily records
-   * and displayed in the Daily Log.
+   * Accumulation from local midnight to now. This field must only be populated
+   * when the upstream product actually represents that period. A forecast-grid
+   * accumulation must never be presented as an observed daily total.
    */
   observedDailyPrecipitation: number | null;
+  /** NOAA MRMS radar-only rolling QPE amounts at the phone coordinates. */
+  radarPrecipitation1h?: number | null;
+  radarPrecipitation3h?: number | null;
+  radarPrecipitation6h?: number | null;
+  radarPrecipitation12h?: number | null;
+  radarPrecipitation24h?: number | null;
+  /** Nearby physical observation-station precipitation for the last hour, when reported. */
+  stationPrecipitation1h?: number | null;
   precipitationRateInchesPerHour?: number | null;
-  /** True when all expected hourly observations were available */
+  /** True only when the daily-accumulation period is complete/trustworthy. */
   precipitationIsComplete?: boolean;
   /** Weather-location UTC offset at observation time (seconds) */
   utcOffsetSeconds?: number;
@@ -128,6 +136,7 @@ export interface WeatherData {
   currentConditionsSource?: WeatherProvenance;
   pressureSource?: WeatherProvenance;
   precipitationSource?: WeatherProvenance;
+  stationPrecipitationSource?: WeatherProvenance;
   rainRateSource?: WeatherProvenance;
   capeSource?: WeatherProvenance;
   forecastSource?: WeatherProvenance;
