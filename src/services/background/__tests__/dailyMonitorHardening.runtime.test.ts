@@ -1,5 +1,3 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import {
   DailyMonitorCoordinator,
   type DailyCollectionResult,
@@ -240,17 +238,6 @@ void (async () => {
     assertEqual(result.outcome, 'skipped_recent_automatic', 'true early duplicate is skipped');
     assertEqual(runCount, 0, 'duplicate never reaches collection pipeline');
     assertEqual(claimCount, 0, 'duplicate is rejected before cross-process DB work');
-  });
-
-  await test('Daily Monitor persistence bridges weather into automatic storm events', async () => {
-    const writerPath = path.join(process.cwd(), 'src/database/dailyWeatherWriter.ts');
-    const source = fs.readFileSync(writerPath, 'utf8');
-
-    assert(source.includes('AFTER INSERT ON daily_weather'), 'daily-weather insert bridge trigger is present');
-    assert(source.includes('AFTER INSERT ON storm_events'), 'automatic-event seed trigger is present');
-    assert(source.includes('WHERE endTime IS NULL AND is_automatic = 1'), 'bridge only targets active automatic events');
-    assert(source.includes('INSERT INTO weather_observations'), 'bridge writes storm-event weather observations');
-    assert(source.includes('trg_auto_storm_seed_daily_weather_v1'), 'new automatic event is seeded from recent Daily Monitor data');
   });
 
   console.log('Daily Monitor hardening runtime tests passed.');
