@@ -1,0 +1,37 @@
+name: Tornado Radar Phase 1 Validation (No APK)
+
+on:
+  push:
+    branches:
+      - tornado-radar-quantitative-phase1-20260910
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-level3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.16.0'
+      - name: Install isolated radar backend dependencies
+        working-directory: server/radar-analysis
+        run: npm install --no-audit --no-fund
+      - name: Probe live NOAA/Unidata Level III data for KILN
+        working-directory: server/radar-analysis
+        env:
+          RADAR_SITE: ILN
+          RADAR_PRODUCTS: N0S,N0Q
+        run: npm run probe
+      - name: Confirm no APK was built
+        shell: bash
+        run: |
+          if find . -type f -name '*.apk' -print -quit | grep -q .; then
+            echo '::error::Radar validation unexpectedly built an APK'
+            exit 1
+          fi
+          echo 'No APK assembled; radar development remains isolated.'
