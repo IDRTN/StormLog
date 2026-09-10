@@ -1,90 +1,92 @@
-import nexradLevel3Data from 'nexrad-level-3-data';
+import { Level2Radar } from 'nexrad-level-2-data';
 
-const S3 = 'https://unidata-nexrad-level3.s3.amazonaws.com';
-const site = (process.env.RADAR_SITE || 'ILN').toUpperCase().replace(/^K/, '');
-const products = (process.env.RADAR_PRODUCTS || 'N0S,N0Q').split(',').map(v => v.trim().toUpperCase()).filter(Boolean);
+const site = (process.env.RADAR_SITE || 'KILN').toUpperCase().replace(/^([^K])/, 'K$1');
+const base = `https://nomads.ncep.noaa.gov/pub/data/nccf/radar/nexrad_level2/${site}`;
 
-function utcDateParts(date = new Date()) {
-  const yyyy = date.getUTCFullYear();
-  const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(date.getUTCDate()).padStart(2, '0');
-  return { yyyy, mm, dd };
+async function latestVolumeUrl() {
+  const response = await fetch(`${base}/dir.list`, { headers: { Accept: 'text/plain' } });
+  if (!response.ok) throw new Error(`NOMADS dir.list HTTP ${response.status}`);
+  const text = await response.text();
+  const files = [...text.matchAll(/(K[A-Z0-9]{3}_\d{8}_\d{6}\.bz2)/g)].map(m => m[1]);
+  if (!files.length) throw new Error(`No Level II volumes listed for ${site}`);
+  const name = files.sort().at(-1);
+  return { name, url: `${base}/${name}` };
 }
 
-async function listLatestKey(product) {
-  const now = new Date();
-  const days = [0, 1].map(offset => new Date(now.getTime() - offset * 86400000));
-  for (const day of days) {
-    const { yyyy, mm, dd } = utcDateParts(day);
-    const prefix = `${site}_${product}_${yyyy}_${mm}_${dd}_`;
-    const url = `${S3}/?list-type=2&prefix=${encodeURIComponent(prefix)}`;
-    const response = await fetch(url, { headers: { Accept: 'application/xml' } });
-    if (!response.ok) throw new Error(`S3 list ${product} HTTP ${response.status}`);
-    const xml = await response.text();
-    const keys = [...xml.matchAll(/<Key>([^<]+)<\/Key>/g)].map(m => m[1]);
-    if (keys.length) return keys.sort().at(-1);
-  }
-  throw new Error(`No recent ${site} ${product} object found`);
+function finiteValues(moment) {
+  if (!moment || !Array.isArray(moment.moment_data)) return [];
+  return moment.moment_data.filter(v => typeof v === 'number' && Number.isFinite(v));
 }
 
-function summarizeObject(value, depth = 0) {
-  if (depth > 3 || value == null) return value;
-  if (Array.isArray(value)) {
-    return { type: 'array', length: value.length, sample: value.length ? summarizeObject(value[0], depth + 1) : null };
-  }
-  if (typeof value !== 'object') return typeof value;
-  const out = {};
-  for (const [key, child] of Object.entries(value)) {
-    if (key.toLowerCase().includes('data') && Array.isArray(child)) out[key] = { type: 'array', length: child.length };
-    else out[key] = summarizeObject(child, depth + 1);
-  }
-  return out;
+function summarizeMoment(moment) {
+  if (!moment) return null;
+  const values = finiteValues(moment);
+  return {
+    name: moment.name,
+    gateCount: moment.gate_count,
+    gateSizeMeters: moment.gate_size,
+    firstGateMeters: moment.first_gate,
+    sampleCount: values.length,
+    min: values.length ? Math.min(...values) : null,
+    max: values.length ? Math.max(...values) : null,
+    scale: moment.scale,
+    offset: moment.offset,
+  };
 }
 
-function collectNumericArrays(value, path = '$', out = [], seen = new Set()) {
-  if (value == null || typeof value !== 'object' || seen.has(value)) return out;
-  seen.add(value);
-  if (Array.isArray(value)) {
-    if (value.length && value.every(v => typeof v === 'number' && Number.isFinite(v))) {
-      const min = Math.min(...value);
-      const max = Math.max(...value);
-      out.push({ path, length: value.length, min, max });
-      return out;
-    }
-    value.slice(0, 10).forEach((child, i) => collectNumericArrays(child, `${path}[${i}]`, out, seen));
-    return out;
-  }
-  for (const [key, child] of Object.entries(value)) collectNumericArrays(child, `${path}.${key}`, out, seen);
-  return out;
+function firstUsable(values) {
+  if (!Array.isArray(values)) return values ?? null;
+  return values.find(v => v && finiteValues(v).length) ?? null;
 }
 
-for (const product of products) {
-  const key = await listLatestKey(product);
-  const response = await fetch(`${S3}/${encodeURIComponent(key).replaceAll('%2F', '/')}`);
-  if (!response.ok) throw new Error(`S3 object ${key} HTTP ${response.status}`);
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.length < 100) throw new Error(`${key} unexpectedly small (${buffer.length} bytes)`);
+const { name, url } = await latestVolumeUrl();
+const response = await fetch(url);
+if (!response.ok) throw new Error(`NOMADS Level II ${name} HTTP ${response.status}`);
+const bytes = new Uint8Array(await response.arrayBuffer());
+if (bytes.byteLength < 100000) throw new Error(`Level II volume unexpectedly small: ${bytes.byteLength} bytes`);
 
-  const parsed = nexradLevel3Data(buffer, { logger: false });
-  if (!parsed || typeof parsed !== 'object') throw new Error(`${product} parser returned no object`);
+const radar = await new Level2Radar(bytes, { logger: false });
+const elevations = radar.listElevations().filter(v => Number.isFinite(v));
+if (!elevations.length) throw new Error('Decoded Level II volume has no elevations');
 
-  const productCode = parsed?.productDescription?.productCode ?? parsed?.messageHeader?.messageCode ?? null;
-  const numericArrays = collectNumericArrays(parsed).filter(item => item.length >= 8).slice(0, 30);
+const lowest = Math.min(...elevations);
+radar.setElevation(lowest);
 
-  console.log(JSON.stringify({
-    site,
-    product,
-    key,
-    bytes: buffer.length,
-    productCode,
-    topLevelKeys: Object.keys(parsed),
-    shape: summarizeObject(parsed),
-    numericArrays,
-  }, null, 2));
+const azimuths = radar.getAzimuth();
+const reflectivity = firstUsable(radar.getHighresReflectivity());
+const velocity = firstUsable(radar.getHighresVelocity());
+const zdr = firstUsable(radar.getHighresDiffReflectivity());
+const rho = firstUsable(radar.getHighresCorrelationCoefficient());
 
-  if (!numericArrays.length) {
-    throw new Error(`${product} parsed but no usable numeric radial/bin arrays were discovered`);
-  }
-}
+const refSummary = summarizeMoment(reflectivity);
+const velSummary = summarizeMoment(velocity);
+const zdrSummary = summarizeMoment(zdr);
+const rhoSummary = summarizeMoment(rho);
 
-console.log('LIVE_LEVEL3_PROBE_PASS');
+const result = {
+  source: 'NOAA/NCEP NOMADS NEXRAD Level II',
+  site,
+  file: name,
+  bytes: bytes.byteLength,
+  headerIcao: radar.header?.ICAO ?? null,
+  hasGaps: Boolean(radar.hasGaps),
+  isTruncated: Boolean(radar.isTruncated),
+  elevations,
+  selectedElevation: lowest,
+  azimuthCount: Array.isArray(azimuths) ? azimuths.length : 1,
+  reflectivity: refSummary,
+  velocity: velSummary,
+  differentialReflectivity: zdrSummary,
+  correlationCoefficient: rhoSummary,
+};
+
+console.log(JSON.stringify(result, null, 2));
+
+if (radar.header?.ICAO !== site) throw new Error(`Radar ICAO mismatch: expected ${site}, got ${radar.header?.ICAO}`);
+if (radar.isTruncated) throw new Error('Latest Level II volume decoded as truncated');
+if (!refSummary || refSummary.sampleCount < 100) throw new Error('Quantitative reflectivity missing from lowest elevation');
+if (!velSummary || velSummary.sampleCount < 100) throw new Error('Quantitative velocity missing from lowest elevation');
+if (refSummary.min < -40 || refSummary.max > 100) throw new Error(`Reflectivity outside plausible dBZ range: ${refSummary.min}..${refSummary.max}`);
+if (velSummary.min < -250 || velSummary.max > 250) throw new Error(`Velocity outside plausible knot range: ${velSummary.min}..${velSummary.max}`);
+
+console.log('LIVE_LEVEL2_QUANTITATIVE_PROBE_PASS');
