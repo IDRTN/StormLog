@@ -10,22 +10,21 @@ permissions:
   contents: read
 
 jobs:
-  validate-level3:
+  validate-level2:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: '22.16.0'
+          node-version: '24.x'
       - name: Install isolated radar backend dependencies
         working-directory: server/radar-analysis
         run: npm install --no-audit --no-fund
-      - name: Probe live NOAA/Unidata Level III data for KILN
+      - name: Probe live NOAA/NCEP Level II quantitative radar data for KILN
         working-directory: server/radar-analysis
         env:
-          RADAR_SITE: ILN
-          RADAR_PRODUCTS: N0S,N0Q
+          RADAR_SITE: KILN
         run: npm run probe
       - name: Confirm no APK was built
         shell: bash
