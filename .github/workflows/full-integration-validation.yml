@@ -1,0 +1,138 @@
+name: Full StormLog Integration Validation (No APK)
+
+on:
+  push:
+    branches:
+      - full-weather-accuracy-deepfix-20260909
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NPM_CONFIG_LEGACY_PEER_DEPS: "true"
+  EXPO_PUBLIC_STORMLOG_LIGHTNING_URL: "https://stormlog-lightning-proxy.idontrememberthename74.workers.dev"
+  EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN: ${{ secrets.STORMLOG_LIGHTNING_TOKEN }}
+
+jobs:
+  integration-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.16.0"
+          cache: npm
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: ""
+
+      - name: Install Android build components
+        run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006" "cmake;3.22.1"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript validation
+        run: npm run typecheck
+
+      - name: Verify live lightning proxy authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN:-}"
+          f="$(mktemp)"
+          code="$(curl -sS -o "$f" -w '%{http_code}' -H 'accept: application/json' -H "x-stormlog-client-token: ${EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN}" "${EXPO_PUBLIC_STORMLOG_LIGHTNING_URL}/events?latitude=40&longitude=-82.5&radiusKm=1&sinceMs=0&untilMs=0")"
+          test "$code" = "200"
+          node -e 'const p=require(process.argv[1]); if(!Array.isArray(p.events)) throw new Error("missing events array")' "$f"
+
+      - name: Compile and run Daily Monitor hardening tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/stormlog-hardening-tests
+          npx tsc --ignoreConfig src/util/dateUtils.ts src/services/background/dailyMonitorCoordinator.ts src/services/background/__tests__/dailyMonitorHardening.runtime.test.ts --rootDir src --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/stormlog-hardening-tests
+          cat > /tmp/stormlog-hardening-tests/services/background/dailyMonitorClaim.js <<'JS'
+          exports.claimAutomaticCollection = async () => true;
+          exports.markDailyMonitorCollectionSucceeded = async () => undefined;
+          exports.releaseAutomaticCollectionLease = async () => undefined;
+          JS
+          node /tmp/stormlog-hardening-tests/services/background/__tests__/dailyMonitorHardening.runtime.test.js
+
+      - name: Compile and run Daily Monitor location tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/stormlog-location-tests
+          npx tsc --ignoreConfig src/services/background/dailyMonitorLocationResolver.ts src/services/background/__tests__/dailyMonitorLocationResolver.runtime.test.ts --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/stormlog-location-tests
+          node "$(find /tmp/stormlog-location-tests -name dailyMonitorLocationResolver.runtime.test.js -print -quit)"
+
+      - name: Compile and run automatic storm lifecycle tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/stormlog-auto-storm-tests
+          npx tsc --ignoreConfig src/services/stormLogs/automaticStormPolicy.ts src/services/stormLogs/__tests__/automaticStormPolicy.runtime.test.ts --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/stormlog-auto-storm-tests
+          node "$(find /tmp/stormlog-auto-storm-tests -name automaticStormPolicy.runtime.test.js -print -quit)"
+
+      - name: Compile and run warning lifecycle tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/stormlog-warning-tests
+          npx tsc --ignoreConfig src/database/__tests__/warningLifecycle.test.ts --rootDir src --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/stormlog-warning-tests
+          node /tmp/stormlog-warning-tests/database/__tests__/warningLifecycle.test.js
+
+      - name: Compile and run lightning safety tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/stormlog-lightning-tests
+          npx tsc --ignoreConfig src/services/lightning/lightningSafety.ts src/services/lightning/lightningUsageGuard.ts src/services/lightning/providers/httpLightningAdapter.ts src/services/lightning/lightningProviderAdapter.ts src/services/lightning/__tests__/lightningSafety.runtime.test.ts src/services/lightning/__tests__/lightningUsageGuard.runtime.test.ts src/services/lightning/__tests__/httpLightningAdapter.runtime.test.ts server/lightning-proxy/src/handler.ts server/lightning-proxy/src/handler.runtime.test.ts --module commonjs --target ES2022 --moduleResolution node --types node --lib ES2022,DOM --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/stormlog-lightning-tests
+          node /tmp/stormlog-lightning-tests/src/services/lightning/__tests__/lightningSafety.runtime.test.js
+          node /tmp/stormlog-lightning-tests/src/services/lightning/__tests__/lightningUsageGuard.runtime.test.js
+          node /tmp/stormlog-lightning-tests/src/services/lightning/__tests__/httpLightningAdapter.runtime.test.js
+          node /tmp/stormlog-lightning-tests/server/lightning-proxy/src/handler.runtime.test.js
+
+      - name: Compile and run weather provider tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/weather-tests
+          npx tsc --ignoreConfig src/services/weather/__tests__/weatherProvider.runtime.test.ts src/services/weather/stormLogProvider.ts src/services/weather/nwsObservations.ts src/services/weather/nwsForecast.ts src/services/weather/openMeteo.ts src/services/weather/mrms.ts src/services/weather/conversions.ts src/services/network/nwsPoints.ts src/services/network/requestGuard.ts src/models/types.ts --rootDir src --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/weather-tests
+          node /tmp/weather-tests/services/weather/__tests__/weatherProvider.runtime.test.js
+
+      - name: Generate Android project
+        env:
+          CI: "1"
+          EXPO_NO_TELEMETRY: "1"
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Verify native scheduler autolinking
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx expo-modules-autolinking resolve --platform android > /tmp/autolinking.json
+          grep -qi 'storm-log-scheduler' /tmp/autolinking.json
+          grep -Fq 'StormLogHeadlessTaskService' android/app/src/main/AndroidManifest.xml
+          grep -Fq 'SCHEDULE_EXACT_ALARM' android/app/src/main/AndroidManifest.xml
+          grep -Fq 'BOOT_COMPLETED' android/app/src/main/AndroidManifest.xml
+          grep -Fq 'MY_PACKAGE_REPLACED' android/app/src/main/AndroidManifest.xml
+
+      - name: Compile native Android code without assembling APK
+        working-directory: android
+        run: ./gradlew :app:compileDebugKotlin --stacktrace
+
+      - name: Confirm no APK was assembled
+        shell: bash
+        run: |
+          if find . -type f -name '*.apk' -print -quit | grep -q .; then
+            echo '::error::Integration validation unexpectedly assembled an APK'
+            exit 1
+          fi
+          echo 'Integration validation complete; no APK assembled.'
