@@ -4,40 +4,22 @@ import type { DailyWeatherRecord } from '../models/types';
 export type DailyWeatherWriteResult = {
   rowId: number;
   inserted: boolean;
-  collectionTimestamp: number;
 };
 
-export type DailyWeatherWriteOptions = {
-  /** Override only for deterministic tests/replay. Normal callers use Date.now(). */
-  collectedAtMs?: number;
-  /**
-   * Protects against a near-simultaneous recovery-path race without collapsing
-   * legitimate 5/10/15-minute collections that happen to contain the same
-   * upstream provider observation.
-   */
-  duplicateWindowMs?: number;
-};
-
-const DEFAULT_DUPLICATE_WINDOW_MS = 30_000;
 const AUTO_STORM_SEED_LOOKBACK_MS = 20 * 60 * 1000;
 
 /**
- * Install the persistence bridge between Daily Monitor and automatic storm
- * events.
+ * Keep automatic storm weather observations tied to the reliable Daily Monitor
+ * persistence path instead of starting a second React timer.
  *
- * Automatic storm events deliberately do not run a second React setInterval
- * weather logger: the native Daily Monitor is the reliable background clock.
- * These SQLite triggers therefore make the already-persisted Daily Monitor
- * sample the authoritative weather feed for automatic storm events:
+ * Trigger 1 mirrors every new Daily Monitor row into the newest active automatic
+ * storm event. Trigger 2 handles the opposite ordering: lightning can create an
+ * automatic event after the Daily Monitor row has already been written in the
+ * same cycle, so a newly-created automatic event is seeded from the newest Daily
+ * Monitor observation from the preceding 20 minutes.
  *
- * 1. Every new Daily Monitor row is mirrored into the newest active automatic
- *    storm event.
- * 2. When an automatic event starts after the current Daily Monitor row was
- *    written (for example lightning starts the event later in the same cycle),
- *    seed it with the most recent Daily Monitor sample from the last 20 minutes.
- *
- * Keeping this at the persistence boundary means it works whether the app UI is
- * open, backgrounded, or fully terminated and restarted headlessly.
+ * Both triggers are idempotent. Manual storm events are intentionally excluded;
+ * their observations remain owned by useStormLogger.
  */
 async function ensureAutomaticStormObservationBridge(
   db: Awaited<ReturnType<typeof getDatabase>>,
@@ -87,7 +69,7 @@ async function ensureAutomaticStormObservationBridge(
         SELECT *
         FROM daily_weather
         WHERE timestamp >= NEW.startTime - ${AUTO_STORM_SEED_LOOKBACK_MS}
-          AND timestamp <= NEW.startTime + ${DEFAULT_DUPLICATE_WINDOW_MS}
+          AND timestamp <= NEW.startTime
         ORDER BY timestamp DESC
         LIMIT 1
       ) AS latest
@@ -101,43 +83,22 @@ async function ensureAutomaticStormObservationBridge(
 }
 
 /**
- * Persist one Daily Monitor collection attempt.
+ * Atomically persist one Daily Monitor observation timestamp.
  *
- * `daily_weather.timestamp` is the time StormLog actually collected the sample.
- * The upstream weather-provider timestamp is preserved separately in
- * `observationTime`. This distinction is important: a station/provider can
- * legally return the same source observation across two 15-minute StormLog
- * cycles. Using the provider timestamp as the row identity made a healthy
- * scheduler look as if it had skipped an interval because the second collection
- * was discarded as a duplicate.
- *
- * Multiple Android recovery paths are still allowed to race. A narrow
- * collection-time window suppresses only near-simultaneous duplicate writes;
- * it does not suppress the next legitimate configured interval.
+ * Daily Monitor has multiple recovery paths (native alarm + BackgroundFetch).
+ * They are intentionally allowed to race for recovery, but the database must
+ * never contain two copies of the same observation. A single
+ * INSERT..SELECT..WHERE NOT EXISTS statement makes that invariant live at the
+ * persistence boundary instead of relying only on timing gates in JavaScript.
  */
 export async function insertDailyRecordIdempotent(
   record: Omit<DailyWeatherRecord, 'id'> & {
     utcOffsetSeconds?: number;
     weatherTimezone?: string;
   },
-  options: DailyWeatherWriteOptions = {},
 ): Promise<DailyWeatherWriteResult> {
   const db = await getDatabase();
   await ensureAutomaticStormObservationBridge(db);
-
-  const collectionTimestamp = options.collectedAtMs ?? Date.now();
-  const duplicateWindowMs = Math.max(
-    0,
-    options.duplicateWindowMs ?? DEFAULT_DUPLICATE_WINDOW_MS,
-  );
-  const duplicateWindowStart = collectionTimestamp - duplicateWindowMs;
-  const duplicateWindowEnd = collectionTimestamp + duplicateWindowMs;
-
-  // The caller historically supplied the provider reference timestamp as
-  // record.timestamp. Preserve that provenance instead of using it as the
-  // Daily Monitor cadence timestamp.
-  const providerObservationTime = record.observationTime ?? record.timestamp;
-  const retrievedTime = record.retrievedTime ?? collectionTimestamp;
 
   const result = await db.runAsync(
     `INSERT INTO daily_weather
@@ -148,13 +109,10 @@ export async function insertDailyRecordIdempotent(
         confidence, completeness)
      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
      WHERE NOT EXISTS (
-       SELECT 1
-       FROM daily_weather
-       WHERE timestamp BETWEEN ? AND ?
-       LIMIT 1
+       SELECT 1 FROM daily_weather WHERE timestamp = ? LIMIT 1
      )`,
     [
-      collectionTimestamp,
+      record.timestamp,
       record.latitude,
       record.longitude,
       record.temperature,
@@ -173,39 +131,24 @@ export async function insertDailyRecordIdempotent(
       record.product ?? null,
       record.stationId ?? null,
       record.gridId ?? null,
-      providerObservationTime,
-      retrievedTime,
+      record.observationTime ?? null,
+      record.retrievedTime ?? null,
       record.confidence ?? null,
       record.completeness ?? null,
-      duplicateWindowStart,
-      duplicateWindowEnd,
+      record.timestamp,
     ],
   );
 
   if (result.changes > 0) {
-    return {
-      rowId: Number(result.lastInsertRowId),
-      inserted: true,
-      collectionTimestamp,
-    };
+    return { rowId: Number(result.lastInsertRowId), inserted: true };
   }
 
-  const existing = await db.getFirstAsync<{ id: number; timestamp: number }>(
-    `SELECT id, timestamp
-     FROM daily_weather
-     WHERE timestamp BETWEEN ? AND ?
-     ORDER BY ABS(timestamp - ?) ASC, id ASC
-     LIMIT 1`,
-    [duplicateWindowStart, duplicateWindowEnd, collectionTimestamp],
+  const existing = await db.getFirstAsync<{ id: number }>(
+    'SELECT id FROM daily_weather WHERE timestamp = ? ORDER BY id ASC LIMIT 1',
+    [record.timestamp],
   );
   if (!existing) {
-    throw new Error(
-      `Daily collection near ${collectionTimestamp} was not inserted and no near-duplicate row was found`,
-    );
+    throw new Error(`Daily observation ${record.timestamp} was not inserted and no existing row was found`);
   }
-  return {
-    rowId: existing.id,
-    inserted: false,
-    collectionTimestamp: existing.timestamp,
-  };
+  return { rowId: existing.id, inserted: false };
 }
