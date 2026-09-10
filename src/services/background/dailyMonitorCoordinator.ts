@@ -1,4 +1,5 @@
 import { getNextIntervalBoundary } from '../../util/dateUtils';
+import { minimumAutomaticCadenceAgeMs } from './dailyMonitorCadence';
 
 export type DailyCollectionMode = 'automatic' | 'manual';
 export type DailyCollectionOutcome = 'completed' | 'shared' | 'skipped_recent_automatic';
@@ -258,10 +259,17 @@ export class DailyMonitorCoordinator {
 
     const nowMs = this.now();
     const intervalMs = this.state.intervalMinutes * 60 * 1000;
+    const minimumCadenceAgeMs = minimumAutomaticCadenceAgeMs(intervalMs);
 
-    // This local gate reflects a successful/owned attempt only. A failure clears
-    // it in recordCollectionResult, so one failed callback cannot burn 15 minutes.
-    if (this.lastAutomaticAttemptMs > 0 && nowMs - this.lastAutomaticAttemptMs < intervalMs) {
+    // Keep the local fast-path and SQLite cross-process gate on the exact same
+    // cadence rule. Native alarms are scheduled from receiver time, while the
+    // JS attempt timestamp is recorded after variable process-start latency.
+    // A strict full-interval comparison here could reject a legitimate alarm
+    // before the jitter-aware SQLite gate had a chance to admit it.
+    if (
+      this.lastAutomaticAttemptMs > 0
+      && nowMs - this.lastAutomaticAttemptMs < minimumCadenceAgeMs
+    ) {
       return { success: true, outcome: 'skipped_recent_automatic' };
     }
 
