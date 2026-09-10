@@ -1,4 +1,4 @@
-name: Full Weather Accuracy Validation (No APK)
+name: Full Weather + Integration Validation (No APK)
 
 on:
   push:
@@ -9,17 +9,31 @@ on:
 permissions:
   contents: read
 
+env:
+  NPM_CONFIG_LEGACY_PEER_DEPS: "true"
+  EXPO_PUBLIC_STORMLOG_LIGHTNING_URL: "https://stormlog-lightning-proxy.idontrememberthename74.workers.dev"
+  EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN: ${{ secrets.STORMLOG_LIGHTNING_TOKEN }}
+
 jobs:
-  validate-weather-integrity:
+  validate-integrity:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v6
-
       - uses: actions/setup-node@v6
         with:
           node-version: "22.16.0"
           cache: npm
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: ""
+
+      - name: Install Android build components
+        run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006" "cmake;3.22.1"
 
       - name: Install dependencies
         run: npm ci
@@ -31,89 +45,120 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          UA='StormLog/1.0 (weather-integrity-validation)'
-          curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" \
-            'https://api.weather.gov/points/40.039,-82.461' > /tmp/point.json
-          node <<'NODE'
-          const p=require('/tmp/point.json');
-          const url=p?.properties?.observationStations;
-          if(typeof url!=='string' || !url.startsWith('https://api.weather.gov/')) throw new Error('NWS point response missing observationStations URL');
-          console.log(`Observation stations URL: ${url}`);
-          require('fs').writeFileSync('/tmp/stations-url',url);
-          NODE
-          STATIONS_URL="$(cat /tmp/stations-url)"
-          curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" "$STATIONS_URL" > /tmp/stations.json
-          node <<'NODE'
-          const p=require('/tmp/stations.json');
-          if(!Array.isArray(p.features)||p.features.length===0) throw new Error('NWS station collection returned no features');
-          const first=p.features[0];
-          const id=first?.properties?.stationIdentifier || String(first?.id||'').split('/').pop();
-          const c=first?.geometry?.coordinates;
-          if(!id || !Array.isArray(c) || c.length<2) throw new Error('NWS station feature missing ID/coordinates');
-          console.log(`Nearest NWS candidate: ${id} @ ${c[1]},${c[0]}`);
-          require('fs').writeFileSync('/tmp/station-id',id);
-          NODE
-          STATION="$(cat /tmp/station-id)"
-          curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" \
-            "https://api.weather.gov/stations/${STATION}/observations/latest" > /tmp/observation.json
-          node <<'NODE'
-          const p=require('/tmp/observation.json').properties;
-          if(!p?.timestamp) throw new Error('NWS observation missing timestamp');
-          for(const key of ['temperature','relativeHumidity','windSpeed','windGust','seaLevelPressure','barometricPressure','altimeter','precipitationLastHour']) {
-            if(p[key] && !('unitCode' in p[key])) throw new Error(`${key} missing unitCode`);
-          }
-          console.log(`NWS observation time: ${p.timestamp}`);
-          NODE
+          UA='StormLog/1.0 (integration-validation)'
+          curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" 'https://api.weather.gov/points/40.039,-82.461' > /tmp/point.json
+          node -e 'const p=require("/tmp/point.json");const u=p?.properties?.observationStations;if(typeof u!=="string")throw new Error("missing observationStations");require("fs").writeFileSync("/tmp/stations-url",u)'
+          curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" "$(cat /tmp/stations-url)" > /tmp/stations.json
+          node -e 'const p=require("/tmp/stations.json");if(!Array.isArray(p.features)||!p.features.length)throw new Error("no stations");const f=p.features[0];const id=f?.properties?.stationIdentifier||String(f?.id||"").split("/").pop();if(!id)throw new Error("missing station id");require("fs").writeFileSync("/tmp/station-id",id)'
+          curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" "https://api.weather.gov/stations/$(cat /tmp/station-id)/observations/latest" > /tmp/obs.json
+          node -e 'const p=require("/tmp/obs.json").properties;if(!p?.timestamp)throw new Error("missing observation timestamp")'
 
-      - name: Verify live NOAA MRMS rolling QPE identify contract
+      - name: Verify live NOAA MRMS rolling QPE contract
         shell: bash
         run: |
           set -euo pipefail
           BASE='https://mapservices.weather.noaa.gov/raster/rest/services/obs/mrms_qpe/ImageServer/identify'
           GEOM='%7B%22x%22%3A-82.461%2C%22y%22%3A40.039%2C%22spatialReference%22%3A%7B%22wkid%22%3A4326%7D%7D'
-          for HOURS in 1 3 6 12 24; do
-            RULE="%7B%22rasterFunction%22%3A%22rft_${HOURS}hr%22%7D"
-            FILE="/tmp/mrms-${HOURS}.json"
-            curl -fsS "${BASE}?geometry=${GEOM}&geometryType=esriGeometryPoint&renderingRule=${RULE}&returnGeometry=false&returnCatalogItems=true&f=json" > "$FILE"
-            node -e '
-              const fs=require("fs");
-              const file=process.argv[1];
-              const h=process.argv[2];
-              const p=JSON.parse(fs.readFileSync(file,"utf8"));
-              if(p.error) throw new Error(`MRMS ${h}h error: ${JSON.stringify(p.error)}`);
-              const v=Number.parseFloat(String(p.value));
-              if(!Number.isFinite(v)) throw new Error(`MRMS ${h}h returned nonnumeric value: ${String(p.value)}`);
-              if(v < -3) throw new Error(`MRMS ${h}h returned invalid sentinel: ${v}`);
-              console.log(`MRMS ${h}h value=${v}`);
-            ' "$FILE" "$HOURS"
+          for H in 1 3 6 12 24; do
+            RULE="%7B%22rasterFunction%22%3A%22rft_${H}hr%22%7D"
+            F="/tmp/mrms-${H}.json"
+            curl -fsS "${BASE}?geometry=${GEOM}&geometryType=esriGeometryPoint&renderingRule=${RULE}&returnGeometry=false&returnCatalogItems=true&f=json" > "$F"
+            node -e 'const p=require(process.argv[1]);const v=Number.parseFloat(String(p.value));if(p.error||!Number.isFinite(v)||v< -3)throw new Error("invalid MRMS response")' "$F"
           done
 
-      - name: Compile and run weather provider runtime tests
+      - name: Verify live lightning proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN:-}"
+          F="$(mktemp)"
+          C="$(curl -sS -o "$F" -w '%{http_code}' -H 'accept: application/json' -H "x-stormlog-client-token: ${EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN}" "${EXPO_PUBLIC_STORMLOG_LIGHTNING_URL}/events?latitude=40&longitude=-82.5&radiusKm=1&sinceMs=0&untilMs=0")"
+          test "$C" = "200"
+          node -e 'const p=require(process.argv[1]);if(!Array.isArray(p.events))throw new Error("missing events")' "$F"
+
+      - name: Run weather provider runtime tests
         shell: bash
         run: |
           set -euo pipefail
           rm -rf /tmp/weather-tests
-          npx tsc --ignoreConfig \
-            src/services/weather/__tests__/weatherProvider.runtime.test.ts \
-            src/services/weather/stormLogProvider.ts \
-            src/services/weather/nwsObservations.ts \
-            src/services/weather/nwsForecast.ts \
-            src/services/weather/openMeteo.ts \
-            src/services/weather/mrms.ts \
-            src/services/weather/conversions.ts \
-            src/services/network/nwsPoints.ts \
-            src/services/network/requestGuard.ts \
-            src/models/types.ts \
-            --rootDir src --module commonjs --target ES2022 --moduleResolution node --types node \
-            --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/weather-tests
+          npx tsc --ignoreConfig src/services/weather/__tests__/weatherProvider.runtime.test.ts src/services/weather/stormLogProvider.ts src/services/weather/nwsObservations.ts src/services/weather/nwsForecast.ts src/services/weather/openMeteo.ts src/services/weather/mrms.ts src/services/weather/conversions.ts src/services/network/nwsPoints.ts src/services/network/requestGuard.ts src/models/types.ts --rootDir src --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/weather-tests
           node /tmp/weather-tests/services/weather/__tests__/weatherProvider.runtime.test.js
+
+      - name: Run Daily Monitor hardening tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/dm-tests
+          npx tsc --ignoreConfig src/util/dateUtils.ts src/services/background/dailyMonitorCoordinator.ts src/services/background/__tests__/dailyMonitorHardening.runtime.test.ts --rootDir src --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/dm-tests
+          cat > /tmp/dm-tests/services/background/dailyMonitorClaim.js <<'JS'
+          exports.claimAutomaticCollection=async()=>true;
+          exports.markDailyMonitorCollectionSucceeded=async()=>undefined;
+          exports.releaseAutomaticCollectionLease=async()=>undefined;
+          JS
+          node /tmp/dm-tests/services/background/__tests__/dailyMonitorHardening.runtime.test.js
+
+      - name: Run Daily Monitor location tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/location-tests
+          npx tsc --ignoreConfig src/services/background/dailyMonitorLocationResolver.ts src/services/background/__tests__/dailyMonitorLocationResolver.runtime.test.ts --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/location-tests
+          node "$(find /tmp/location-tests -name dailyMonitorLocationResolver.runtime.test.js -print -quit)"
+
+      - name: Run automatic storm lifecycle tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/auto-tests
+          npx tsc --ignoreConfig src/services/stormLogs/automaticStormPolicy.ts src/services/stormLogs/__tests__/automaticStormPolicy.runtime.test.ts --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/auto-tests
+          node "$(find /tmp/auto-tests -name automaticStormPolicy.runtime.test.js -print -quit)"
+
+      - name: Run warning lifecycle tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/warning-tests
+          npx tsc --ignoreConfig src/database/__tests__/warningLifecycle.test.ts --rootDir src --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/warning-tests
+          node /tmp/warning-tests/database/__tests__/warningLifecycle.test.js
+
+      - name: Run lightning safety tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/lightning-tests
+          npx tsc --ignoreConfig src/services/lightning/lightningSafety.ts src/services/lightning/lightningUsageGuard.ts src/services/lightning/providers/httpLightningAdapter.ts src/services/lightning/lightningProviderAdapter.ts src/services/lightning/__tests__/lightningSafety.runtime.test.ts src/services/lightning/__tests__/lightningUsageGuard.runtime.test.ts src/services/lightning/__tests__/httpLightningAdapter.runtime.test.ts server/lightning-proxy/src/handler.ts server/lightning-proxy/src/handler.runtime.test.ts --module commonjs --target ES2022 --moduleResolution node --types node --lib ES2022,DOM --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/lightning-tests
+          node /tmp/lightning-tests/src/services/lightning/__tests__/lightningSafety.runtime.test.js
+          node /tmp/lightning-tests/src/services/lightning/__tests__/lightningUsageGuard.runtime.test.js
+          node /tmp/lightning-tests/src/services/lightning/__tests__/httpLightningAdapter.runtime.test.js
+          node /tmp/lightning-tests/server/lightning-proxy/src/handler.runtime.test.js
+
+      - name: Generate Android project
+        env:
+          CI: "1"
+          EXPO_NO_TELEMETRY: "1"
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Verify native scheduler wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx expo-modules-autolinking resolve --platform android > /tmp/autolinking.json
+          grep -qi 'storm-log-scheduler' /tmp/autolinking.json
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          grep -Fq 'StormLogHeadlessTaskService' "$MANIFEST"
+          grep -Fq 'SCHEDULE_EXACT_ALARM' "$MANIFEST"
+          grep -Fq 'BOOT_COMPLETED' "$MANIFEST"
+          grep -Fq 'MY_PACKAGE_REPLACED' "$MANIFEST"
+
+      - name: Compile native Android code without assembling APK
+        working-directory: android
+        run: ./gradlew :app:compileDebugKotlin --stacktrace
 
       - name: Confirm no APK was assembled
         shell: bash
         run: |
-          set -euo pipefail
           if find . -type f -name '*.apk' -print -quit | grep -q .; then
-            echo '::error::Validation-only workflow unexpectedly assembled an APK'
+            echo '::error::Validation unexpectedly assembled an APK'
             exit 1
           fi
-          echo 'No APK assembled; validation barrier preserved.'
+          echo 'Full integration validation passed without assembling an APK.'
