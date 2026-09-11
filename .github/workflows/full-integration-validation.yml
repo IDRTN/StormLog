@@ -55,7 +55,7 @@ jobs:
           f="$(mktemp)"
           code="$(curl -sS -o "$f" -w '%{http_code}' -H 'accept: application/json' -H "x-stormlog-client-token: ${EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN}" "${EXPO_PUBLIC_STORMLOG_LIGHTNING_URL}/events?latitude=40&longitude=-82.5&radiusKm=1&sinceMs=0&untilMs=0")"
           test "$code" = "200"
-          node -e 'const p=require(process.argv[1]); if(!Array.isArray(p.events)) throw new Error("missing events array")' "$f"
+          node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if(!Array.isArray(p.events)) throw new Error("missing events array")' "$f"
 
       - name: Compile and run Daily Monitor hardening tests
         shell: bash
