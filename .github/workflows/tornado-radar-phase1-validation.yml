@@ -24,6 +24,9 @@ jobs:
       - name: Validate velocity couplet calculations
         working-directory: server/radar-analysis
         run: npm run test:couplet
+      - name: Validate multi-scan trend and dual-pol evidence
+        working-directory: server/radar-analysis
+        run: npm run test:advanced
       - name: Probe live NOAA/NCEP Level II quantitative radar data for KILN
         working-directory: server/radar-analysis
         env:
