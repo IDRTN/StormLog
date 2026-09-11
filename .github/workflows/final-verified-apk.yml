@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - tornado-radar-quantitative-phase1-20260910
+      - tornado-live-radar-integration-20260911
   workflow_dispatch:
 
 concurrency:
@@ -17,6 +18,7 @@ env:
   NPM_CONFIG_LEGACY_PEER_DEPS: "true"
   EXPO_PUBLIC_STORMLOG_LIGHTNING_URL: "https://stormlog-lightning-proxy.idontrememberthename74.workers.dev"
   EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN: ${{ secrets.STORMLOG_LIGHTNING_TOKEN }}
+  EXPO_PUBLIC_STORMLOG_RADAR_API_URL: ${{ vars.EXPO_PUBLIC_STORMLOG_RADAR_API_URL }}
 
 jobs:
   validate-build-verify:
@@ -51,11 +53,18 @@ jobs:
       - name: TypeScript validation
         run: npm run typecheck
 
-      - name: Reverify live NWS, MRMS, and lightning data contracts
+      - name: Reverify live NWS, MRMS, lightning, and radar data contracts
         shell: bash
         run: |
           set -euo pipefail
           UA='StormLog/1.0 (verified-apk-build)'
+
+          test -n "${EXPO_PUBLIC_STORMLOG_RADAR_API_URL:-}"
+          curl -fsS "${EXPO_PUBLIC_STORMLOG_RADAR_API_URL%/}/health" > /tmp/radar-health.json
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(p?.ok!==true)throw new Error("radar health endpoint not ready")' /tmp/radar-health.json
+          curl -fsS "${EXPO_PUBLIC_STORMLOG_RADAR_API_URL%/}/radar?lat=40.039&lon=-82.461" > /tmp/radar.json
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(p?.available!==true)throw new Error("live radar unavailable");if(!Array.isArray(p.velocityPoints)||p.velocityPoints.length===0)throw new Error("live radar velocity missing");if(!Number.isFinite(Number(p.maxReflectivityDbz)))throw new Error("live radar reflectivity missing");if(!Number.isInteger(p.scanCount)||p.scanCount<1)throw new Error("live radar scan count invalid")' /tmp/radar.json
+
           curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" 'https://api.weather.gov/points/40.039,-82.461' > /tmp/point.json
           node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const u=p?.properties?.observationStations;if(typeof u!=="string"||!u.startsWith("https://api.weather.gov/"))throw new Error("invalid NWS observationStations URL");fs.writeFileSync("/tmp/stations-url",u)' /tmp/point.json
           curl -fsS -H 'Accept: application/geo+json' -H "User-Agent: $UA" "$(cat /tmp/stations-url)" > /tmp/stations.json
