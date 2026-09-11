@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - full-weather-accuracy-deepfix-20260909
+      - tornado-radar-quantitative-phase1-20260910
   workflow_dispatch:
 
 permissions:
