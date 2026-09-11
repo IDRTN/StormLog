@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   validate-level2:
@@ -20,7 +20,22 @@ jobs:
           node-version: '24.x'
           cache: npm
 
-      - name: Install app dependencies
+      - name: Repair stale npm lockfile if dependency metadata changed
+        shell: bash
+        env:
+          NPM_CONFIG_LEGACY_PEER_DEPS: 'true'
+        run: |
+          set -euo pipefail
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          if ! git diff --quiet -- package-lock.json; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add package-lock.json
+            git commit -m 'chore: synchronize npm lockfile'
+            git push origin HEAD:tornado-radar-quantitative-phase1-20260910
+          fi
+
+      - name: Install locked app dependencies
         env:
           NPM_CONFIG_LEGACY_PEER_DEPS: 'true'
         run: npm ci
