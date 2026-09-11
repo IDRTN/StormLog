@@ -61,7 +61,17 @@ jobs:
             --outDir /tmp/stormlog-radar-integration
 
       - name: Validate quantitative radar integration with Tornado Development engine
-        run: node /tmp/stormlog-radar-integration/__tests__/quantitativeRadarIntegration.runtime.test.js
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEST_FILE="$(find /tmp/stormlog-radar-integration -type f -name 'quantitativeRadarIntegration.runtime.test.js' -print -quit)"
+          if [ -z "$TEST_FILE" ]; then
+            echo '::error::Compiled quantitative radar integration test was not emitted'
+            find /tmp/stormlog-radar-integration -maxdepth 6 -type f -print
+            exit 1
+          fi
+          echo "Running $TEST_FILE"
+          node "$TEST_FILE"
 
       - name: Install isolated radar backend dependencies
         working-directory: server/radar-analysis
