@@ -80,34 +80,48 @@ async function fetchRadarVolume(entry) {
 }
 
 function asArray(value) { return Array.isArray(value) ? value : value ? [value] : []; }
-function momentValues(moment) { return Array.isArray(moment?.moment_data) ? moment.moment_data.filter(finite) : []; }
+
+function hasMinimumFiniteValues(moment, minimum = 2) {
+  if (!Array.isArray(moment?.moment_data)) return false;
+  let count = 0;
+  for (const value of moment.moment_data) {
+    if (finite(value) && ++count >= minimum) return true;
+  }
+  return false;
+}
 
 function getLowestUsableTilt(radar, getterName) {
   const elevations = radar.listElevations().filter(finite).sort((a, b) => a - b);
-  const candidates = [];
   for (const elevation of elevations) {
     radar.setElevation(elevation);
     const moments = asArray(radar[getterName]());
     const headers = asArray(radar.getHeader());
-    const usable = [];
+    const usableMoments = [];
+    const usableHeaders = [];
+    const angles = [];
     for (let i = 0; i < moments.length; i += 1) {
       const moment = moments[i];
       const header = headers[i] ?? headers[0] ?? null;
-      if (!header || !finite(header.azimuth) || momentValues(moment).length < 2) continue;
-      usable.push({ moment, header });
+      if (!header || !finite(header.azimuth) || !hasMinimumFiniteValues(moment, 2)) continue;
+      usableMoments.push(moment);
+      usableHeaders.push(header);
+      if (finite(header.elevation_angle)) angles.push(header.elevation_angle);
     }
-    if (usable.length < 30) continue;
-    const angles = usable.map(r => r.header.elevation_angle).filter(finite).sort((a, b) => a - b);
-    const angle = angles.length ? angles[Math.floor(angles.length / 2)] : elevation;
-    candidates.push({ elevation, elevationAngle: angle, moments: usable.map(r => r.moment), headers: usable.map(r => r.header) });
+    if (usableMoments.length < 30) continue;
+    angles.sort((a, b) => a - b);
+    const elevationAngle = angles.length ? angles[Math.floor(angles.length / 2)] : elevation;
+    return { elevation, elevationAngle, moments: usableMoments, headers: usableHeaders };
   }
-  return candidates.sort((a, b) => a.elevationAngle - b.elevationAngle || a.elevation - b.elevation)[0] ?? null;
+  return null;
 }
 
 function maxMomentValue(tilt) {
   if (!tilt) return null;
   let max = -Infinity;
-  for (const moment of tilt.moments) for (const value of momentValues(moment)) if (value > max) max = value;
+  for (const moment of tilt.moments) {
+    if (!Array.isArray(moment?.moment_data)) continue;
+    for (const value of moment.moment_data) if (finite(value) && value > max) max = value;
+  }
   return Number.isFinite(max) ? max : null;
 }
 
@@ -115,7 +129,8 @@ function medianMomentValue(tilt) {
   if (!tilt) return null;
   const values = [];
   for (const moment of tilt.moments) {
-    for (const value of momentValues(moment)) {
+    if (!Array.isArray(moment?.moment_data)) continue;
+    for (const value of moment.moment_data) {
       if (finite(value)) values.push(value);
       if (values.length >= 20_000) break;
     }
@@ -203,20 +218,42 @@ function matchingTrack(c, tracks) {
   return best;
 }
 
-async function decodeScan(entry, site) {
+function detectCoupletsFromVelocityTilt(velocityTilt) {
+  const azimuths = velocityTilt.headers.map(h => h.azimuth);
+  return detectVelocityCouplets({ azimuths, velocityMoments: velocityTilt.moments, maxCandidates: 40 });
+}
+
+async function decodeDetailedScan(entry, site) {
   const radar = await fetchRadarVolume(entry);
   if (radar.header?.ICAO && radar.header.ICAO !== site.id) throw new Error(`Radar ICAO mismatch: expected ${site.id}, got ${radar.header.ICAO}`);
   const reflectivityTilt = getLowestUsableTilt(radar, 'getHighresReflectivity');
   const velocityTilt = getLowestUsableTilt(radar, 'getHighresVelocity');
-  const ccTilt = getLowestUsableTilt(radar, 'getHighresCorrelationCoefficient');
-  const zdrTilt = getLowestUsableTilt(radar, 'getHighresDiffReflectivity');
   if (!reflectivityTilt) throw new Error(`${entry.name}: quantitative reflectivity unavailable`);
   if (!velocityTilt) throw new Error(`${entry.name}: Doppler velocity unavailable`);
-  const azimuths = velocityTilt.headers.map(h => h.azimuth);
-  const rawCouplets = detectVelocityCouplets({ azimuths, velocityMoments: velocityTilt.moments, maxCandidates: 40 });
+  const rawCouplets = detectCoupletsFromVelocityTilt(velocityTilt);
+  const ccTilt = getLowestUsableTilt(radar, 'getHighresCorrelationCoefficient');
+  const zdrTilt = getLowestUsableTilt(radar, 'getHighresDiffReflectivity');
   return {
-    timestamp: entry.timestamp ?? Date.now(), name: entry.name, reflectivityTilt, velocityTilt, ccTilt, zdrTilt,
-    maxReflectivityDbz: maxMomentValue(reflectivityTilt), rawCouplets,
+    timestamp: entry.timestamp ?? Date.now(),
+    name: entry.name,
+    reflectivityTilt,
+    velocityTilt,
+    ccTilt,
+    zdrTilt,
+    maxReflectivityDbz: maxMomentValue(reflectivityTilt),
+    rawCouplets,
+  };
+}
+
+async function decodeTrackingScan(entry, site) {
+  const radar = await fetchRadarVolume(entry);
+  if (radar.header?.ICAO && radar.header.ICAO !== site.id) throw new Error(`Radar ICAO mismatch: expected ${site.id}, got ${radar.header?.ICAO}`);
+  const velocityTilt = getLowestUsableTilt(radar, 'getHighresVelocity');
+  if (!velocityTilt) throw new Error(`${entry.name}: Doppler velocity unavailable`);
+  return {
+    timestamp: entry.timestamp ?? Date.now(),
+    name: entry.name,
+    rawCouplets: detectCoupletsFromVelocityTilt(velocityTilt),
   };
 }
 
@@ -228,21 +265,37 @@ export async function analyzeRadar(latitude, longitude, { volumeCount = 3 } = {}
   if (existing && Date.now() - existing.at < CACHE_MS) return existing.value;
 
   let entries;
-  try { entries = await listLatestVolumeUrls(site.id, volumeCount); }
+  try { entries = await listLatestVolumeUrls(site.id, Math.max(volumeCount, 3)); }
   catch (error) { return unavailable(site.id, error instanceof Error ? error.message : String(error)); }
 
-  const scans = [];
   const failures = [];
-  for (const entry of entries) {
-    try { scans.push(await decodeScan(entry, site)); }
-    catch (error) { failures.push(`${entry.name}: ${error instanceof Error ? error.message : String(error)}`); }
+  const newestFirst = [...entries].sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+  let latest = null;
+  let latestIndex = -1;
+  for (let i = 0; i < newestFirst.length; i += 1) {
+    try {
+      latest = await decodeDetailedScan(newestFirst[i], site);
+      latestIndex = i;
+      break;
+    } catch (error) {
+      failures.push(`${newestFirst[i].name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
-  if (!scans.length) return unavailable(site.id, failures.join(' | ') || 'No Level II scans decoded');
+  if (!latest) return unavailable(site.id, failures.join(' | ') || 'No Level II scans decoded');
 
-  scans.sort((a, b) => a.timestamp - b.timestamp);
-  const trackInput = scans.map(s => ({ timestamp: s.timestamp, couplets: s.rawCouplets }));
+  const trackingScans = [{ timestamp: latest.timestamp, rawCouplets: latest.rawCouplets }];
+  for (let i = latestIndex + 1; i < newestFirst.length && trackingScans.length < volumeCount; i += 1) {
+    try {
+      const summary = await decodeTrackingScan(newestFirst[i], site);
+      trackingScans.push(summary);
+    } catch (error) {
+      failures.push(`${newestFirst[i].name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  trackingScans.sort((a, b) => a.timestamp - b.timestamp);
+  const trackInput = trackingScans.map(s => ({ timestamp: s.timestamp, couplets: s.rawCouplets }));
   const tracks = trackRotationAcrossScans(trackInput);
-  const latest = scans.at(-1);
   const couplets = latest.rawCouplets.map(c => {
     const track = matchingTrack(c, tracks);
     return coupletPayload(c, site, latest.velocityTilt, track?.scanCount ?? 1);
@@ -273,7 +326,7 @@ export async function analyzeRadar(latitude, longitude, { volumeCount = 3 } = {}
     stormCells: [],
     correlationCoefficient: finite(cc) ? cc : null,
     differentialReflectivity: finite(zdr) ? zdr : null,
-    scanCount: scans.length,
+    scanCount: trackingScans.length,
     trend: bestTrack?.trend ?? 'UNKNOWN',
     dualPolEvidence: dualPol,
     source: 'NOAA/NCEP NOMADS NEXRAD Level II',
