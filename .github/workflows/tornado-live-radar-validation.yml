@@ -1,0 +1,82 @@
+name: Tornado Live Radar Integration Validation (No APK)
+
+on:
+  push:
+    branches:
+      - tornado-live-radar-integration-20260911
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-live-radar-path:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - name: Install locked app dependencies
+        env:
+          NPM_CONFIG_LEGACY_PEER_DEPS: 'true'
+        run: npm ci
+
+      - name: TypeScript validation
+        run: npm run typecheck
+
+      - name: Install isolated radar backend dependencies
+        working-directory: server/radar-analysis
+        run: npm install --no-audit --no-fund
+
+      - name: Validate velocity couplet calculations
+        working-directory: server/radar-analysis
+        run: npm run test:couplet
+
+      - name: Validate multi-scan tracking and dual-pol evidence
+        working-directory: server/radar-analysis
+        run: npm run test:advanced
+
+      - name: Validate live Level II radar API service end to end
+        working-directory: server/radar-analysis
+        run: npm run test:service
+
+      - name: Re-probe live NOAA/NCEP Level II source independently
+        working-directory: server/radar-analysis
+        env:
+          RADAR_SITE: KILN
+        run: npm run probe
+
+      - name: Validate Tornado Development parser and engine integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/stormlog-radar-integration
+          npx tsc --ignoreConfig \
+            src/services/analysis/quantitativeRadarBackend.ts \
+            src/services/analysis/tornadoAnalysis.ts \
+            src/services/analysis/__tests__/quantitativeRadarIntegration.runtime.test.ts \
+            --module commonjs \
+            --target ES2022 \
+            --moduleResolution node \
+            --types node \
+            --ignoreDeprecations 6.0 \
+            --esModuleInterop \
+            --skipLibCheck \
+            --outDir /tmp/stormlog-radar-integration
+          TEST_FILE="$(find /tmp/stormlog-radar-integration -type f -name 'quantitativeRadarIntegration.runtime.test.js' -print -quit)"
+          test -n "$TEST_FILE"
+          node "$TEST_FILE"
+
+      - name: Confirm development validation did not assemble an APK
+        shell: bash
+        run: |
+          if find . -type f -name '*.apk' -print -quit | grep -q .; then
+            echo '::error::Live radar validation unexpectedly assembled an APK'
+            exit 1
+          fi
+          echo 'No APK assembled; live radar integration remains isolated until validation passes.'
