@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: stormlog-radar-analysis
+    runtime: node
+    rootDir: server/radar-analysis
+    buildCommand: npm install --no-audit --no-fund
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: false
+    envVars:
+      - key: NODE_VERSION
+        value: 24.20.0
