@@ -12,26 +12,60 @@ permissions:
 jobs:
   validate-level2:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: '24.x'
+          cache: npm
+
+      - name: Install app dependencies
+        env:
+          NPM_CONFIG_LEGACY_PEER_DEPS: 'true'
+        run: npm ci
+
+      - name: TypeScript validation
+        run: npm run typecheck
+
+      - name: Compile quantitative radar engine integration test
+        run: |
+          rm -rf /tmp/stormlog-radar-integration
+          npx tsc \
+            --ignoreConfig \
+            src/services/analysis/quantitativeRadarBackend.ts \
+            src/services/analysis/tornadoAnalysis.ts \
+            src/services/analysis/__tests__/quantitativeRadarIntegration.runtime.test.ts \
+            --module commonjs \
+            --target ES2022 \
+            --moduleResolution node \
+            --types node \
+            --ignoreDeprecations 6.0 \
+            --esModuleInterop \
+            --skipLibCheck \
+            --outDir /tmp/stormlog-radar-integration
+
+      - name: Validate quantitative radar integration with Tornado Development engine
+        run: node /tmp/stormlog-radar-integration/__tests__/quantitativeRadarIntegration.runtime.test.js
+
       - name: Install isolated radar backend dependencies
         working-directory: server/radar-analysis
         run: npm install --no-audit --no-fund
+
       - name: Validate velocity couplet calculations
         working-directory: server/radar-analysis
         run: npm run test:couplet
+
       - name: Validate multi-scan trend and dual-pol evidence
         working-directory: server/radar-analysis
         run: npm run test:advanced
+
       - name: Probe live NOAA/NCEP Level II quantitative radar data for KILN
         working-directory: server/radar-analysis
         env:
           RADAR_SITE: KILN
         run: npm run probe
+
       - name: Confirm no APK was built
         shell: bash
         run: |
