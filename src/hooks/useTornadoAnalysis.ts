@@ -37,7 +37,7 @@ export function useTornadoAnalysis() {
           const nexradResult = radarResult.nexradResult;
           setRadarStatus(
             nexradResult.available
-              ? `Connected${nexradResult.stationId ? ` (${nexradResult.stationId})` : ''}`
+              ? `${nexradResult.source === 'QUANTITATIVE_LEVEL2' ? 'Level II' : 'Composite'} connected${nexradResult.stationId ? ` (${nexradResult.stationId})` : ''}`
               : nexradResult.unavailableReason ?? 'Unavailable'
           );
           radarInput = {
@@ -50,7 +50,14 @@ export function useTornadoAnalysis() {
             velocityPoints: nexradResult.velocityPoints,
             couplets: nexradResult.couplets,
             stormCells: nexradResult.cells,
-          };
+            // Tornadic evidence intentionally consumes these only when the
+            // quantitative backend actually supplies them. Composite fallback
+            // leaves them null/undefined and cannot create a debris claim.
+            correlationCoefficient: nexradResult.correlationCoefficient,
+            differentialReflectivity: nexradResult.differentialReflectivity,
+            scanCount: nexradResult.scanCount,
+            radarSource: nexradResult.source,
+          } as any;
         } else {
           console.warn('[TornadoAnalysis] radar fetch failed:', radarResult.error);
           setRadarStatus('Radar fetch failed');
@@ -70,8 +77,6 @@ export function useTornadoAnalysis() {
           console.warn('[TornadoAnalysis] HRRR upper-air fetch failed:', hrrrResult.error);
         }
 
-        // Radar and HRRR are independent inputs. Failure of either source must
-        // degrade only that analysis layer rather than erase valid data from the other.
         const enrichedInput: AnalysisInput = {
           ...input,
           radarData: radarInput,
