@@ -3,7 +3,7 @@ name: Final Verified StormLog APK
 on:
   push:
     branches:
-      - full-weather-accuracy-deepfix-20260909
+      - tornado-radar-quantitative-phase1-20260910
   workflow_dispatch:
 
 concurrency:
@@ -116,6 +116,34 @@ jobs:
           node /tmp/lightning-tests/src/services/lightning/__tests__/httpLightningAdapter.runtime.test.js
           node /tmp/lightning-tests/server/lightning-proxy/src/handler.runtime.test.js
 
+      - name: Validate Tornado Development quantitative radar integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/stormlog-radar-integration
+          npx tsc --ignoreConfig src/services/analysis/quantitativeRadarBackend.ts src/services/analysis/tornadoAnalysis.ts src/services/analysis/__tests__/quantitativeRadarIntegration.runtime.test.ts --module commonjs --target ES2022 --moduleResolution node --types node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --outDir /tmp/stormlog-radar-integration
+          TEST_FILE="$(find /tmp/stormlog-radar-integration -type f -name 'quantitativeRadarIntegration.runtime.test.js' -print -quit)"
+          test -n "$TEST_FILE"
+          node "$TEST_FILE"
+
+      - name: Install isolated radar backend dependencies
+        working-directory: server/radar-analysis
+        run: npm install --no-audit --no-fund
+
+      - name: Validate velocity couplet calculations
+        working-directory: server/radar-analysis
+        run: npm run test:couplet
+
+      - name: Validate multi-scan trend and dual-pol evidence
+        working-directory: server/radar-analysis
+        run: npm run test:advanced
+
+      - name: Probe live NOAA/NCEP Level II radar for KILN
+        working-directory: server/radar-analysis
+        env:
+          RADAR_SITE: KILN
+        run: npm run probe
+
       - name: Generate Android project
         env:
           CI: "1"
@@ -173,15 +201,15 @@ jobs:
               exit 1
             fi
           fi
-          cp "$APK" StormLog-full-weather-accuracy-verified.apk
-          cp /tmp/stormlog-apk.sha256 StormLog-full-weather-accuracy-verified.sha256.txt
+          cp "$APK" StormLog-tornado-development-verified.apk
+          cp /tmp/stormlog-apk.sha256 StormLog-tornado-development-verified.sha256.txt
 
       - name: Upload verified APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: StormLog-full-weather-accuracy-verified
+          name: StormLog-tornado-development-verified
           path: |
-            StormLog-full-weather-accuracy-verified.apk
-            StormLog-full-weather-accuracy-verified.sha256.txt
+            StormLog-tornado-development-verified.apk
+            StormLog-tornado-development-verified.sha256.txt
           if-no-files-found: error
           retention-days: 14
