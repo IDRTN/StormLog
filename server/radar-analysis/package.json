@@ -1,6 +1,6 @@
 {
   "name": "stormlog-radar-analysis",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -11,6 +11,7 @@
   },
   "scripts": {
     "test:couplet": "node src/test-couplet-detector.mjs",
+    "test:advanced": "node src/test-advanced-evidence.mjs",
     "probe": "node src/live-probe.mjs"
   }
 }
