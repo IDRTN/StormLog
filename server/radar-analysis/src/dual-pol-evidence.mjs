@@ -13,12 +13,15 @@ export function evaluateDualPolEvidence({ correlationCoefficient, differentialRe
   const supportiveReflectivity = ref == null ? null : ref >= 20;
   const velocitySupported = hasVelocityCouplet === true && lowLevel === true;
 
-  const debrisSignature = lowCc && velocitySupported && supportiveReflectivity !== false;
+  // A debris claim is safety-critical. Unknown reflectivity is not affirmative
+  // evidence: require measured reflectivity at the same sampled location as
+  // the low CC and low-level velocity couplet.
+  const debrisSignature = lowCc && velocitySupported && supportiveReflectivity === true;
   let confidence = null;
   if (debrisSignature) {
     let score = Math.min(1, Math.max(0, (0.85 - cc) / 0.25));
     if (supportiveZdr === true) score = Math.min(1, score + 0.1);
-    if (supportiveReflectivity === true) score = Math.min(1, score + 0.1);
+    score = Math.min(1, score + 0.1);
     confidence = Math.round(score * 100);
   }
 
@@ -27,6 +30,7 @@ export function evaluateDualPolEvidence({ correlationCoefficient, differentialRe
   if (!hasVelocityCouplet) reasons.push('no supporting velocity couplet');
   else if (!lowLevel) reasons.push('couplet not confirmed low-level');
   else reasons.push('low-level velocity couplet present');
+  if (supportiveReflectivity === null) reasons.push('colocated reflectivity unavailable');
   if (supportiveReflectivity === false) reasons.push('reflectivity too weak for debris confidence');
   if (supportiveReflectivity === true) reasons.push('reflectivity supports debris assessment');
   if (supportiveZdr === true) reasons.push('ZDR is supportive');
