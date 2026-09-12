@@ -3,7 +3,7 @@ import type { WeatherResult } from './types';
 import { fetchBestNwsObservation, type FetchJson } from './nwsObservations';
 import { fetchNwsForecast, type FetchJson as ForecastFetchJson } from './nwsForecast';
 import { fetchOpenMeteoSnapshot } from './openMeteo';
-import { createHttpMrmsProvider, type MrmsProvider } from './mrms';
+import { createHttpMrmsProvider, type MrmsPrecipitation, type MrmsProvider } from './mrms';
 import { guardedRequest } from '../network/requestGuard';
 
 export interface WeatherFeatureFlags {
@@ -103,6 +103,33 @@ function hasUsableCurrentConditions(data: WeatherData | undefined): data is Weat
 function providerError(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   return String(error ?? 'unknown provider error');
+}
+
+function selectPartialMrmsAccumulation(
+  mrmsResult: MrmsPrecipitation,
+  referenceTimeMs: number,
+  utcOffsetSeconds: number,
+): { value: number; hours: number } | null {
+  const localMidnight = Math.floor((referenceTimeMs + utcOffsetSeconds * 1000) / 86400000) * 86400000 - utcOffsetSeconds * 1000;
+  const elapsedHours = Math.max(0, (referenceTimeMs - localMidnight) / 3600000);
+  const candidates = [
+    { hours: 24, value: mrmsResult.radarPrecipitation24hInches },
+    { hours: 12, value: mrmsResult.radarPrecipitation12hInches },
+    { hours: 6, value: mrmsResult.radarPrecipitation6hInches },
+    { hours: 3, value: mrmsResult.radarPrecipitation3hInches },
+    { hours: 1, value: mrmsResult.radarPrecipitation1hInches ?? mrmsResult.currentOneHourInches },
+  ].filter((candidate): candidate is { hours: number; value: number } =>
+    typeof candidate.value === 'number' && Number.isFinite(candidate.value));
+
+  if (!candidates.length) return null;
+
+  // Use the largest rolling window that fits inside the local day so the value
+  // updates during rain without pretending that a rolling 24h total is today's
+  // midnight-to-now total. Before the first full local hour, a 1h rolling value
+  // is still useful as long as the UI marks it partial.
+  return candidates.find((candidate) => candidate.hours <= Math.max(1, elapsedHours))
+    ?? candidates[candidates.length - 1]
+    ?? null;
 }
 
 export function createStormLogWeatherProvider(
@@ -217,15 +244,20 @@ export function createStormLogWeatherProvider(
                   weatherData.currentPartialHourPrecipitation = mrmsResult.currentPartialHourInches;
                   weatherData.precipitationSource = mrmsResult.source;
 
-                  // Only a backend that supplies complete, non-overlapping hourly
-                  // MRMS buckets is allowed to populate a true local-day total.
+                  // A complete midnight-to-now accumulation remains preferred.
+                  // When direct NOAA MRMS only supplies rolling products, retain
+                  // the best measured rolling accumulation as an explicitly
+                  // partial value instead of erasing it and rendering --".
                   if (mrmsResult.observedDailyIsComplete && mrmsResult.observedDailyPrecipitationInches != null) {
                     weatherData.observedDailyPrecipitation = mrmsResult.observedDailyPrecipitationInches;
                     weatherData.observedDailyPrecipitationIsComplete = true;
+                    weatherData.observedDailyPrecipitationPartialHours = undefined;
                     weatherData.precipitationIsComplete = true;
                   } else {
-                    weatherData.observedDailyPrecipitation = null;
+                    const partial = selectPartialMrmsAccumulation(mrmsResult, referenceTimeMs, utcOffsetSeconds);
+                    weatherData.observedDailyPrecipitation = partial?.value ?? null;
                     weatherData.observedDailyPrecipitationIsComplete = false;
+                    weatherData.observedDailyPrecipitationPartialHours = partial?.hours;
                     weatherData.precipitationIsComplete = false;
                   }
 
