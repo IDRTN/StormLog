@@ -7,6 +7,7 @@ import { evaluateDualPolEvidence } from './dual-pol-evidence.mjs';
 
 const execFileAsync = promisify(execFile);
 const WORKER_PATH = fileURLToPath(new URL('./radar-scan-worker.mjs', import.meta.url));
+const CHUNK_BUCKET = 'https://unidata-nexrad-level2-chunks.s3.amazonaws.com';
 
 const RADAR_SITES = [
   { id: 'KILN', latitude: 39.4203, longitude: -83.8217 },
@@ -26,6 +27,7 @@ function finite(v) { return typeof v === 'number' && Number.isFinite(v); }
 function toRad(v) { return v * Math.PI / 180; }
 function toDeg(v) { return v * 180 / Math.PI; }
 function angularDistance(a, b) { let d = Math.abs(a - b) % 360; return Math.min(d, 360 - d); }
+function decodeXml(value) { return value.replaceAll('&amp;', '&').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&quot;', '"').replaceAll('&#39;', "'"); }
 
 export function haversineKm(lat1, lon1, lat2, lon2) {
   const r = 6371;
@@ -56,33 +58,85 @@ export function nearestRadarSite(latitude, longitude, maxDistanceKm = 350) {
   return best && best.distanceKm <= maxDistanceKm ? best : null;
 }
 
-function parseVolumeTime(name) {
-  const m = name.match(/_(\d{8})_(\d{6})\.bz2$/);
+function chunkTimestampFromKey(key) {
+  const m = key.match(/(\d{8})-(\d{6})-/);
   if (!m) return null;
   const d = m[1], t = m[2];
   return Date.UTC(+d.slice(0, 4), +d.slice(4, 6) - 1, +d.slice(6, 8), +t.slice(0, 2), +t.slice(2, 4), +t.slice(4, 6));
 }
 
-async function listLatestVolumeUrls(siteId, count = MAX_CANDIDATE_VOLUMES) {
-  const base = `https://nomads.ncep.noaa.gov/pub/data/nccf/radar/nexrad_level2/${siteId}`;
-  const response = await fetch(`${base}/dir.list`, { headers: { Accept: 'text/plain', 'User-Agent': 'StormLog-Radar/1.0' } });
-  if (!response.ok) throw new Error(`NOMADS dir.list HTTP ${response.status}`);
-  const text = await response.text();
-  const names = [...text.matchAll(/(K[A-Z0-9]{3}_\d{8}_\d{6}\.bz2)/g)].map(m => m[1]);
-  const unique = [...new Set(names)].sort();
-  if (!unique.length) throw new Error(`No Level II volumes listed for ${siteId}`);
-  return unique.slice(-Math.max(1, count)).map(name => ({ name, url: `${base}/${name}`, timestamp: parseVolumeTime(name) }));
+function keyUrl(key) {
+  return `${CHUNK_BUCKET}/${key.split('/').map(encodeURIComponent).join('/')}`;
 }
 
-async function runScanWorker(entry, site, includeDetail) {
-  const encoded = Buffer.from(JSON.stringify({ entry, site, includeDetail }), 'utf8').toString('base64url');
-  const { stdout } = await execFileAsync(process.execPath, ['--max-old-space-size=320', WORKER_PATH, encoded], {
-    timeout: 75_000,
+async function fetchS3List(prefix, delimiter = null) {
+  const url = new URL(CHUNK_BUCKET);
+  url.searchParams.set('list-type', '2');
+  url.searchParams.set('prefix', prefix);
+  url.searchParams.set('max-keys', '1000');
+  if (delimiter) url.searchParams.set('delimiter', delimiter);
+  const response = await fetch(url, { headers: { 'User-Agent': 'StormLog-Radar/1.0' } });
+  if (!response.ok) throw new Error(`Unidata chunk listing HTTP ${response.status}`);
+  return response.text();
+}
+
+async function listVolumePrefixes(siteId) {
+  const xml = await fetchS3List(`${siteId}/`, '/');
+  return [...xml.matchAll(/<CommonPrefixes>\s*<Prefix>([^<]+)<\/Prefix>\s*<\/CommonPrefixes>/g)]
+    .map(m => decodeXml(m[1]))
+    .filter(p => p.startsWith(`${siteId}/`));
+}
+
+async function readVolume(prefix) {
+  const xml = await fetchS3List(prefix);
+  const keys = [...xml.matchAll(/<Contents>[\s\S]*?<Key>([^<]+)<\/Key>[\s\S]*?<\/Contents>/g)]
+    .map(m => decodeXml(m[1]))
+    .filter(key => key.startsWith(prefix))
+    .sort();
+  if (!keys.length) return null;
+  const timestamp = Math.max(...keys.map(chunkTimestampFromKey).filter(finite));
+  if (!finite(timestamp)) return null;
+  const hasStart = keys.some(k => /-S$/.test(k));
+  const intermediateCount = keys.filter(k => /-[IE]$/.test(k)).length;
+  if (!hasStart || intermediateCount < 3) return null;
+  return {
+    id: prefix.replace(/\/$/, ''),
+    timestamp,
+    chunks: keys.map(key => ({ key, url: keyUrl(key) })),
+  };
+}
+
+async function listLatestVolumes(siteId) {
+  const prefixes = await listVolumePrefixes(siteId);
+  if (!prefixes.length) throw new Error(`No real-time Level II chunk volumes listed for ${siteId}`);
+  const sorted = [...prefixes].sort();
+  const candidatePrefixes = [...new Set([
+    ...sorted.slice(-10),
+    ...sorted.slice(0, 10),
+  ])];
+  const volumes = [];
+  for (const prefix of candidatePrefixes) {
+    try {
+      const volume = await readVolume(prefix);
+      if (volume) volumes.push(volume);
+    } catch {
+      // A volume may disappear while the 24-hour chunk bucket is being scrubbed.
+    }
+  }
+  volumes.sort((a, b) => b.timestamp - a.timestamp);
+  if (!volumes.length) throw new Error(`No usable real-time Level II chunk volumes for ${siteId}`);
+  return volumes.slice(0, MAX_CANDIDATE_VOLUMES);
+}
+
+async function runScanWorker(volume, site, includeDetail) {
+  const encoded = Buffer.from(JSON.stringify({ volume, site, includeDetail }), 'utf8').toString('base64url');
+  const { stdout } = await execFileAsync(process.execPath, ['--max-old-space-size=220', WORKER_PATH, encoded], {
+    timeout: 60_000,
     maxBuffer: 8 * 1024 * 1024,
     env: { ...process.env, NODE_OPTIONS: '' },
   });
   const result = JSON.parse(stdout);
-  if (!result || !Array.isArray(result.rawCouplets)) throw new Error(`${entry.name}: invalid worker result`);
+  if (!result || !Array.isArray(result.rawCouplets)) throw new Error(`${volume.id}: invalid worker result`);
   return result;
 }
 
@@ -129,40 +183,35 @@ export async function analyzeRadar(latitude, longitude, { volumeCount = 3 } = {}
   const existing = cache.get(cacheKey);
   if (existing && Date.now() - existing.at < CACHE_MS) return existing.value;
 
-  let entries;
-  try { entries = await listLatestVolumeUrls(site.id, MAX_CANDIDATE_VOLUMES); }
+  let volumes;
+  try { volumes = await listLatestVolumes(site.id); }
   catch (error) { return unavailable(site.id, error instanceof Error ? error.message : String(error)); }
 
-  const newestFirst = [...entries].sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
   const failures = [];
   let latest = null;
   let latestIndex = -1;
-
-  for (let i = 0; i < newestFirst.length; i += 1) {
+  for (let i = 0; i < volumes.length; i += 1) {
     try {
-      const scan = await runScanWorker(newestFirst[i], site, true);
-      if (!finite(scan.timestamp) || Date.now() - scan.timestamp > MAX_SCAN_AGE_MS) {
-        throw new Error(`${newestFirst[i].name}: newest complete scan is stale`);
-      }
-      if (!finite(scan.maxReflectivityDbz)) throw new Error(`${newestFirst[i].name}: reflectivity missing`);
-      if (!Array.isArray(scan.velocityPoints) || scan.velocityPoints.length === 0) throw new Error(`${newestFirst[i].name}: velocity missing`);
+      const scan = await runScanWorker(volumes[i], site, true);
+      if (!finite(scan.timestamp) || Date.now() - scan.timestamp > MAX_SCAN_AGE_MS) throw new Error(`${volumes[i].id}: newest complete low sweep is stale`);
+      if (!finite(scan.maxReflectivityDbz)) throw new Error(`${volumes[i].id}: reflectivity missing`);
+      if (!Array.isArray(scan.velocityPoints) || scan.velocityPoints.length === 0) throw new Error(`${volumes[i].id}: velocity missing`);
       latest = scan;
       latestIndex = i;
       break;
     } catch (error) {
-      failures.push(`${newestFirst[i].name}: ${error instanceof Error ? error.message : String(error)}`);
+      failures.push(`${volumes[i].id}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-
-  if (!latest) return unavailable(site.id, failures.join(' | ') || 'No complete Level II scan decoded');
+  if (!latest) return unavailable(site.id, failures.join(' | ') || 'No complete low-level Level II sweep decoded');
 
   const trackingScans = [{ timestamp: latest.timestamp, couplets: latest.rawCouplets }];
-  for (let i = latestIndex + 1; i < newestFirst.length && trackingScans.length < Math.max(1, volumeCount); i += 1) {
+  for (let i = latestIndex + 1; i < volumes.length && trackingScans.length < Math.max(1, volumeCount); i += 1) {
     try {
-      const scan = await runScanWorker(newestFirst[i], site, false);
+      const scan = await runScanWorker(volumes[i], site, false);
       trackingScans.push({ timestamp: scan.timestamp, couplets: scan.rawCouplets });
     } catch (error) {
-      failures.push(`${newestFirst[i].name}: ${error instanceof Error ? error.message : String(error)}`);
+      failures.push(`${volumes[i].id}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -201,7 +250,8 @@ export async function analyzeRadar(latitude, longitude, { volumeCount = 3 } = {}
     scanCount: trackingScans.length,
     trend: bestTrack?.trend ?? 'UNKNOWN',
     dualPolEvidence: dualPol,
-    source: 'NOAA/NCEP NOMADS NEXRAD Level II',
+    source: 'Unidata real-time NEXRAD Level II chunks',
+    usedChunks: latest.usedChunks,
     failedScans: failures.length,
   };
 
@@ -234,7 +284,7 @@ export function createRadarServer({ port = Number(process.env.PORT || 8788) } = 
     if (!req.url) { res.statusCode = 400; res.end(JSON.stringify({ error: 'missing URL' })); return; }
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname === '/health') {
-      res.end(JSON.stringify({ ok: true, service: 'stormlog-radar-analysis' }));
+      res.end(JSON.stringify({ ok: true, service: 'stormlog-radar-analysis', mode: 'bounded-level2-chunks' }));
       return;
     }
     if (url.pathname !== '/radar') { res.statusCode = 404; res.end(JSON.stringify({ error: 'not found' })); return; }
