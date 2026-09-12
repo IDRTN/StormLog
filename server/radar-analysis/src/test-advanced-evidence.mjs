@@ -31,6 +31,14 @@ assert.equal(noVelocity.debrisSignature, false);
 const weakReflectivity = evaluateDualPolEvidence({ correlationCoefficient: 0.70, reflectivityDbz: 5, hasVelocityCouplet: true, lowLevel: true });
 assert.equal(weakReflectivity.debrisSignature, false);
 
+// Regression for the 2026-09-12 live false-positive path: low CC plus a
+// low-level couplet must not become a debris claim if colocated reflectivity
+// is missing. Unknown evidence fails closed.
+const missingReflectivity = evaluateDualPolEvidence({ correlationCoefficient: 0.69, reflectivityDbz: null, hasVelocityCouplet: true, lowLevel: true });
+assert.equal(missingReflectivity.available, true);
+assert.equal(missingReflectivity.debrisSignature, false);
+assert.match(missingReflectivity.reason, /colocated reflectivity unavailable/);
+
 const missing = evaluateDualPolEvidence({ correlationCoefficient: null, hasVelocityCouplet: true, lowLevel: true });
 assert.equal(missing.available, false);
 assert.equal(missing.debrisSignature, false);
