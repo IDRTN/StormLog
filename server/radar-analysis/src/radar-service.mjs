@@ -7,7 +7,7 @@ import { evaluateDualPolEvidence } from './dual-pol-evidence.mjs';
 
 const execFileAsync = promisify(execFile);
 const WORKER_PATH = fileURLToPath(new URL('./radar-scan-worker.mjs', import.meta.url));
-const NOMADS_ROOT = 'https://nomads.ncep.noaa.gov/pub/data/nccf/radar/nexrad_level2';
+const CHUNK_BUCKET = 'https://unidata-nexrad-level2-chunks.s3.amazonaws.com';
 
 const RADAR_SITES = [
   { id: 'KILN', latitude: 39.4203, longitude: -83.8217 },
@@ -23,8 +23,9 @@ const MAX_CANDIDATE_VOLUMES = 4;
 const MAX_SCAN_AGE_MS = 20 * 60_000;
 const MAX_SITE_FALLBACKS = 1;
 const LIST_TIMEOUT_MS = 10_000;
-const WORKER_TIMEOUT_MS = 85_000;
-const REQUEST_BUDGET_MS = 110_000;
+const PREFIX_LIST_CONCURRENCY = 8;
+const WORKER_TIMEOUT_MS = 45_000;
+const REQUEST_BUDGET_MS = 75_000;
 const MAX_TRACKED_SCANS = 3;
 const cache = new Map();
 const scanHistory = new Map();
@@ -33,6 +34,7 @@ function finite(v) { return typeof v === 'number' && Number.isFinite(v); }
 function toRad(v) { return v * Math.PI / 180; }
 function toDeg(v) { return v * 180 / Math.PI; }
 function angularDistance(a, b) { let d = Math.abs(a - b) % 360; return Math.min(d, 360 - d); }
+function decodeXml(value) { return value.replaceAll('&amp;', '&').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&quot;', '"').replaceAll('&#39;', "'"); }
 
 export function haversineKm(lat1, lon1, lat2, lon2) {
   const r = 6371;
@@ -65,47 +67,120 @@ export function nearestRadarSite(latitude, longitude, maxDistanceKm = 350) {
   return radarSitesByDistance(latitude, longitude, maxDistanceKm)[0] ?? null;
 }
 
-function parseNomadsTime(name) {
-  const m = name.match(/_(\d{8})_(\d{6})\.bz2$/);
-  if (!m) return null;
-  const d = m[1], t = m[2];
+function chunkTimestampFromKey(key) {
+  const match = key.match(/(\d{8})-(\d{6})-/);
+  if (!match) return null;
+  const d = match[1], t = match[2];
   return Date.UTC(
     Number(d.slice(0, 4)), Number(d.slice(4, 6)) - 1, Number(d.slice(6, 8)),
     Number(t.slice(0, 2)), Number(t.slice(2, 4)), Number(t.slice(4, 6)),
   );
 }
 
-async function listRecentNomadsVolumes(siteId) {
-  const base = `${NOMADS_ROOT}/${siteId}`;
-  const response = await fetch(`${base}/dir.list`, {
-    headers: { Accept: 'text/plain', 'User-Agent': 'StormLog-Radar/1.0' },
+function keyUrl(key) {
+  return `${CHUNK_BUCKET}/${key.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+function objectKeys(xml) {
+  return [...xml.matchAll(/<Contents>[\s\S]*?<Key>([^<]+)<\/Key>[\s\S]*?<\/Contents>/g)]
+    .map(match => decodeXml(match[1]));
+}
+
+function commonPrefixes(xml) {
+  return [...xml.matchAll(/<CommonPrefixes>\s*<Prefix>([^<]+)<\/Prefix>\s*<\/CommonPrefixes>/g)]
+    .map(match => decodeXml(match[1]));
+}
+
+function isTruncated(xml) {
+  return /<IsTruncated>true<\/IsTruncated>/.test(xml);
+}
+
+async function fetchS3List({ prefix, delimiter = null, maxKeys = 1000 }) {
+  const url = new URL(CHUNK_BUCKET);
+  url.searchParams.set('list-type', '2');
+  url.searchParams.set('prefix', prefix);
+  url.searchParams.set('max-keys', String(maxKeys));
+  if (delimiter) url.searchParams.set('delimiter', delimiter);
+  const response = await fetch(url, {
+    headers: { 'User-Agent': 'StormLog-Radar/1.0' },
     signal: AbortSignal.timeout(LIST_TIMEOUT_MS),
   });
-  if (!response.ok) throw new Error(`${siteId}: NOMADS dir.list HTTP ${response.status}`);
-  const text = await response.text();
-  const pattern = new RegExp(`(${siteId}_\\d{8}_\\d{6}\\.bz2)`, 'g');
-  const names = [...new Set([...text.matchAll(pattern)].map(match => match[1]))];
-  const volumes = names
-    .map(name => ({
-      id: name,
-      siteId,
-      timestamp: parseNomadsTime(name),
-      url: `${base}/${name}`,
-      source: 'NOAA/NCEP NOMADS NEXRAD Level II',
-    }))
-    .filter(volume => finite(volume.timestamp))
+  if (!response.ok) throw new Error(`Unidata chunk listing HTTP ${response.status}`);
+  return response.text();
+}
+
+async function mapLimit(items, limit, mapper) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      try {
+        results[index] = await mapper(items[index], index);
+      } catch (error) {
+        results[index] = { error };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  return results;
+}
+
+async function listVolumePrefixes(siteId) {
+  const xml = await fetchS3List({ prefix: `${siteId}/`, delimiter: '/', maxKeys: 1000 });
+  if (isTruncated(xml)) throw new Error(`${siteId}: rotating volume prefix index exceeded one S3 page`);
+  const prefixes = commonPrefixes(xml).filter(prefix => prefix.startsWith(`${siteId}/`));
+  if (!prefixes.length) throw new Error(`${siteId}: no rotating Level II volume prefixes listed`);
+  return prefixes;
+}
+
+async function readVolume(prefix, siteId) {
+  const xml = await fetchS3List({ prefix, maxKeys: 1000 });
+  if (isTruncated(xml)) throw new Error(`${prefix}: volume contains more than 1000 chunks`);
+  const keys = objectKeys(xml)
+    .filter(key => key.startsWith(prefix))
+    .sort((a, b) => a.localeCompare(b));
+  if (!keys.length) return null;
+
+  const timestamps = keys.map(chunkTimestampFromKey).filter(finite);
+  if (!timestamps.length) return null;
+  const timestamp = Math.max(...timestamps);
+  const hasStart = keys.some(key => /-S$/.test(key));
+  const hasEnd = keys.some(key => /-E$/.test(key));
+  const intermediateCount = keys.filter(key => /-[IE](?:\d+)?$/.test(key)).length;
+  if (!hasStart || (!hasEnd && intermediateCount < 3)) return null;
+
+  return {
+    id: prefix.replace(/\/$/, ''),
+    siteId,
+    timestamp,
+    source: 'Unidata real-time NEXRAD Level II chunks',
+    chunks: keys.map(key => ({ key, url: keyUrl(key) })),
+  };
+}
+
+async function listLatestChunkVolumes(siteId) {
+  const prefixes = await listVolumePrefixes(siteId);
+  // Read each rotating prefix completely once. The old probe sampled only the
+  // first few lexicographic keys and could mistake a reused prefix for stale
+  // data. Full prefix inspection stays small while making newest-volume
+  // selection deterministic.
+  const inspected = await mapLimit(prefixes, PREFIX_LIST_CONCURRENCY, prefix => readVolume(prefix, siteId));
+  const volumes = inspected
+    .filter(item => item && !item.error && finite(item.timestamp))
     .sort((a, b) => b.timestamp - a.timestamp)
     .slice(0, MAX_CANDIDATE_VOLUMES);
-  if (!volumes.length) throw new Error(`${siteId}: no recent NOMADS Level II volumes listed`);
+  if (!volumes.length) throw new Error(`${siteId}: no complete timestamped Level II chunk volumes available`);
   return volumes;
 }
 
 async function runScanWorker(volume, site, includeDetail) {
   const encoded = Buffer.from(JSON.stringify({ volume, site, includeDetail }), 'utf8').toString('base64url');
-  const { stdout } = await execFileAsync(process.execPath, ['--max-old-space-size=180', WORKER_PATH, encoded], {
+  const { stdout } = await execFileAsync(process.execPath, ['--max-old-space-size=128', '--max-semi-space-size=4', WORKER_PATH, encoded], {
     timeout: WORKER_TIMEOUT_MS,
     maxBuffer: 8 * 1024 * 1024,
-    env: { ...process.env, NODE_OPTIONS: '', RADAR_ALLOW_FULL_VOLUME_DECODE: '1' },
+    env: { ...process.env, NODE_OPTIONS: '', RADAR_ALLOW_FULL_VOLUME_DECODE: '0' },
   });
   const result = JSON.parse(stdout);
   if (!result || !Array.isArray(result.rawCouplets)) throw new Error(`${volume.id}: invalid worker result`);
@@ -187,12 +262,9 @@ async function analyzeVolumeSeries(site, volumes, volumeCount, deadline) {
   }
 
   if (!latest) {
-    throw new Error(failures.join(' | ') || `${site.id}: no fresh complete NOMADS Level II volume decoded`);
+    throw new Error(failures.join(' | ') || `${site.id}: no fresh complete Level II chunk sweep decoded`);
   }
 
-  // Persistence is built from independent live refreshes instead of decoding
-  // several historical full volumes inside one request. This keeps the live
-  // path bounded and prevents one request from exhausting Render's CPU budget.
   const trackingScans = rememberScan(site.id, latest, volumeCount);
   const tracks = trackRotationAcrossScans(trackingScans);
   const couplets = latest.rawCouplets.map(c => {
@@ -233,18 +305,18 @@ async function analyzeVolumeSeries(site, volumes, volumeCount, deadline) {
     scanCount: trackingScans.length,
     trend: bestTrack?.trend ?? 'UNKNOWN',
     dualPolEvidence: dualPol,
-    source: 'NOAA/NCEP NOMADS NEXRAD Level II',
-    sourceKind: latest.sourceKind ?? 'full-volume',
-    usedChunks: 0,
+    source: 'Unidata real-time NEXRAD Level II chunks',
+    sourceKind: latest.sourceKind ?? 'chunks',
+    usedChunks: latest.usedChunks ?? 0,
     failedScans: failures.length,
   };
 }
 
 async function analyzeSiteRadar(site, volumeCount, deadline) {
-  const volumes = await listRecentNomadsVolumes(site.id);
+  const volumes = await listLatestChunkVolumes(site.id);
   const newest = volumes[0]?.timestamp;
   if (!finite(newest) || Date.now() - newest > MAX_SCAN_AGE_MS) {
-    throw new Error(`${site.id}: newest NOMADS Level II volume is stale`);
+    throw new Error(`${site.id}: newest Level II chunk volume is stale`);
   }
   return analyzeVolumeSeries(site, volumes, volumeCount, deadline);
 }
@@ -309,7 +381,7 @@ export function createRadarServer({ port = Number(process.env.PORT || 8788) } = 
     const url = new URL(req.url, 'http://localhost');
 
     if (url.pathname === '/health') {
-      res.end(JSON.stringify({ ok: true, service: 'stormlog-radar-analysis', mode: 'nomads-live-history-worker' }));
+      res.end(JSON.stringify({ ok: true, service: 'stormlog-radar-analysis', mode: 'bounded-level2-chunks-live-history' }));
       return;
     }
     if (url.pathname !== '/radar') {
