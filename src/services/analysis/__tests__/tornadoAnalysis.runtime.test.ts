@@ -105,6 +105,41 @@ assert(advanced.environment.dataAvailability.shear === 'AVAILABLE', 'advanced sh
 assert(advanced.environment.dataAvailability.helicity === 'AVAILABLE', 'advanced helicity availability must be exposed');
 assert(advanced.environment.dataAvailability.compositeParams === 'AVAILABLE', 'advanced composite availability must be exposed');
 
+// Regression for the live 2026-09-12 false positive. A single scan with
+// CC=0.69, a 48 kt low-level couplet, and even backend debris-like evidence
+// must not immediately become a declared debris signature/VERY_HIGH result.
+const singleScanDebrisLike = analyzeStorm({
+  ...base,
+  cape: 0,
+  radarData: {
+    available: true,
+    hasPrecipitation: true,
+    maxReflectivityDbz: 40,
+    velocityPoints: [
+      { latitude: 35.0, longitude: -97.0, velocity: 24, stormRelativeVelocity: 24, reflectivity: 40, altitude: 500 },
+      { latitude: 35.001, longitude: -97.001, velocity: -24, stormRelativeVelocity: -24, reflectivity: 40, altitude: 500 },
+    ],
+    couplets: [
+      { latitude: 35.0, longitude: -97.0, shear: 48, strength: 'MODERATE', distanceKm: 1, headingTowardUser: false, lowLevel: true, scanCount: 1 },
+    ],
+    stormCells: [],
+    correlationCoefficient: 0.69,
+    differentialReflectivity: 0.5,
+    scanCount: 1,
+    dualPolEvidence: {
+      available: true,
+      debrisSignature: true,
+      confidence: 74,
+      cc: 0.69,
+      zdr: 0.5,
+      reflectivityDbz: 40,
+      reason: 'synthetic debris-like evidence',
+    },
+  } as any,
+});
+assert(singleScanDebrisLike.tornadicEvidence.debrisSignature === false, 'single-scan debris-like evidence must not be declared a debris signature');
+assert(singleScanDebrisLike.tornadicEvidence.level !== 'VERY_HIGH', 'single-scan debris-like evidence must not become VERY_HIGH');
+
 const warning = analyzeStorm({
   ...base,
   nwsAlerts: [{ event: 'Tornado Warning', severity: 'Extreme', headline: 'Test warning' }],
