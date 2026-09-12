@@ -119,7 +119,10 @@ async function incompleteMrmsRollingAccumulationRemainsVisible() {
     mrmsProvider,
     features: { NWS_CURRENT_CONDITIONS: false, NWS_PRESSURE: false, NWS_FORECAST: false, MRMS_PRECIPITATION: true },
   });
-  const result = await provider.getCurrentWeather(40.0393, -82.4606, reference);
+  // Use a coordinate distinct from earlier cases because guardedRequest keeps a
+  // process-wide cache by weather key. This case must exercise its injected MRMS
+  // fixture rather than consume another test's cached provider result.
+  const result = await provider.getCurrentWeather(40.0593, -82.4606, reference);
   assert(result.success, `MRMS partial precipitation should remain usable: ${!result.success ? result.error : ''}`);
   if (!result.success) return;
   assert(result.data.observedDailyPrecipitationIsComplete === false, 'Partial MRMS accumulation must remain marked incomplete');
