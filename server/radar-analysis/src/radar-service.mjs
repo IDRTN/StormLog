@@ -19,13 +19,15 @@ const RADAR_SITES = [
 ];
 
 const CACHE_MS = 60_000;
-const MAX_CANDIDATE_VOLUMES = 8;
+const MAX_CANDIDATE_VOLUMES = 4;
 const MAX_SCAN_AGE_MS = 20 * 60_000;
 const MAX_SITE_FALLBACKS = 1;
 const LIST_TIMEOUT_MS = 10_000;
-const WORKER_TIMEOUT_MS = 35_000;
-const REQUEST_BUDGET_MS = 105_000;
+const WORKER_TIMEOUT_MS = 85_000;
+const REQUEST_BUDGET_MS = 110_000;
+const MAX_TRACKED_SCANS = 3;
 const cache = new Map();
+const scanHistory = new Map();
 
 function finite(v) { return typeof v === 'number' && Number.isFinite(v); }
 function toRad(v) { return v * Math.PI / 180; }
@@ -147,14 +149,28 @@ function matchingTrack(c, tracks) {
   return best;
 }
 
+function rememberScan(siteId, scan, volumeCount) {
+  const now = Date.now();
+  const previous = scanHistory.get(siteId) ?? [];
+  const merged = [...previous.filter(item => now - item.timestamp <= MAX_SCAN_AGE_MS), {
+    timestamp: scan.timestamp,
+    couplets: scan.rawCouplets,
+  }];
+  const byTimestamp = new Map();
+  for (const item of merged) byTimestamp.set(item.timestamp, item);
+  const keep = [...byTimestamp.values()]
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .slice(-Math.max(1, Math.min(MAX_TRACKED_SCANS, volumeCount)));
+  scanHistory.set(siteId, keep);
+  return keep;
+}
+
 async function analyzeVolumeSeries(site, volumes, volumeCount, deadline) {
   const failures = [];
   let latest = null;
-  let latestIndex = -1;
 
-  for (let i = 0; i < volumes.length; i += 1) {
+  for (const volume of volumes) {
     if (Date.now() >= deadline) break;
-    const volume = volumes[i];
     if (!finite(volume.timestamp) || Date.now() - volume.timestamp > MAX_SCAN_AGE_MS) continue;
     try {
       const scan = await runScanWorker(volume, site, true);
@@ -164,7 +180,6 @@ async function analyzeVolumeSeries(site, volumes, volumeCount, deadline) {
       if (!finite(scan.maxReflectivityDbz)) throw new Error(`${volume.id}: reflectivity missing`);
       if (!Array.isArray(scan.velocityPoints) || scan.velocityPoints.length === 0) throw new Error(`${volume.id}: velocity missing`);
       latest = scan;
-      latestIndex = i;
       break;
     } catch (error) {
       failures.push(`${volume.id}: ${error instanceof Error ? error.message : String(error)}`);
@@ -175,26 +190,10 @@ async function analyzeVolumeSeries(site, volumes, volumeCount, deadline) {
     throw new Error(failures.join(' | ') || `${site.id}: no fresh complete NOMADS Level II volume decoded`);
   }
 
-  const trackingScans = [{ timestamp: latest.timestamp, couplets: latest.rawCouplets }];
-  const desiredPrior = Math.max(0, Math.min(2, volumeCount - 1));
-  let priorAdded = 0;
-
-  for (let i = latestIndex + 1; i < volumes.length && priorAdded < desiredPrior; i += 1) {
-    if (Date.now() >= deadline) break;
-    const volume = volumes[i];
-    if (!finite(volume.timestamp) || latest.timestamp - volume.timestamp > MAX_SCAN_AGE_MS) continue;
-    try {
-      const scan = await runScanWorker(volume, site, false);
-      if (finite(scan.timestamp) && latest.timestamp - scan.timestamp <= MAX_SCAN_AGE_MS) {
-        trackingScans.push({ timestamp: scan.timestamp, couplets: scan.rawCouplets });
-        priorAdded += 1;
-      }
-    } catch (error) {
-      failures.push(`${volume.id}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  trackingScans.sort((a, b) => a.timestamp - b.timestamp);
+  // Persistence is built from independent live refreshes instead of decoding
+  // several historical full volumes inside one request. This keeps the live
+  // path bounded and prevents one request from exhausting Render's CPU budget.
+  const trackingScans = rememberScan(site.id, latest, volumeCount);
   const tracks = trackRotationAcrossScans(trackingScans);
   const couplets = latest.rawCouplets.map(c => {
     const track = matchingTrack(c, tracks);
@@ -270,7 +269,9 @@ export async function analyzeRadar(latitude, longitude, { volumeCount = 3 } = {}
     }
   }
 
-  return unavailable(sites[0].id, failures.join(' | ') || 'Nearest Level II radar unavailable within request budget');
+  const reason = failures.join(' | ') || 'Nearest Level II radar unavailable within request budget';
+  console.error(`[radar-service] unavailable: ${reason}`);
+  return unavailable(sites[0].id, reason);
 }
 
 function unavailable(stationId, reason) {
@@ -308,7 +309,7 @@ export function createRadarServer({ port = Number(process.env.PORT || 8788) } = 
     const url = new URL(req.url, 'http://localhost');
 
     if (url.pathname === '/health') {
-      res.end(JSON.stringify({ ok: true, service: 'stormlog-radar-analysis', mode: 'nomads-isolated-level2-worker' }));
+      res.end(JSON.stringify({ ok: true, service: 'stormlog-radar-analysis', mode: 'nomads-live-history-worker' }));
       return;
     }
     if (url.pathname !== '/radar') {
