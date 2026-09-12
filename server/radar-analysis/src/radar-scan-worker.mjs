@@ -1,6 +1,10 @@
 import Level2Radar from 'nexrad-level-2-data';
 import { detectVelocityCouplets } from './couplet-detector.mjs';
 
+const MIN_RAYS = 240;
+const MIN_AZIMUTH_COVERAGE_DEG = 320;
+const MAX_CHUNKS_PER_SWEEP = 8;
+
 function finite(v) { return typeof v === 'number' && Number.isFinite(v); }
 function asArray(value) { return Array.isArray(value) ? value : value ? [value] : []; }
 function toRad(v) { return v * Math.PI / 180; }
@@ -25,12 +29,27 @@ function countFinite(values) {
   return count;
 }
 
-function getLowestUsableTilt(radar, getterName) {
+function azimuthCoverage(headers) {
+  const values = headers.map(h => h?.azimuth).filter(finite).map(v => ((v % 360) + 360) % 360).sort((a, b) => a - b);
+  if (values.length < 2) return 0;
+  let maxGap = 0;
+  for (let i = 1; i < values.length; i += 1) maxGap = Math.max(maxGap, values[i] - values[i - 1]);
+  maxGap = Math.max(maxGap, 360 - values.at(-1) + values[0]);
+  return 360 - maxGap;
+}
+
+function getLowestUsableTilt(radar, getterName, requireCompleteSweep = false) {
   const elevations = radar.listElevations().filter(finite).sort((a, b) => a - b);
   for (const elevation of elevations) {
     radar.setElevation(elevation);
-    const moments = asArray(radar[getterName]());
-    const headers = asArray(radar.getHeader());
+    let moments;
+    let headers;
+    try {
+      moments = asArray(radar[getterName]());
+      headers = asArray(radar.getHeader());
+    } catch {
+      continue;
+    }
     const usableMoments = [];
     const usableHeaders = [];
     const angles = [];
@@ -42,7 +61,8 @@ function getLowestUsableTilt(radar, getterName) {
       usableHeaders.push(header);
       if (finite(header.elevation_angle)) angles.push(header.elevation_angle);
     }
-    if (usableMoments.length < 30) continue;
+    if (usableMoments.length < (requireCompleteSweep ? MIN_RAYS : 30)) continue;
+    if (requireCompleteSweep && azimuthCoverage(usableHeaders) < MIN_AZIMUTH_COVERAGE_DEG) continue;
     angles.sort((a, b) => a - b);
     return {
       elevation,
@@ -52,6 +72,13 @@ function getLowestUsableTilt(radar, getterName) {
     };
   }
   return null;
+}
+
+function hasCompleteLowSweep(radar) {
+  return Boolean(
+    getLowestUsableTilt(radar, 'getHighresReflectivity', true)
+    && getLowestUsableTilt(radar, 'getHighresVelocity', true)
+  );
 }
 
 function maxMomentValue(tilt) {
@@ -121,27 +148,44 @@ function sampleVelocityPoints(tilt, site, maxPoints = 240) {
   return points;
 }
 
+async function fetchChunk(url) {
+  const response = await fetch(url, { headers: { 'User-Agent': 'StormLog-Radar/1.0' } });
+  if (!response.ok) throw new Error(`Level II chunk HTTP ${response.status}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength < 100) throw new Error(`Level II chunk unexpectedly small: ${bytes.byteLength}`);
+  return bytes;
+}
+
+async function buildLowestSweep(chunks, site) {
+  let combined = null;
+  let usedChunks = 0;
+  for (const chunk of chunks.slice(0, MAX_CHUNKS_PER_SWEEP)) {
+    const bytes = await fetchChunk(chunk.url);
+    const parsed = new Level2Radar(bytes, { logger: false });
+    if (parsed.header?.ICAO && parsed.header.ICAO !== site.id) {
+      throw new Error(`Radar ICAO mismatch: expected ${site.id}, got ${parsed.header.ICAO}`);
+    }
+    combined = combined ? Level2Radar.combineData(combined, parsed) : parsed;
+    usedChunks += 1;
+    if (hasCompleteLowSweep(combined)) return { radar: combined, usedChunks };
+  }
+  throw new Error(`No complete low-level sweep after ${usedChunks} chunks`);
+}
+
 async function main() {
   const encoded = process.argv[2];
   if (!encoded) throw new Error('worker payload required');
   const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
-  const { entry, site, includeDetail } = payload;
+  const { volume, site, includeDetail } = payload;
+  if (!volume || !Array.isArray(volume.chunks) || !volume.chunks.length) throw new Error('volume chunks required');
 
-  const response = await fetch(entry.url, { headers: { 'User-Agent': 'StormLog-Radar/1.0' } });
-  if (!response.ok) throw new Error(`NOMADS Level II ${entry.name} HTTP ${response.status}`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength < 100_000) throw new Error(`Level II volume unexpectedly small: ${bytes.byteLength}`);
+  const { radar, usedChunks } = await buildLowestSweep(volume.chunks, site);
+  const reflectivityTilt = getLowestUsableTilt(radar, 'getHighresReflectivity', true);
+  const velocityTilt = getLowestUsableTilt(radar, 'getHighresVelocity', true);
+  if (!reflectivityTilt) throw new Error(`${volume.id}: quantitative reflectivity unavailable`);
+  if (!velocityTilt) throw new Error(`${volume.id}: Doppler velocity unavailable`);
 
-  const radar = new Level2Radar(bytes, { logger: false });
-  if (radar.isTruncated) throw new Error(`${entry.name} decoded as truncated`);
-  if (radar.header?.ICAO && radar.header.ICAO !== site.id) throw new Error(`Radar ICAO mismatch: expected ${site.id}, got ${radar.header.ICAO}`);
-
-  const reflectivityTilt = getLowestUsableTilt(radar, 'getHighresReflectivity');
-  if (!reflectivityTilt) throw new Error(`${entry.name}: quantitative reflectivity unavailable`);
   const maxReflectivityDbz = maxMomentValue(reflectivityTilt);
-
-  const velocityTilt = getLowestUsableTilt(radar, 'getHighresVelocity');
-  if (!velocityTilt) throw new Error(`${entry.name}: Doppler velocity unavailable`);
   const azimuths = velocityTilt.headers.map(h => h.azimuth);
   const rawCouplets = detectVelocityCouplets({ azimuths, velocityMoments: velocityTilt.moments, maxCandidates: 40 });
   const strongest = [...rawCouplets].sort((a, b) => b.deltaVKt - a.deltaVKt)[0] ?? null;
@@ -151,18 +195,19 @@ async function main() {
 
   let correlationCoefficient = null;
   let differentialReflectivity = null;
-  let colocatedReflectivity = strongest ? valueAtPolar(reflectivityTilt, strongest.azimuthDeg, strongest.rangeKm) : maxReflectivityDbz;
+  const colocatedReflectivity = strongest ? valueAtPolar(reflectivityTilt, strongest.azimuthDeg, strongest.rangeKm) : maxReflectivityDbz;
 
   if (includeDetail) {
-    const ccTilt = getLowestUsableTilt(radar, 'getHighresCorrelationCoefficient');
+    const ccTilt = getLowestUsableTilt(radar, 'getHighresCorrelationCoefficient', true);
     correlationCoefficient = strongest ? valueAtPolar(ccTilt, strongest.azimuthDeg, strongest.rangeKm) : medianMomentValue(ccTilt);
-    const zdrTilt = getLowestUsableTilt(radar, 'getHighresDiffReflectivity');
+    const zdrTilt = getLowestUsableTilt(radar, 'getHighresDiffReflectivity', true);
     differentialReflectivity = strongest ? valueAtPolar(zdrTilt, strongest.azimuthDeg, strongest.rangeKm) : medianMomentValue(zdrTilt);
   }
 
   process.stdout.write(JSON.stringify({
-    timestamp: entry.timestamp ?? Date.now(),
-    name: entry.name,
+    timestamp: volume.timestamp ?? Date.now(),
+    name: volume.id,
+    usedChunks,
     maxReflectivityDbz,
     rawCouplets,
     gateSizeKm: finite(gateSizeKm) ? gateSizeKm : null,
