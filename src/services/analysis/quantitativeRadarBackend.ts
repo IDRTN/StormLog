@@ -1,5 +1,15 @@
 import type { RadarVelocityPoint, RotationCouplet, StormCell } from './radar';
 
+export interface QuantitativeDualPolEvidence {
+  available: boolean;
+  debrisSignature: boolean;
+  confidence: number | null;
+  reason?: string;
+  cc?: number | null;
+  zdr?: number | null;
+  reflectivityDbz?: number | null;
+}
+
 export interface QuantitativeRadarResponse {
   available: boolean;
   stationId: string | null;
@@ -13,6 +23,7 @@ export interface QuantitativeRadarResponse {
   differentialReflectivity: number | null;
   scanCount: number;
   trend: string | null;
+  dualPolEvidence: QuantitativeDualPolEvidence | null;
   unavailableReason?: string;
 }
 
@@ -22,6 +33,19 @@ function finiteOrNull(value: unknown): number | null {
 
 function finite(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
+}
+
+function parseDualPolEvidence(value: any): QuantitativeDualPolEvidence | null {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    available: value.available === true,
+    debrisSignature: value.debrisSignature === true,
+    confidence: finiteOrNull(value.confidence),
+    reason: typeof value.reason === 'string' ? value.reason : undefined,
+    cc: finiteOrNull(value.cc),
+    zdr: finiteOrNull(value.zdr),
+    reflectivityDbz: finiteOrNull(value.reflectivityDbz),
+  };
 }
 
 export function parseQuantitativeRadarPayload(payload: any): QuantitativeRadarResponse {
@@ -85,6 +109,7 @@ export function parseQuantitativeRadarPayload(payload: any): QuantitativeRadarRe
     differentialReflectivity: finiteOrNull(payload?.differentialReflectivity ?? payload?.zdr),
     scanCount,
     trend: typeof payload?.trend === 'string' ? payload.trend : null,
+    dualPolEvidence: parseDualPolEvidence(payload?.dualPolEvidence),
     unavailableReason: typeof payload?.unavailableReason === 'string' ? payload.unavailableReason : undefined,
   };
 }
