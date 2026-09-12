@@ -22,9 +22,8 @@ const CACHE_MS = 60_000;
 const MAX_CANDIDATE_VOLUMES = 4;
 const MAX_SCAN_AGE_MS = 20 * 60_000;
 const MAX_SITE_FALLBACKS = 1;
-const VOLUME_BOUNDARY_NEIGHBORS = 4;
-const MAX_PREFIX_PROBES = 12;
 const LIST_TIMEOUT_MS = 8_000;
+const MAX_LIST_PAGES = 12;
 const WORKER_TIMEOUT_MS = 30_000;
 const REQUEST_BUDGET_MS = 90_000;
 const cache = new Map();
@@ -77,12 +76,26 @@ function keyUrl(key) {
   return `${CHUNK_BUCKET}/${key.split('/').map(encodeURIComponent).join('/')}`;
 }
 
-async function fetchS3List(prefix, delimiter = null) {
+function objectKeys(xml) {
+  return [...xml.matchAll(/<Contents>[\s\S]*?<Key>([^<]+)<\/Key>[\s\S]*?<\/Contents>/g)]
+    .map(m => decodeXml(m[1]));
+}
+
+function nextContinuationToken(xml) {
+  const m = xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/);
+  return m ? decodeXml(m[1]) : null;
+}
+
+function isTruncated(xml) {
+  return /<IsTruncated>true<\/IsTruncated>/.test(xml);
+}
+
+async function fetchS3ObjectPage(siteId, continuationToken = null) {
   const url = new URL(CHUNK_BUCKET);
   url.searchParams.set('list-type', '2');
-  url.searchParams.set('prefix', prefix);
+  url.searchParams.set('prefix', `${siteId}/`);
   url.searchParams.set('max-keys', '1000');
-  if (delimiter) url.searchParams.set('delimiter', delimiter);
+  if (continuationToken) url.searchParams.set('continuation-token', continuationToken);
   const response = await fetch(url, {
     headers: { 'User-Agent': 'StormLog-Radar/1.0' },
     signal: AbortSignal.timeout(LIST_TIMEOUT_MS),
@@ -91,87 +104,56 @@ async function fetchS3List(prefix, delimiter = null) {
   return response.text();
 }
 
-function objectKeys(xml) {
-  return [...xml.matchAll(/<Contents>[\s\S]*?<Key>([^<]+)<\/Key>[\s\S]*?<\/Contents>/g)]
-    .map(m => decodeXml(m[1]));
-}
-
-function commonPrefixes(xml) {
-  return [...xml.matchAll(/<CommonPrefixes>\s*<Prefix>([^<]+)<\/Prefix>\s*<\/CommonPrefixes>/g)]
-    .map(m => decodeXml(m[1]));
-}
-
-function volumeNumber(prefix, siteId) {
-  const m = prefix.match(new RegExp(`^${siteId}/(\\d+)/$`));
-  return m ? Number.parseInt(m[1], 10) : null;
-}
-
-function rotatingBoundaryCandidates(prefixes, siteId) {
-  const numbered = prefixes
-    .map(prefix => ({ prefix, n: volumeNumber(prefix, siteId) }))
-    .filter(item => Number.isInteger(item.n))
-    .sort((a, b) => a.n - b.n);
-
-  if (!numbered.length) return prefixes.slice(-VOLUME_BOUNDARY_NEIGHBORS);
-
-  const present = new Set(numbered.map(item => item.n));
-  const maxNumber = numbered[numbered.length - 1].n;
-  const boundaries = [];
-  for (const item of numbered) {
-    const next = item.n === maxNumber ? 0 : item.n + 1;
-    if (!present.has(next)) boundaries.push(item.n);
-  }
-
-  const selected = new Set();
-  const byNumber = new Map(numbered.map(item => [item.n, item.prefix]));
-  const ringSize = maxNumber + 1;
-  for (const boundary of boundaries) {
-    for (let offset = 0; offset < VOLUME_BOUNDARY_NEIGHBORS; offset += 1) {
-      const n = ((boundary - offset) % ringSize + ringSize) % ringSize;
-      const prefix = byNumber.get(n);
-      if (prefix) selected.add(prefix);
-    }
-  }
-  for (const item of numbered.slice(0, 2)) selected.add(item.prefix);
-  for (const item of numbered.slice(-2)) selected.add(item.prefix);
-  return [...selected].slice(0, MAX_PREFIX_PROBES);
-}
-
-async function readChunkVolume(prefix, siteId) {
-  const xml = await fetchS3List(prefix);
-  const keys = objectKeys(xml)
-    .filter(key => key.startsWith(prefix))
-    .sort((a, b) => a.localeCompare(b));
-  if (!keys.length) return null;
-
-  const timestamps = keys.map(chunkTimestampFromKey).filter(finite);
-  if (!timestamps.length) return null;
-  const timestamp = Math.max(...timestamps);
-  const hasStart = keys.some(key => /-S$/.test(key));
-  const intermediateCount = keys.filter(key => /-[IE]$/.test(key)).length;
-  if (!hasStart || intermediateCount < 3) return null;
-
-  return {
-    id: prefix.replace(/\/$/, ''),
-    siteId,
-    timestamp,
-    source: 'Unidata real-time NEXRAD Level II chunks',
-    chunks: keys.map(key => ({ key, url: keyUrl(key) })),
-  };
+function volumePrefixFromKey(key, siteId) {
+  const m = key.match(new RegExp(`^${siteId}/([^/]+)/`));
+  return m ? `${siteId}/${m[1]}/` : null;
 }
 
 async function listLatestChunkVolumes(siteId) {
-  const xml = await fetchS3List(`${siteId}/`, '/');
-  const prefixes = commonPrefixes(xml).filter(prefix => prefix.startsWith(`${siteId}/`));
-  if (!prefixes.length) throw new Error(`No real-time Level II volume directories listed for ${siteId}`);
+  const grouped = new Map();
+  let continuationToken = null;
+  let pages = 0;
+  let truncated = false;
 
-  const candidatePrefixes = rotatingBoundaryCandidates(prefixes, siteId);
-  const settled = await Promise.allSettled(candidatePrefixes.map(prefix => readChunkVolume(prefix, siteId)));
-  const volumes = settled
-    .filter(item => item.status === 'fulfilled' && item.value)
-    .map(item => item.value)
-    .sort((a, b) => b.timestamp - a.timestamp);
+  do {
+    const xml = await fetchS3ObjectPage(siteId, continuationToken);
+    pages += 1;
+    for (const key of objectKeys(xml)) {
+      const prefix = volumePrefixFromKey(key, siteId);
+      const timestamp = chunkTimestampFromKey(key);
+      if (!prefix || !finite(timestamp)) continue;
+      let group = grouped.get(prefix);
+      if (!group) {
+        group = { prefix, timestamp: -Infinity, keys: [] };
+        grouped.set(prefix, group);
+      }
+      group.timestamp = Math.max(group.timestamp, timestamp);
+      group.keys.push(key);
+    }
+    truncated = isTruncated(xml);
+    continuationToken = truncated ? nextContinuationToken(xml) : null;
+    if (truncated && !continuationToken) throw new Error('Unidata chunk listing truncated without continuation token');
+  } while (truncated && pages < MAX_LIST_PAGES);
 
+  if (truncated) throw new Error(`Unidata chunk listing exceeded ${MAX_LIST_PAGES} pages; refusing stale inference`);
+
+  const volumes = [];
+  for (const group of grouped.values()) {
+    const keys = group.keys.sort((a, b) => a.localeCompare(b));
+    const hasStart = keys.some(key => /-S$/.test(key));
+    const hasEnd = keys.some(key => /-E$/.test(key));
+    const intermediateCount = keys.filter(key => /-[IE](?:\d+)?$/.test(key)).length;
+    if (!hasStart || (!hasEnd && intermediateCount < 3)) continue;
+    volumes.push({
+      id: group.prefix.replace(/\/$/, ''),
+      siteId,
+      timestamp: group.timestamp,
+      source: 'Unidata real-time NEXRAD Level II chunks',
+      chunks: keys.map(key => ({ key, url: keyUrl(key) })),
+    });
+  }
+
+  volumes.sort((a, b) => b.timestamp - a.timestamp);
   if (!volumes.length) throw new Error(`No usable real-time Level II chunk volumes for ${siteId}`);
   return volumes.slice(0, MAX_CANDIDATE_VOLUMES);
 }
@@ -250,16 +232,22 @@ async function analyzeVolumeSeries(site, volumes, volumeCount, deadline) {
   }
   if (!latest) throw new Error(failures.join(' | ') || `${site.id}: no fresh complete low-level Level II sweep decoded within request budget`);
 
+  const priorVolumes = volumes
+    .slice(latestIndex + 1, latestIndex + Math.max(1, volumeCount))
+    .filter(volume => Date.now() < deadline && latest.timestamp - volume.timestamp <= MAX_SCAN_AGE_MS);
+  const priorResults = await Promise.allSettled(priorVolumes.map(volume => runScanWorker(volume, site, false)));
+
   const trackingScans = [{ timestamp: latest.timestamp, couplets: latest.rawCouplets }];
-  for (let i = latestIndex + 1; i < volumes.length && trackingScans.length < Math.max(1, volumeCount); i += 1) {
-    if (Date.now() >= deadline) break;
-    try {
-      const scan = await runScanWorker(volumes[i], site, false);
+  for (let i = 0; i < priorResults.length; i += 1) {
+    const result = priorResults[i];
+    const volume = priorVolumes[i];
+    if (result.status === 'fulfilled') {
+      const scan = result.value;
       if (finite(scan.timestamp) && latest.timestamp - scan.timestamp <= MAX_SCAN_AGE_MS) {
         trackingScans.push({ timestamp: scan.timestamp, couplets: scan.rawCouplets });
       }
-    } catch (error) {
-      failures.push(`${volumes[i].id}: ${error instanceof Error ? error.message : String(error)}`);
+    } else {
+      failures.push(`${volume.id}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
     }
   }
 
@@ -372,7 +360,7 @@ export function createRadarServer({ port = Number(process.env.PORT || 8788) } = 
     if (!req.url) { res.statusCode = 400; res.end(JSON.stringify({ error: 'missing URL' })); return; }
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname === '/health') {
-      res.end(JSON.stringify({ ok: true, service: 'stormlog-radar-analysis', mode: 'bounded-nearest-level2-chunks' }));
+      res.end(JSON.stringify({ ok: true, service: 'stormlog-radar-analysis', mode: 'paged-nearest-level2-chunks' }));
       return;
     }
     if (url.pathname !== '/radar') { res.statusCode = 404; res.end(JSON.stringify({ error: 'not found' })); return; }
