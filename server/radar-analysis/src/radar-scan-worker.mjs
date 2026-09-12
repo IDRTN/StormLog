@@ -196,6 +196,9 @@ async function buildFullVolume(volume, site) {
 
 async function buildRadar(volume, site) {
   if (typeof volume?.url === 'string' && volume.url.length > 0) {
+    if (process.env.RADAR_ALLOW_FULL_VOLUME_DECODE !== '1') {
+      throw new Error('Full-volume decode disabled in live runtime; use bounded Level II chunks');
+    }
     return buildFullVolume(volume, site);
   }
   if (Array.isArray(volume?.chunks) && volume.chunks.length > 0) {
