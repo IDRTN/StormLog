@@ -23,7 +23,9 @@ const MAX_CANDIDATE_VOLUMES = 4;
 const MAX_SCAN_AGE_MS = 20 * 60_000;
 const MAX_SITE_FALLBACKS = 1;
 const LIST_TIMEOUT_MS = 8_000;
-const MAX_LIST_PAGES = 12;
+const PREFIX_PROBE_KEYS = 8;
+const PREFIX_PROBE_CONCURRENCY = 12;
+const PREFIX_SHORTLIST = 8;
 const WORKER_TIMEOUT_MS = 30_000;
 const REQUEST_BUDGET_MS = 90_000;
 const cache = new Map();
@@ -81,21 +83,21 @@ function objectKeys(xml) {
     .map(m => decodeXml(m[1]));
 }
 
-function nextContinuationToken(xml) {
-  const m = xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/);
-  return m ? decodeXml(m[1]) : null;
+function commonPrefixes(xml) {
+  return [...xml.matchAll(/<CommonPrefixes>\s*<Prefix>([^<]+)<\/Prefix>\s*<\/CommonPrefixes>/g)]
+    .map(m => decodeXml(m[1]));
 }
 
 function isTruncated(xml) {
   return /<IsTruncated>true<\/IsTruncated>/.test(xml);
 }
 
-async function fetchS3ObjectPage(siteId, continuationToken = null) {
+async function fetchS3List({ prefix, delimiter = null, maxKeys = 1000 }) {
   const url = new URL(CHUNK_BUCKET);
   url.searchParams.set('list-type', '2');
-  url.searchParams.set('prefix', `${siteId}/`);
-  url.searchParams.set('max-keys', '1000');
-  if (continuationToken) url.searchParams.set('continuation-token', continuationToken);
+  url.searchParams.set('prefix', prefix);
+  url.searchParams.set('max-keys', String(maxKeys));
+  if (delimiter) url.searchParams.set('delimiter', delimiter);
   const response = await fetch(url, {
     headers: { 'User-Agent': 'StormLog-Radar/1.0' },
     signal: AbortSignal.timeout(LIST_TIMEOUT_MS),
@@ -104,58 +106,85 @@ async function fetchS3ObjectPage(siteId, continuationToken = null) {
   return response.text();
 }
 
-function volumePrefixFromKey(key, siteId) {
-  const m = key.match(new RegExp(`^${siteId}/([^/]+)/`));
-  return m ? `${siteId}/${m[1]}/` : null;
+async function mapLimit(items, limit, mapper) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const index = next;
+      next += 1;
+      if (index >= items.length) return;
+      try {
+        results[index] = await mapper(items[index], index);
+      } catch (error) {
+        results[index] = { error };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  return results;
+}
+
+async function listVolumePrefixes(siteId) {
+  const xml = await fetchS3List({ prefix: `${siteId}/`, delimiter: '/', maxKeys: 1000 });
+  if (isTruncated(xml)) throw new Error(`${siteId}: rotating volume prefix index exceeded one S3 page`);
+  const prefixes = commonPrefixes(xml).filter(prefix => prefix.startsWith(`${siteId}/`));
+  if (!prefixes.length) throw new Error(`${siteId}: no rotating Level II volume prefixes listed`);
+  return prefixes;
+}
+
+async function probeVolumePrefix(prefix) {
+  const xml = await fetchS3List({ prefix, maxKeys: PREFIX_PROBE_KEYS });
+  const timestamps = objectKeys(xml).map(chunkTimestampFromKey).filter(finite);
+  return {
+    prefix,
+    timestamp: timestamps.length ? Math.max(...timestamps) : null,
+  };
+}
+
+async function readVolume(prefix, siteId) {
+  const xml = await fetchS3List({ prefix, maxKeys: 1000 });
+  if (isTruncated(xml)) throw new Error(`${prefix}: volume contains more than 1000 chunks`);
+  const keys = objectKeys(xml)
+    .filter(key => key.startsWith(prefix))
+    .sort((a, b) => a.localeCompare(b));
+  if (!keys.length) return null;
+
+  const timestamps = keys.map(chunkTimestampFromKey).filter(finite);
+  if (!timestamps.length) return null;
+  const timestamp = Math.max(...timestamps);
+  const hasStart = keys.some(key => /-S$/.test(key));
+  const hasEnd = keys.some(key => /-E$/.test(key));
+  const intermediateCount = keys.filter(key => /-[IE](?:\d+)?$/.test(key)).length;
+  if (!hasStart || (!hasEnd && intermediateCount < 3)) return null;
+
+  return {
+    id: prefix.replace(/\/$/, ''),
+    siteId,
+    timestamp,
+    source: 'Unidata real-time NEXRAD Level II chunks',
+    chunks: keys.map(key => ({ key, url: keyUrl(key) })),
+  };
 }
 
 async function listLatestChunkVolumes(siteId) {
-  const grouped = new Map();
-  let continuationToken = null;
-  let pages = 0;
-  let truncated = false;
+  const prefixes = await listVolumePrefixes(siteId);
+  const probes = await mapLimit(prefixes, PREFIX_PROBE_CONCURRENCY, probeVolumePrefix);
+  const ranked = probes
+    .filter(item => item && !item.error && finite(item.timestamp))
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, PREFIX_SHORTLIST);
 
-  do {
-    const xml = await fetchS3ObjectPage(siteId, continuationToken);
-    pages += 1;
-    for (const key of objectKeys(xml)) {
-      const prefix = volumePrefixFromKey(key, siteId);
-      const timestamp = chunkTimestampFromKey(key);
-      if (!prefix || !finite(timestamp)) continue;
-      let group = grouped.get(prefix);
-      if (!group) {
-        group = { prefix, timestamp: -Infinity, keys: [] };
-        grouped.set(prefix, group);
-      }
-      group.timestamp = Math.max(group.timestamp, timestamp);
-      group.keys.push(key);
-    }
-    truncated = isTruncated(xml);
-    continuationToken = truncated ? nextContinuationToken(xml) : null;
-    if (truncated && !continuationToken) throw new Error('Unidata chunk listing truncated without continuation token');
-  } while (truncated && pages < MAX_LIST_PAGES);
+  if (!ranked.length) throw new Error(`${siteId}: no timestamped rotating Level II volume prefixes`);
 
-  if (truncated) throw new Error(`Unidata chunk listing exceeded ${MAX_LIST_PAGES} pages; refusing stale inference`);
+  const decoded = await mapLimit(ranked, Math.min(4, ranked.length), item => readVolume(item.prefix, siteId));
+  const volumes = decoded
+    .filter(item => item && !item.error)
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, MAX_CANDIDATE_VOLUMES);
 
-  const volumes = [];
-  for (const group of grouped.values()) {
-    const keys = group.keys.sort((a, b) => a.localeCompare(b));
-    const hasStart = keys.some(key => /-S$/.test(key));
-    const hasEnd = keys.some(key => /-E$/.test(key));
-    const intermediateCount = keys.filter(key => /-[IE](?:\d+)?$/.test(key)).length;
-    if (!hasStart || (!hasEnd && intermediateCount < 3)) continue;
-    volumes.push({
-      id: group.prefix.replace(/\/$/, ''),
-      siteId,
-      timestamp: group.timestamp,
-      source: 'Unidata real-time NEXRAD Level II chunks',
-      chunks: keys.map(key => ({ key, url: keyUrl(key) })),
-    });
-  }
-
-  volumes.sort((a, b) => b.timestamp - a.timestamp);
-  if (!volumes.length) throw new Error(`No usable real-time Level II chunk volumes for ${siteId}`);
-  return volumes.slice(0, MAX_CANDIDATE_VOLUMES);
+  if (!volumes.length) throw new Error(`${siteId}: newest rotating Level II volumes were incomplete`);
+  return volumes;
 }
 
 async function runScanWorker(volume, site, includeDetail) {
@@ -360,7 +389,7 @@ export function createRadarServer({ port = Number(process.env.PORT || 8788) } = 
     if (!req.url) { res.statusCode = 400; res.end(JSON.stringify({ error: 'missing URL' })); return; }
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname === '/health') {
-      res.end(JSON.stringify({ ok: true, service: 'stormlog-radar-analysis', mode: 'paged-nearest-level2-chunks' }));
+      res.end(JSON.stringify({ ok: true, service: 'stormlog-radar-analysis', mode: 'indexed-rotating-level2-chunks' }));
       return;
     }
     if (url.pathname !== '/radar') { res.statusCode = 404; res.end(JSON.stringify({ error: 'not found' })); return; }
