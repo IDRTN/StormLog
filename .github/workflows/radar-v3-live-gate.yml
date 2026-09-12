@@ -39,6 +39,7 @@ jobs:
           const p = JSON.parse(fs.readFileSync('/tmp/radar.json', 'utf8'));
           if (p?.available !== true) throw new Error(`live radar unavailable: ${p?.unavailableReason ?? 'unknown reason'}`);
           if (p?.stationId !== 'KILN') throw new Error(`expected KILN, got ${p?.stationId}`);
+          if (p?.nearestSiteId !== 'KILN') throw new Error(`expected nearestSiteId KILN, got ${p?.nearestSiteId}`);
           if (!Number.isFinite(Number(p?.latestFrameTime))) throw new Error('latest Level II frame time missing');
           if (!Number.isFinite(Number(p?.maxReflectivityDbz))) throw new Error('quantitative reflectivity missing');
           if (!Array.isArray(p?.velocityPoints) || p.velocityPoints.length === 0) throw new Error('Doppler velocity points missing');
@@ -47,8 +48,16 @@ jobs:
           if (typeof p?.trend !== 'string') throw new Error('multi-scan trend missing');
           if (!('correlationCoefficient' in p)) throw new Error('dual-pol CC field missing');
           if (!('differentialReflectivity' in p)) throw new Error('dual-pol ZDR field missing');
+          if (!p?.dualPolEvidence || typeof p.dualPolEvidence !== 'object') throw new Error('dual-pol evidence contract missing');
+          if (typeof p.dualPolEvidence.debrisCandidate !== 'boolean') throw new Error('debrisCandidate flag missing');
+          if (typeof p.dualPolEvidence.debrisSignature !== 'boolean') throw new Error('debrisSignature flag missing');
+          if (!Number.isInteger(p.dualPolEvidence.scanCount) || p.dualPolEvidence.scanCount < 0) throw new Error('dual-pol scanCount invalid');
+          if (p.dualPolEvidence.debrisSignature === true && p.dualPolEvidence.scanCount < 2) {
+            throw new Error('single-scan debris signature is not allowed');
+          }
           console.log(JSON.stringify({
             stationId: p.stationId,
+            nearestSiteId: p.nearestSiteId,
             latestFrameTime: p.latestFrameTime,
             maxReflectivityDbz: p.maxReflectivityDbz,
             velocityPoints: p.velocityPoints.length,
@@ -57,6 +66,7 @@ jobs:
             trend: p.trend,
             correlationCoefficient: p.correlationCoefficient,
             differentialReflectivity: p.differentialReflectivity,
+            dualPolEvidence: p.dualPolEvidence,
           }, null, 2));
           NODE
 

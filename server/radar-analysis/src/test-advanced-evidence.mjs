@@ -20,26 +20,84 @@ const separated = trackRotationAcrossScans([
 assert.equal(separated.length, 2);
 assert.equal(separated[0].persistent, false);
 
-const debris = evaluateDualPolEvidence({ correlationCoefficient: 0.70, differentialReflectivity: 0.5, reflectivityDbz: 45, hasVelocityCouplet: true, lowLevel: true });
-assert.equal(debris.available, true);
-assert.equal(debris.debrisSignature, true);
-assert.ok(debris.confidence >= 50);
+const persistentDebris = evaluateDualPolEvidence({
+  correlationCoefficient: 0.70,
+  differentialReflectivity: 0.5,
+  reflectivityDbz: 45,
+  hasVelocityCouplet: true,
+  lowLevel: true,
+  scanCount: 3,
+});
+assert.equal(persistentDebris.available, true);
+assert.equal(persistentDebris.debrisCandidate, true);
+assert.equal(persistentDebris.debrisSignature, true);
+assert.equal(persistentDebris.scanCount, 3);
+assert.ok(persistentDebris.confidence >= 50);
 
-const noVelocity = evaluateDualPolEvidence({ correlationCoefficient: 0.70, differentialReflectivity: 0.5, reflectivityDbz: 45, hasVelocityCouplet: false, lowLevel: true });
+// Exact shape of the false-positive seen in the live app: CC=0.69 with a
+// low-level 48 kt couplet on a single scan. It may be a debris-like candidate,
+// but it must not be declared a debris signature until it persists.
+const singleScan = evaluateDualPolEvidence({
+  correlationCoefficient: 0.69,
+  differentialReflectivity: 0.5,
+  reflectivityDbz: 40,
+  hasVelocityCouplet: true,
+  lowLevel: true,
+  scanCount: 1,
+});
+assert.equal(singleScan.debrisCandidate, true);
+assert.equal(singleScan.debrisSignature, false);
+assert.match(singleScan.reason, /persistence required/);
+
+const noVelocity = evaluateDualPolEvidence({
+  correlationCoefficient: 0.70,
+  differentialReflectivity: 0.5,
+  reflectivityDbz: 45,
+  hasVelocityCouplet: false,
+  lowLevel: true,
+  scanCount: 3,
+});
+assert.equal(noVelocity.debrisCandidate, false);
 assert.equal(noVelocity.debrisSignature, false);
 
-const weakReflectivity = evaluateDualPolEvidence({ correlationCoefficient: 0.70, reflectivityDbz: 5, hasVelocityCouplet: true, lowLevel: true });
+const weakReflectivity = evaluateDualPolEvidence({
+  correlationCoefficient: 0.70,
+  reflectivityDbz: 5,
+  hasVelocityCouplet: true,
+  lowLevel: true,
+  scanCount: 3,
+});
+assert.equal(weakReflectivity.debrisCandidate, false);
 assert.equal(weakReflectivity.debrisSignature, false);
 
-// Regression for the 2026-09-12 live false-positive path: low CC plus a
-// low-level couplet must not become a debris claim if colocated reflectivity
-// is missing. Unknown evidence fails closed.
-const missingReflectivity = evaluateDualPolEvidence({ correlationCoefficient: 0.69, reflectivityDbz: null, hasVelocityCouplet: true, lowLevel: true });
+const missingReflectivity = evaluateDualPolEvidence({
+  correlationCoefficient: 0.69,
+  reflectivityDbz: null,
+  hasVelocityCouplet: true,
+  lowLevel: true,
+  scanCount: 3,
+});
 assert.equal(missingReflectivity.available, true);
+assert.equal(missingReflectivity.debrisCandidate, false);
 assert.equal(missingReflectivity.debrisSignature, false);
 assert.match(missingReflectivity.reason, /colocated reflectivity unavailable/);
 
-const missing = evaluateDualPolEvidence({ correlationCoefficient: null, hasVelocityCouplet: true, lowLevel: true });
+const marginalCc = evaluateDualPolEvidence({
+  correlationCoefficient: 0.82,
+  reflectivityDbz: 45,
+  hasVelocityCouplet: true,
+  lowLevel: true,
+  scanCount: 3,
+});
+assert.equal(marginalCc.debrisCandidate, false);
+assert.equal(marginalCc.debrisSignature, false);
+
+const missing = evaluateDualPolEvidence({
+  correlationCoefficient: null,
+  hasVelocityCouplet: true,
+  lowLevel: true,
+  scanCount: 3,
+});
 assert.equal(missing.available, false);
 assert.equal(missing.debrisSignature, false);
 

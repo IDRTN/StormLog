@@ -74,7 +74,12 @@ function checkDebrisSignature(
   const radarData = input.radarData as any;
   const cc = radarData?.correlationCoefficient ?? radarData?.cc ?? null;
   const backend = radarData?.dualPolEvidence;
-  const scanCount = Number.isInteger(radarData?.scanCount) ? radarData.scanCount : rotation.verticalContinuity;
+  const backendScanCount = Number.isInteger(backend?.scanCount) && backend.scanCount >= 0
+    ? backend.scanCount
+    : 0;
+  const rotationScanCount = Number.isInteger(rotation.verticalContinuity) && rotation.verticalContinuity >= 0
+    ? rotation.verticalContinuity
+    : 0;
 
   if (cc == null) {
     return {
@@ -99,27 +104,34 @@ function checkDebrisSignature(
       debrisSignature: false,
       confidence: null,
       cc,
-      description: `Low CC/couplet context present, but colocated backend dual-pol validation is unavailable`,
+      description: 'Low-CC/couplet context present, but colocated backend dual-pol validation is unavailable',
     };
   }
 
   if (backend.debrisSignature !== true) {
+    const candidateText = backend.debrisCandidate === true
+      ? 'Debris-like dual-pol candidate is not yet persistent enough to declare a debris signature'
+      : 'No validated debris signature';
     return {
       debrisSignature: false,
-      confidence: null,
+      confidence: typeof backend.confidence === 'number' ? backend.confidence : null,
       cc,
       description: typeof backend.reason === 'string'
-        ? `No validated debris signature — ${backend.reason}`
-        : `No validated debris signature (CC=${cc.toFixed(2)})`,
+        ? `${candidateText} — ${backend.reason}`
+        : `${candidateText} (CC=${cc.toFixed(2)})`,
     };
   }
 
-  if (scanCount < 2) {
+  // Two independent persistence checks must agree. The backend count belongs
+  // to the exact couplet/dual-pol location; rotation.verticalContinuity belongs
+  // to the strongest quantitative couplet consumed by the analysis engine.
+  // The global number of fetched radar volumes must never substitute for either.
+  if (backendScanCount < 2 || rotationScanCount < 2) {
     return {
       debrisSignature: false,
       confidence: null,
       cc,
-      description: `Debris-like dual-pol signature seen on only ${scanCount} scan; persistence required before a debris signature is declared`,
+      description: `Backend debris evidence is not matched by persistent low-level rotation (dual-pol scans=${backendScanCount}, rotation scans=${rotationScanCount})`,
     };
   }
 
@@ -127,7 +139,7 @@ function checkDebrisSignature(
     debrisSignature: true,
     confidence: typeof backend.confidence === 'number' ? backend.confidence : null,
     cc,
-    description: `Validated debris signature with low-level rotation across ${scanCount} scans (CC=${cc.toFixed(2)})`,
+    description: `Validated persistent debris signature with low-level rotation (dual-pol scans=${backendScanCount}, rotation scans=${rotationScanCount}, CC=${cc.toFixed(2)})`,
   };
 }
 

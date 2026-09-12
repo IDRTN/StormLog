@@ -128,8 +128,6 @@ function rotatingBoundaryCandidates(prefixes, siteId) {
     }
   }
 
-  // Also sample the numeric extremes as a defensive fallback if the bucket is
-  // briefly inconsistent while Unidata removes an expired directory.
   for (const item of numbered.slice(0, VOLUME_BOUNDARY_NEIGHBORS)) selected.add(item.prefix);
   for (const item of numbered.slice(-VOLUME_BOUNDARY_NEIGHBORS)) selected.add(item.prefix);
 
@@ -165,11 +163,6 @@ async function listLatestVolumes(siteId) {
 
   if (!prefixes.length) throw new Error(`No real-time Level II volume directories listed for ${siteId}`);
 
-  // Unidata uses a rotating numeric directory for live Level-II volumes. After
-  // rollover, the newest directory can sit in the middle of a lexical sort
-  // (for example 107 while older 999 and 000 still exist). Find the numeric
-  // boundary/gap of the retained ring and inspect only the directories around
-  // that boundary, then rank those candidates by their real chunk timestamps.
   const candidatePrefixes = rotatingBoundaryCandidates(prefixes, siteId);
 
   const volumes = [];
@@ -178,7 +171,7 @@ async function listLatestVolumes(siteId) {
       const volume = await readVolume(prefix, siteId);
       if (volume) volumes.push(volume);
     } catch {
-      // A rotating real-time directory can disappear while we are listing it.
+      // A rotating real-time directory can disappear while it is being listed.
     }
   }
 
@@ -222,6 +215,7 @@ function coupletPayload(candidate, site, scan, scanCount = 1) {
 }
 
 function matchingTrack(c, tracks) {
+  if (!c) return null;
   let best = null, metric = Infinity;
   for (const track of tracks) {
     const latest = track.latest;
@@ -280,17 +274,24 @@ async function analyzeSiteRadar(site, volumeCount) {
   });
 
   const strongestRaw = [...latest.rawCouplets].sort((a, b) => b.deltaVKt - a.deltaVKt)[0] ?? null;
-  const bestTrack = tracks.find(t => strongestRaw && angularDistance(t.latest.azimuthDeg, strongestRaw.azimuthDeg) <= 4 && Math.abs(t.latest.rangeKm - strongestRaw.rangeKm) <= 5) ?? tracks[0] ?? null;
-  const strongestCouplet = couplets[0] ?? null;
+  const strongestTrack = matchingTrack(strongestRaw, tracks);
+  const strongestCouplet = strongestRaw
+    ? coupletPayload(strongestRaw, site, latest, strongestTrack?.scanCount ?? 1)
+    : null;
+  const bestTrack = strongestTrack ?? tracks[0] ?? null;
+
   const cc = finite(latest.correlationCoefficient) ? latest.correlationCoefficient : null;
   const zdr = finite(latest.differentialReflectivity) ? latest.differentialReflectivity : null;
-  const colocatedReflectivity = finite(latest.colocatedReflectivity) ? latest.colocatedReflectivity : latest.maxReflectivityDbz;
+  // Never substitute the volume-wide maximum reflectivity for a missing
+  // colocated value. That would combine evidence from unrelated radar gates.
+  const colocatedReflectivity = finite(latest.colocatedReflectivity) ? latest.colocatedReflectivity : null;
   const dualPol = evaluateDualPolEvidence({
     correlationCoefficient: cc,
     differentialReflectivity: zdr,
     reflectivityDbz: colocatedReflectivity,
     hasVelocityCouplet: Boolean(strongestCouplet),
     lowLevel: strongestCouplet?.lowLevel === true,
+    scanCount: strongestCouplet?.scanCount ?? 0,
   });
 
   return {
@@ -342,6 +343,7 @@ function unavailable(stationId, reason) {
   return {
     available: false,
     stationId,
+    nearestSiteId: stationId,
     latestFrameTime: null,
     hasPrecipitation: false,
     maxReflectivityDbz: null,
@@ -352,6 +354,14 @@ function unavailable(stationId, reason) {
     differentialReflectivity: null,
     scanCount: 0,
     trend: null,
+    dualPolEvidence: {
+      available: false,
+      debrisCandidate: false,
+      debrisSignature: false,
+      confidence: null,
+      scanCount: 0,
+      reason: 'Radar unavailable',
+    },
     unavailableReason: reason,
   };
 }

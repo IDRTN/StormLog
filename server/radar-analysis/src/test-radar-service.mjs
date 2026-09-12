@@ -5,11 +5,9 @@ const site = nearestRadarSite(40.04, -82.46);
 assert.equal(site?.id, 'KILN');
 assert.ok(site.distanceKm > 0 && site.distanceKm < 200);
 
-const allowedOperationalSites = new Set(['KILN', 'KCLE', 'KRLX', 'KPBZ', 'KDTX', 'KIWX']);
-
-function assertFreshOperationalPayload(result) {
+function assertFreshKilnPayload(result) {
   assert.equal(result.available, true, result.unavailableReason ?? 'radar unavailable');
-  assert.ok(allowedOperationalSites.has(result.stationId), `unexpected station ${result.stationId}`);
+  assert.equal(result.stationId, 'KILN', `central Ohio must use nearest operational KILN radar, got ${result.stationId}`);
   assert.equal(result.nearestSiteId, 'KILN');
   assert.ok(Number.isFinite(result.radarDistanceKm) && result.radarDistanceKm > 0 && result.radarDistanceKm <= 350);
   assert.ok(Number.isFinite(result.latestFrameTime));
@@ -20,12 +18,16 @@ function assertFreshOperationalPayload(result) {
   assert.ok(Array.isArray(result.couplets));
   assert.ok(result.scanCount >= 1 && result.scanCount <= 3);
   assert.ok(['UNKNOWN', 'PERSISTENT', 'STRENGTHENING', 'RAPIDLY_INTENSIFYING', 'WEAKENING'].includes(result.trend));
+  assert.ok(result.dualPolEvidence && typeof result.dualPolEvidence === 'object', 'dual-pol evidence contract missing');
+  assert.equal(typeof result.dualPolEvidence.debrisCandidate, 'boolean');
+  assert.equal(typeof result.dualPolEvidence.debrisSignature, 'boolean');
+  assert.ok(Number.isInteger(result.dualPolEvidence.scanCount) && result.dualPolEvidence.scanCount >= 0);
   if (result.correlationCoefficient != null) assert.ok(Number.isFinite(result.correlationCoefficient));
   if (result.differentialReflectivity != null) assert.ok(Number.isFinite(result.differentialReflectivity));
 }
 
 const result = await analyzeRadar(40.04, -82.46, { volumeCount: 3 });
-assertFreshOperationalPayload(result);
+assertFreshKilnPayload(result);
 
 const server = await createRadarServer({ port: 0 });
 try {
@@ -38,7 +40,7 @@ try {
   const response = await fetch(`http://127.0.0.1:${port}/radar?lat=40.04&lon=-82.46`);
   assert.equal(response.status, 200);
   const payload = await response.json();
-  assertFreshOperationalPayload(payload);
+  assertFreshKilnPayload(payload);
 } finally {
   await new Promise(resolve => server.close(resolve));
 }

@@ -2,8 +2,10 @@ import type { RadarVelocityPoint, RotationCouplet, StormCell } from './radar';
 
 export interface QuantitativeDualPolEvidence {
   available: boolean;
+  debrisCandidate: boolean;
   debrisSignature: boolean;
   confidence: number | null;
+  scanCount: number;
   reason?: string;
   cc?: number | null;
   zdr?: number | null;
@@ -37,10 +39,13 @@ function finite(value: unknown): value is number {
 
 function parseDualPolEvidence(value: any): QuantitativeDualPolEvidence | null {
   if (!value || typeof value !== 'object') return null;
+  const scanCount = Number.isInteger(value.scanCount) && value.scanCount >= 0 ? value.scanCount : 0;
   return {
     available: value.available === true,
+    debrisCandidate: value.debrisCandidate === true,
     debrisSignature: value.debrisSignature === true,
     confidence: finiteOrNull(value.confidence),
+    scanCount,
     reason: typeof value.reason === 'string' ? value.reason : undefined,
     cc: finiteOrNull(value.cc),
     zdr: finiteOrNull(value.zdr),
