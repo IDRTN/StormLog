@@ -18,7 +18,7 @@ env:
   NPM_CONFIG_LEGACY_PEER_DEPS: "true"
   EXPO_PUBLIC_STORMLOG_LIGHTNING_URL: "https://stormlog-lightning-proxy.idontrememberthename74.workers.dev"
   EXPO_PUBLIC_STORMLOG_LIGHTNING_TOKEN: ${{ secrets.STORMLOG_LIGHTNING_TOKEN }}
-  EXPO_PUBLIC_STORMLOG_RADAR_API_URL: ${{ vars.EXPO_PUBLIC_STORMLOG_RADAR_API_URL }}
+  EXPO_PUBLIC_STORMLOG_RADAR_API_URL: "https://stormlog-radar-analysis-v3.onrender.com"
 
 jobs:
   validate-build-verify:
