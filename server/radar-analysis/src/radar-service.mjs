@@ -21,6 +21,7 @@ const RADAR_SITES = [
 const CACHE_MS = 60_000;
 const MAX_CANDIDATE_VOLUMES = 8;
 const MAX_SCAN_AGE_MS = 20 * 60_000;
+const MAX_S3_PAGES = 40;
 const cache = new Map();
 
 function finite(v) { return typeof v === 'number' && Number.isFinite(v); }
@@ -69,61 +70,65 @@ function keyUrl(key) {
   return `${CHUNK_BUCKET}/${key.split('/').map(encodeURIComponent).join('/')}`;
 }
 
-async function fetchS3List(prefix, delimiter = null) {
+async function fetchS3ListPage(prefix, continuationToken = null) {
   const url = new URL(CHUNK_BUCKET);
   url.searchParams.set('list-type', '2');
   url.searchParams.set('prefix', prefix);
   url.searchParams.set('max-keys', '1000');
-  if (delimiter) url.searchParams.set('delimiter', delimiter);
+  if (continuationToken) url.searchParams.set('continuation-token', continuationToken);
   const response = await fetch(url, { headers: { 'User-Agent': 'StormLog-Radar/1.0' } });
   if (!response.ok) throw new Error(`Unidata chunk listing HTTP ${response.status}`);
   return response.text();
 }
 
-async function listVolumePrefixes(siteId) {
-  const xml = await fetchS3List(`${siteId}/`, '/');
-  return [...xml.matchAll(/<CommonPrefixes>\s*<Prefix>([^<]+)<\/Prefix>\s*<\/CommonPrefixes>/g)]
-    .map(m => decodeXml(m[1]))
-    .filter(p => p.startsWith(`${siteId}/`));
+function nextContinuationToken(xml) {
+  if (!/<IsTruncated>true<\/IsTruncated>/.test(xml)) return null;
+  const match = xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/);
+  return match ? decodeXml(match[1]) : null;
 }
 
-async function readVolume(prefix) {
-  const xml = await fetchS3List(prefix);
-  const keys = [...xml.matchAll(/<Contents>[\s\S]*?<Key>([^<]+)<\/Key>[\s\S]*?<\/Contents>/g)]
-    .map(m => decodeXml(m[1]))
-    .filter(key => key.startsWith(prefix))
-    .sort();
-  if (!keys.length) return null;
-  const timestamp = Math.max(...keys.map(chunkTimestampFromKey).filter(finite));
-  if (!finite(timestamp)) return null;
-  const hasStart = keys.some(k => /-S$/.test(k));
-  const intermediateCount = keys.filter(k => /-[IE]$/.test(k)).length;
-  if (!hasStart || intermediateCount < 3) return null;
-  return {
-    id: prefix.replace(/\/$/, ''),
-    timestamp,
-    chunks: keys.map(key => ({ key, url: keyUrl(key) })),
-  };
+function objectKeys(xml) {
+  return [...xml.matchAll(/<Contents>[\s\S]*?<Key>([^<]+)<\/Key>[\s\S]*?<\/Contents>/g)]
+    .map(m => decodeXml(m[1]));
 }
 
 async function listLatestVolumes(siteId) {
-  const prefixes = await listVolumePrefixes(siteId);
-  if (!prefixes.length) throw new Error(`No real-time Level II chunk volumes listed for ${siteId}`);
-  const sorted = [...prefixes].sort();
-  const candidatePrefixes = [...new Set([
-    ...sorted.slice(-10),
-    ...sorted.slice(0, 10),
-  ])];
-  const volumes = [];
-  for (const prefix of candidatePrefixes) {
-    try {
-      const volume = await readVolume(prefix);
-      if (volume) volumes.push(volume);
-    } catch {
-      // A volume may disappear while the 24-hour chunk bucket is being scrubbed.
+  const groups = new Map();
+  let continuationToken = null;
+  let pageCount = 0;
+
+  do {
+    const xml = await fetchS3ListPage(`${siteId}/`, continuationToken);
+    pageCount += 1;
+
+    for (const key of objectKeys(xml)) {
+      const parts = key.split('/');
+      if (parts.length < 3 || parts[0] !== siteId) continue;
+      const timestamp = chunkTimestampFromKey(key);
+      if (!finite(timestamp)) continue;
+      const prefix = `${parts[0]}/${parts[1]}/`;
+      let group = groups.get(prefix);
+      if (!group) {
+        group = { id: prefix.replace(/\/$/, ''), timestamp: -Infinity, chunks: [], hasStart: false, intermediateCount: 0 };
+        groups.set(prefix, group);
+      }
+      group.timestamp = Math.max(group.timestamp, timestamp);
+      group.chunks.push({ key, url: keyUrl(key) });
+      if (/-S$/.test(key)) group.hasStart = true;
+      if (/-[IE]$/.test(key)) group.intermediateCount += 1;
     }
-  }
-  volumes.sort((a, b) => b.timestamp - a.timestamp);
+
+    continuationToken = nextContinuationToken(xml);
+    if (pageCount >= MAX_S3_PAGES && continuationToken) {
+      throw new Error(`Unidata chunk listing exceeded ${MAX_S3_PAGES} pages for ${siteId}`);
+    }
+  } while (continuationToken);
+
+  const volumes = [...groups.values()]
+    .filter(v => v.hasStart && v.intermediateCount >= 3 && finite(v.timestamp))
+    .map(v => ({ ...v, chunks: v.chunks.sort((a, b) => a.key.localeCompare(b.key)) }))
+    .sort((a, b) => b.timestamp - a.timestamp);
+
   if (!volumes.length) throw new Error(`No usable real-time Level II chunk volumes for ${siteId}`);
   return volumes.slice(0, MAX_CANDIDATE_VOLUMES);
 }
