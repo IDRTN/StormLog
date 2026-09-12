@@ -4,7 +4,8 @@
 //
 // Evaluates evidence that a detected circulation may be tornadic.
 // Without radar velocity data, all evidence types are UNKNOWN.
-// Debris signature requires CC + couplet + low-level confirmation.
+// Debris signature requires backend-validated, spatially colocated dual-pol
+// evidence plus a persistent low-level velocity couplet.
 
 import type {
   AnalysisInput,
@@ -17,8 +18,6 @@ function checkStrongCouplet(rotation: RotationAssessment): { detected: boolean; 
   if (!rotation.velocityDataAvailable || !rotation.hasCouplet) {
     return { detected: false, description: 'Velocity couplet not assessable without radar velocity' };
   }
-  // We use "strong velocity couplet" not "TVS" — TVS requires
-  // specific spatial/radar context we cannot evaluate from point data
   const isStrongCouplet = rotation.gateToGateShear != null &&
     rotation.gateToGateShear > 70 &&
     rotation.lowLevelRotation;
@@ -74,6 +73,8 @@ function checkDebrisSignature(
 ): { debrisSignature: boolean; confidence: number | null; cc: number | null; description: string } {
   const radarData = input.radarData as any;
   const cc = radarData?.correlationCoefficient ?? radarData?.cc ?? null;
+  const backend = radarData?.dualPolEvidence;
+  const scanCount = Number.isInteger(radarData?.scanCount) ? radarData.scanCount : rotation.verticalContinuity;
 
   if (cc == null) {
     return {
@@ -84,48 +85,49 @@ function checkDebrisSignature(
     };
   }
 
-  if (!rotation.hasCouplet) {
+  if (!rotation.hasCouplet || !rotation.lowLevelRotation) {
     return {
       debrisSignature: false,
       confidence: null,
       cc,
-      description: `Correlation coefficient ${cc.toFixed(2)} available but no velocity couplet`,
+      description: `CC ${cc.toFixed(2)} available but no confirmed low-level velocity couplet`,
     };
   }
 
-  // Require ALL three: low CC + confirmed couplet + low-level
-  const hasLowCC = cc < 0.85;
-  const hasCouplet = rotation.hasCouplet;
-  const isLowLevel = rotation.lowLevelRotation;
+  if (!backend || backend.available !== true) {
+    return {
+      debrisSignature: false,
+      confidence: null,
+      cc,
+      description: `Low CC/couplet context present, but colocated backend dual-pol validation is unavailable`,
+    };
+  }
 
-  if (hasLowCC && hasCouplet && isLowLevel) {
-    return {
-      debrisSignature: true,
-      confidence: Math.round((0.85 - cc) / 0.85 * 100),
-      cc,
-      description: `Possible debris signature (CC=${cc.toFixed(2)}, low-level, with couplet)`,
-    };
-  } else if (hasLowCC && hasCouplet) {
+  if (backend.debrisSignature !== true) {
     return {
       debrisSignature: false,
       confidence: null,
       cc,
-      description: `Possible non-meteorological scatterers (CC=${cc.toFixed(2)}) — low-level confirmation needed`,
+      description: typeof backend.reason === 'string'
+        ? `No validated debris signature — ${backend.reason}`
+        : `No validated debris signature (CC=${cc.toFixed(2)})`,
     };
-  } else if (hasLowCC) {
+  }
+
+  if (scanCount < 2) {
     return {
       debrisSignature: false,
       confidence: null,
       cc,
-      description: `Low CC (${cc.toFixed(2)}) but no velocity couplet — cannot assess debris signature`,
+      description: `Debris-like dual-pol signature seen on only ${scanCount} scan; persistence required before a debris signature is declared`,
     };
   }
 
   return {
-    debrisSignature: false,
-    confidence: null,
+    debrisSignature: true,
+    confidence: typeof backend.confidence === 'number' ? backend.confidence : null,
     cc,
-    description: `Correlation coefficient ${cc.toFixed(2)} — no debris signature indicators`,
+    description: `Validated debris signature with low-level rotation across ${scanCount} scans (CC=${cc.toFixed(2)})`,
   };
 }
 
@@ -138,7 +140,6 @@ export function analyzeTornadicEvidence(
   if (!rotationAssessment.velocityDataAvailable) {
     const radarConnected = rotationAssessment.radarAvailable;
 
-    // Lightning context is independent of radar velocity availability
     if (input.lightning) {
       const l = input.lightning;
       if (l.totalCount > 0) {
@@ -209,9 +210,10 @@ export function analyzeTornadicEvidence(
 
   const debrisResult = checkDebrisSignature(input, rotationAssessment);
   if (debrisResult.debrisSignature) factors.push(debrisResult.description);
+  else if (debrisResult.cc != null) factors.push(debrisResult.description);
 
   const radarData = input.radarData as any;
-  const dualPolAvailable = radarData?.correlationCoefficient != null || radarData?.cc != null;
+  const dualPolAvailable = radarData?.dualPolEvidence?.available === true;
 
   let level: AssessmentLevel;
 
@@ -233,7 +235,7 @@ export function analyzeTornadicEvidence(
 
   let description: string;
   if (debrisResult.debrisSignature) {
-    description = 'Radar evidence consistent with tornadic circulation — possible debris signature with confirmed rotation';
+    description = 'Radar evidence consistent with tornadic circulation — validated persistent debris signature with confirmed rotation';
   } else if (coupletResult.detected) {
     description = 'Strong low-level velocity couplet — radar signature consistent with possible tornadic circulation';
   } else if (mesoResult.detected) {
@@ -241,7 +243,7 @@ export function analyzeTornadicEvidence(
   } else if (persistentResult.persistent) {
     description = 'Persistent rotation detected — tornadic potential present';
   } else if (rotationAssessment.hasCouplet) {
-    description = 'Rotation detected but no strong tornadic indicators';
+    description = 'Rotation detected but no validated debris signature or strong tornadic indicators';
   } else {
     description = 'No tornadic evidence detected in radar data';
   }
@@ -256,7 +258,6 @@ export function analyzeTornadicEvidence(
     factors.push(coupletResult.description);
   }
 
-  // Lightning context (supporting evidence only - does not change level)
   if (input.lightning) {
     const l = input.lightning;
     if (l.totalCount > 0) {
