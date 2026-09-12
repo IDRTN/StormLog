@@ -5,6 +5,7 @@ const MIN_RAYS = 240;
 const MIN_AZIMUTH_COVERAGE_DEG = 320;
 const MAX_CHUNKS_PER_SWEEP = 32;
 const MAX_SWEEP_BYTES = 8 * 1024 * 1024;
+const MAX_FULL_VOLUME_BYTES = 12 * 1024 * 1024;
 
 function finite(v) { return typeof v === 'number' && Number.isFinite(v); }
 function asArray(value) { return Array.isArray(value) ? value : value ? [value] : []; }
@@ -149,11 +150,11 @@ function sampleVelocityPoints(tilt, site, maxPoints = 240) {
   return points;
 }
 
-async function fetchChunk(url) {
+async function fetchBytes(url, label, minimumBytes = 100) {
   const response = await fetch(url, { headers: { 'User-Agent': 'StormLog-Radar/1.0' } });
-  if (!response.ok) throw new Error(`Level II chunk HTTP ${response.status}`);
+  if (!response.ok) throw new Error(`${label} HTTP ${response.status}`);
   const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength < 100) throw new Error(`Level II chunk unexpectedly small: ${bytes.byteLength}`);
+  if (bytes.byteLength < minimumBytes) throw new Error(`${label} unexpectedly small: ${bytes.byteLength}`);
   return bytes;
 }
 
@@ -163,7 +164,7 @@ async function buildLowestSweep(chunks, site) {
   let totalBytes = 0;
   for (const chunk of chunks) {
     if (usedChunks >= MAX_CHUNKS_PER_SWEEP) break;
-    const bytes = await fetchChunk(chunk.url);
+    const bytes = await fetchBytes(chunk.url, 'Level II chunk');
     if (totalBytes + bytes.byteLength > MAX_SWEEP_BYTES) {
       throw new Error(`Low-level sweep exceeded ${MAX_SWEEP_BYTES} byte safety ceiling before completion`);
     }
@@ -174,9 +175,33 @@ async function buildLowestSweep(chunks, site) {
     }
     combined = combined ? Level2Radar.combineData(combined, parsed) : parsed;
     usedChunks += 1;
-    if (hasCompleteLowSweep(combined)) return { radar: combined, usedChunks, totalBytes };
+    if (hasCompleteLowSweep(combined)) return { radar: combined, usedChunks, totalBytes, sourceKind: 'chunks' };
   }
   throw new Error(`No complete low-level sweep after ${usedChunks} chunks (${totalBytes} bytes)`);
+}
+
+async function buildFullVolume(volume, site) {
+  const bytes = await fetchBytes(volume.url, 'Level II full volume', 100000);
+  if (bytes.byteLength > MAX_FULL_VOLUME_BYTES) {
+    throw new Error(`Level II full volume exceeded ${MAX_FULL_VOLUME_BYTES} byte safety ceiling`);
+  }
+  const radar = new Level2Radar(bytes, { logger: false });
+  if (radar.isTruncated) throw new Error(`${volume.id}: full volume decoded as truncated`);
+  if (radar.header?.ICAO && radar.header.ICAO !== site.id) {
+    throw new Error(`Radar ICAO mismatch: expected ${site.id}, got ${radar.header.ICAO}`);
+  }
+  if (!hasCompleteLowSweep(radar)) throw new Error(`${volume.id}: full volume has no complete low-level REF/VEL sweep`);
+  return { radar, usedChunks: 0, totalBytes: bytes.byteLength, sourceKind: 'full-volume' };
+}
+
+async function buildRadar(volume, site) {
+  if (typeof volume?.url === 'string' && volume.url.length > 0) {
+    return buildFullVolume(volume, site);
+  }
+  if (Array.isArray(volume?.chunks) && volume.chunks.length > 0) {
+    return buildLowestSweep(volume.chunks, site);
+  }
+  throw new Error('volume source required');
 }
 
 async function main() {
@@ -184,9 +209,9 @@ async function main() {
   if (!encoded) throw new Error('worker payload required');
   const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
   const { volume, site, includeDetail } = payload;
-  if (!volume || !Array.isArray(volume.chunks) || !volume.chunks.length) throw new Error('volume chunks required');
+  if (!volume || !site) throw new Error('volume and site required');
 
-  const { radar, usedChunks, totalBytes } = await buildLowestSweep(volume.chunks, site);
+  const { radar, usedChunks, totalBytes, sourceKind } = await buildRadar(volume, site);
   const reflectivityTilt = getLowestUsableTilt(radar, 'getHighresReflectivity', true);
   const velocityTilt = getLowestUsableTilt(radar, 'getHighresVelocity', true);
   if (!reflectivityTilt) throw new Error(`${volume.id}: quantitative reflectivity unavailable`);
@@ -202,7 +227,7 @@ async function main() {
 
   let correlationCoefficient = null;
   let differentialReflectivity = null;
-  const colocatedReflectivity = strongest ? valueAtPolar(reflectivityTilt, strongest.azimuthDeg, strongest.rangeKm) : maxReflectivityDbz;
+  const colocatedReflectivity = strongest ? valueAtPolar(reflectivityTilt, strongest.azimuthDeg, strongest.rangeKm) : null;
 
   if (includeDetail) {
     const ccTilt = getLowestUsableTilt(radar, 'getHighresCorrelationCoefficient', true);
@@ -214,6 +239,7 @@ async function main() {
   process.stdout.write(JSON.stringify({
     timestamp: volume.timestamp ?? Date.now(),
     name: volume.id,
+    sourceKind,
     usedChunks,
     totalBytes,
     maxReflectivityDbz,
