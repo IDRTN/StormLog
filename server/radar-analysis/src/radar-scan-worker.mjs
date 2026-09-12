@@ -3,7 +3,8 @@ import { detectVelocityCouplets } from './couplet-detector.mjs';
 
 const MIN_RAYS = 240;
 const MIN_AZIMUTH_COVERAGE_DEG = 320;
-const MAX_CHUNKS_PER_SWEEP = 8;
+const MAX_CHUNKS_PER_SWEEP = 32;
+const MAX_SWEEP_BYTES = 8 * 1024 * 1024;
 
 function finite(v) { return typeof v === 'number' && Number.isFinite(v); }
 function asArray(value) { return Array.isArray(value) ? value : value ? [value] : []; }
@@ -159,17 +160,23 @@ async function fetchChunk(url) {
 async function buildLowestSweep(chunks, site) {
   let combined = null;
   let usedChunks = 0;
-  for (const chunk of chunks.slice(0, MAX_CHUNKS_PER_SWEEP)) {
+  let totalBytes = 0;
+  for (const chunk of chunks) {
+    if (usedChunks >= MAX_CHUNKS_PER_SWEEP) break;
     const bytes = await fetchChunk(chunk.url);
+    if (totalBytes + bytes.byteLength > MAX_SWEEP_BYTES) {
+      throw new Error(`Low-level sweep exceeded ${MAX_SWEEP_BYTES} byte safety ceiling before completion`);
+    }
+    totalBytes += bytes.byteLength;
     const parsed = new Level2Radar(bytes, { logger: false });
     if (parsed.header?.ICAO && parsed.header.ICAO !== site.id) {
       throw new Error(`Radar ICAO mismatch: expected ${site.id}, got ${parsed.header.ICAO}`);
     }
     combined = combined ? Level2Radar.combineData(combined, parsed) : parsed;
     usedChunks += 1;
-    if (hasCompleteLowSweep(combined)) return { radar: combined, usedChunks };
+    if (hasCompleteLowSweep(combined)) return { radar: combined, usedChunks, totalBytes };
   }
-  throw new Error(`No complete low-level sweep after ${usedChunks} chunks`);
+  throw new Error(`No complete low-level sweep after ${usedChunks} chunks (${totalBytes} bytes)`);
 }
 
 async function main() {
@@ -179,7 +186,7 @@ async function main() {
   const { volume, site, includeDetail } = payload;
   if (!volume || !Array.isArray(volume.chunks) || !volume.chunks.length) throw new Error('volume chunks required');
 
-  const { radar, usedChunks } = await buildLowestSweep(volume.chunks, site);
+  const { radar, usedChunks, totalBytes } = await buildLowestSweep(volume.chunks, site);
   const reflectivityTilt = getLowestUsableTilt(radar, 'getHighresReflectivity', true);
   const velocityTilt = getLowestUsableTilt(radar, 'getHighresVelocity', true);
   if (!reflectivityTilt) throw new Error(`${volume.id}: quantitative reflectivity unavailable`);
@@ -208,6 +215,7 @@ async function main() {
     timestamp: volume.timestamp ?? Date.now(),
     name: volume.id,
     usedChunks,
+    totalBytes,
     maxReflectivityDbz,
     rawCouplets,
     gateSizeKm: finite(gateSizeKm) ? gateSizeKm : null,
