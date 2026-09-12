@@ -1,0 +1,70 @@
+name: Radar v3 Live Contract Gate (No APK)
+
+on:
+  push:
+    branches:
+      - tornado-live-radar-integration-20260911
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-v3-live-radar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RADAR_API_URL: https://stormlog-radar-analysis-v3.onrender.com
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.x'
+
+      - name: Verify live v3 health endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --retry 2 --retry-delay 2 --retry-all-errors --max-time 30 -fsS "${RADAR_API_URL}/health" > /tmp/radar-health.json
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("/tmp/radar-health.json","utf8"));if(p?.ok!==true)throw new Error("v3 radar health endpoint not ready")'
+
+      - name: Verify live v3 Level II contract for central Ohio
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --retry 1 --retry-delay 2 --retry-all-errors --max-time 150 -fsS "${RADAR_API_URL}/radar?lat=40.039&lon=-82.461" > /tmp/radar.json
+          node <<'NODE'
+          const fs = require('fs');
+          const p = JSON.parse(fs.readFileSync('/tmp/radar.json', 'utf8'));
+          if (p?.available !== true) throw new Error(`live radar unavailable: ${p?.unavailableReason ?? 'unknown reason'}`);
+          if (p?.stationId !== 'KILN') throw new Error(`expected KILN, got ${p?.stationId}`);
+          if (!Number.isFinite(Number(p?.latestFrameTime))) throw new Error('latest Level II frame time missing');
+          if (!Number.isFinite(Number(p?.maxReflectivityDbz))) throw new Error('quantitative reflectivity missing');
+          if (!Array.isArray(p?.velocityPoints) || p.velocityPoints.length === 0) throw new Error('Doppler velocity points missing');
+          if (!Array.isArray(p?.couplets)) throw new Error('couplet array missing');
+          if (!Number.isInteger(p?.scanCount) || p.scanCount < 1) throw new Error('scanCount invalid');
+          if (typeof p?.trend !== 'string') throw new Error('multi-scan trend missing');
+          if (!('correlationCoefficient' in p)) throw new Error('dual-pol CC field missing');
+          if (!('differentialReflectivity' in p)) throw new Error('dual-pol ZDR field missing');
+          console.log(JSON.stringify({
+            stationId: p.stationId,
+            latestFrameTime: p.latestFrameTime,
+            maxReflectivityDbz: p.maxReflectivityDbz,
+            velocityPoints: p.velocityPoints.length,
+            couplets: p.couplets.length,
+            scanCount: p.scanCount,
+            trend: p.trend,
+            correlationCoefficient: p.correlationCoefficient,
+            differentialReflectivity: p.differentialReflectivity,
+          }, null, 2));
+          NODE
+
+      - name: Confirm no APK assembled
+        shell: bash
+        run: |
+          if find . -type f -name '*.apk' -print -quit | grep -q .; then
+            echo '::error::v3 live gate unexpectedly assembled an APK'
+            exit 1
+          fi
+          echo 'v3 live contract passed without assembling an APK.'
