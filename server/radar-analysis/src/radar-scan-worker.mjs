@@ -151,7 +151,10 @@ function sampleVelocityPoints(tilt, site, maxPoints = 240) {
 }
 
 async function fetchBytes(url, label, minimumBytes = 100) {
-  const response = await fetch(url, { headers: { 'User-Agent': 'StormLog-Radar/1.0' } });
+  const response = await fetch(url, {
+    headers: { 'User-Agent': 'StormLog-Radar/1.0' },
+    signal: AbortSignal.timeout(20_000),
+  });
   if (!response.ok) throw new Error(`${label} HTTP ${response.status}`);
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (bytes.byteLength < minimumBytes) throw new Error(`${label} unexpectedly small: ${bytes.byteLength}`);
@@ -190,7 +193,8 @@ async function buildFullVolume(volume, site) {
   if (radar.header?.ICAO && radar.header.ICAO !== site.id) {
     throw new Error(`Radar ICAO mismatch: expected ${site.id}, got ${radar.header.ICAO}`);
   }
-  if (!hasCompleteLowSweep(radar)) throw new Error(`${volume.id}: full volume has no complete low-level REF/VEL sweep`);
+  // Do not pre-scan REF/VEL here. main() performs the quantitative low-level
+  // extraction once, avoiding duplicate full-volume traversal on slower hosts.
   return { radar, usedChunks: 0, totalBytes: bytes.byteLength, sourceKind: 'full-volume' };
 }
 
