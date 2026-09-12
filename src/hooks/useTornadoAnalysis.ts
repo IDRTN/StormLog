@@ -50,11 +50,11 @@ export function useTornadoAnalysis() {
             velocityPoints: nexradResult.velocityPoints,
             couplets: nexradResult.couplets,
             stormCells: nexradResult.cells,
-            // Tornadic evidence intentionally consumes these only when the
-            // quantitative backend actually supplies them. Composite fallback
-            // leaves them null/undefined and cannot create a debris claim.
+            // Tornadic evidence consumes dual-pol only when the quantitative
+            // backend has already performed colocated reflectivity/velocity QC.
             correlationCoefficient: nexradResult.correlationCoefficient,
             differentialReflectivity: nexradResult.differentialReflectivity,
+            dualPolEvidence: nexradResult.dualPolEvidence,
             scanCount: nexradResult.scanCount,
             radarSource: nexradResult.source,
           } as any;
