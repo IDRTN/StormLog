@@ -28,6 +28,15 @@ function nwsObservationBody() {
   } };
 }
 
+function openMeteoBody() {
+  return {
+    utc_offset_seconds: -14400, timezone: 'America/New_York',
+    current: { temperature_2m: 73, relative_humidity_2m: 100, wind_speed_10m: 0, wind_direction_10m: 0, wind_gusts_10m: 11, weather_code: 61, precipitation: 1, surface_pressure: 100000, pressure_msl: 101625 },
+    hourly: { time: ['2026-09-03T00:00'], precipitation: [1], cape: [null], temperature_2m: [73], precipitation_probability: [100], weather_code: [61] },
+    daily: { time: [] },
+  };
+}
+
 async function openMeteoFailureFallsBackToNws() {
   let mrmsCalls = 0;
   const mrmsProvider: MrmsProvider = { async getPrecipitation() { mrmsCalls++; throw new Error('MRMS should not run without a trusted timezone offset'); } };
@@ -55,12 +64,7 @@ async function openMeteoFailureFallsBackToNws() {
 async function optionalProviderFailuresDoNotEraseOpenMeteo() {
   const fetchJson = (async (input: RequestInfo | URL) => {
     const url = String(input);
-    if (url.startsWith('https://api.open-meteo.com')) return jsonResponse(200, {
-      utc_offset_seconds: -14400, timezone: 'America/New_York',
-      current: { temperature_2m: 73, relative_humidity_2m: 100, wind_speed_10m: 0, wind_direction_10m: 0, wind_gusts_10m: 11, weather_code: 0, precipitation: 0, surface_pressure: 100000, pressure_msl: 101625 },
-      hourly: { time: ['2026-09-03T00:00'], precipitation: [0], cape: [null], temperature_2m: [73], precipitation_probability: [0], weather_code: [0] },
-      daily: { time: [] },
-    });
+    if (url.startsWith('https://api.open-meteo.com')) return jsonResponse(200, openMeteoBody());
     if (url.startsWith('https://api.weather.gov/points/')) return jsonResponse(200, null, new Error('JSON Parse error: Unexpected character: U'));
     throw new Error(`Unexpected URL ${url}`);
   }) as typeof fetch;
@@ -70,7 +74,57 @@ async function optionalProviderFailuresDoNotEraseOpenMeteo() {
   assert(result.success, `Open-Meteo baseline should survive optional provider failures: ${!result.success ? result.error : ''}`);
   if (!result.success) return;
   assert(result.data.temperature === 73, `Expected Open-Meteo temperature 73°F, got ${result.data.temperature}`);
-  assert(result.data.weatherCondition === 'Clear sky', 'Expected Open-Meteo current conditions');
+  assert(result.data.weatherCondition === 'Slight rain', 'Expected Open-Meteo current conditions');
+}
+
+async function incompleteMrmsRollingAccumulationRemainsVisible() {
+  const fetchJson = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.startsWith('https://api.open-meteo.com')) return jsonResponse(200, openMeteoBody());
+    throw new Error(`Unexpected URL ${url}`);
+  }) as typeof fetch;
+
+  const mrmsProvider: MrmsProvider = {
+    async getPrecipitation() {
+      return {
+        currentOneHourInches: 0.22,
+        currentPartialHourInches: null,
+        precipitationRateInchesPerHour: null,
+        observedDailyPrecipitationInches: null,
+        observedDailyIsComplete: false,
+        radarPrecipitation1hInches: 0.22,
+        radarPrecipitation3hInches: 0.48,
+        radarPrecipitation6hInches: 0.71,
+        radarPrecipitation12hInches: 0.94,
+        radarPrecipitation24hInches: 1.12,
+        dataAvailable: true,
+        missingHours: [],
+        usedHours: [],
+        weatherLocalDate: '2026-09-03',
+        source: {
+          provider: 'NOAA_MRMS',
+          source: 'NOAA/NWS MRMS radar-only QPE',
+          dataKind: 'radar_estimated',
+          retrievedTime: reference,
+          freshness: 'current',
+          confidence: 0.9,
+          completeness: 1,
+        },
+      };
+    },
+  };
+
+  const provider = createStormLogWeatherProvider({
+    fetchJson,
+    mrmsProvider,
+    features: { NWS_CURRENT_CONDITIONS: false, NWS_PRESSURE: false, NWS_FORECAST: false, MRMS_PRECIPITATION: true },
+  });
+  const result = await provider.getCurrentWeather(40.0393, -82.4606, reference);
+  assert(result.success, `MRMS partial precipitation should remain usable: ${!result.success ? result.error : ''}`);
+  if (!result.success) return;
+  assert(result.data.observedDailyPrecipitationIsComplete === false, 'Partial MRMS accumulation must remain marked incomplete');
+  assert(result.data.observedDailyPrecipitationPartialHours === 1, `Expected 1h partial coverage, got ${result.data.observedDailyPrecipitationPartialHours}`);
+  assert(Math.abs((result.data.observedDailyPrecipitation ?? 0) - 0.22) < 0.0001, `Expected visible 0.22in partial accumulation, got ${result.data.observedDailyPrecipitation}`);
 }
 
 (async () => {
@@ -78,4 +132,6 @@ async function optionalProviderFailuresDoNotEraseOpenMeteo() {
   console.log('PASS: Open-Meteo malformed JSON falls back to mobile NWS station discovery');
   await optionalProviderFailuresDoNotEraseOpenMeteo();
   console.log('PASS: NWS/MRMS failures do not erase Open-Meteo weather data');
+  await incompleteMrmsRollingAccumulationRemainsVisible();
+  console.log('PASS: incomplete MRMS rolling accumulation remains visible and explicitly partial');
 })();
