@@ -8,7 +8,6 @@ import { evaluateDualPolEvidence } from './dual-pol-evidence.mjs';
 const execFileAsync = promisify(execFile);
 const WORKER_PATH = fileURLToPath(new URL('./radar-scan-worker.mjs', import.meta.url));
 const CHUNK_BUCKET = 'https://unidata-nexrad-level2-chunks.s3.amazonaws.com';
-const NOMADS_LEVEL2_BASE = 'https://nomads.ncep.noaa.gov/pub/data/nccf/radar/nexrad_level2';
 
 const RADAR_SITES = [
   { id: 'KILN', latitude: 39.4203, longitude: -83.8217 },
@@ -20,10 +19,14 @@ const RADAR_SITES = [
 ];
 
 const CACHE_MS = 60_000;
-const MAX_CANDIDATE_VOLUMES = 8;
+const MAX_CANDIDATE_VOLUMES = 4;
 const MAX_SCAN_AGE_MS = 20 * 60_000;
-const MAX_SITE_FALLBACKS = 3;
-const VOLUME_BOUNDARY_NEIGHBORS = 8;
+const MAX_SITE_FALLBACKS = 1;
+const VOLUME_BOUNDARY_NEIGHBORS = 4;
+const MAX_PREFIX_PROBES = 12;
+const LIST_TIMEOUT_MS = 8_000;
+const WORKER_TIMEOUT_MS = 30_000;
+const REQUEST_BUDGET_MS = 90_000;
 const cache = new Map();
 
 function finite(v) { return typeof v === 'number' && Number.isFinite(v); }
@@ -70,13 +73,6 @@ function chunkTimestampFromKey(key) {
   return Date.UTC(+d.slice(0, 4), +d.slice(4, 6) - 1, +d.slice(6, 8), +t.slice(0, 2), +t.slice(2, 4), +t.slice(4, 6));
 }
 
-function nomadsTimestampFromName(name) {
-  const m = name.match(/_(\d{8})_(\d{6})\.bz2$/);
-  if (!m) return null;
-  const d = m[1], t = m[2];
-  return Date.UTC(+d.slice(0, 4), +d.slice(4, 6) - 1, +d.slice(6, 8), +t.slice(0, 2), +t.slice(2, 4), +t.slice(4, 6));
-}
-
 function keyUrl(key) {
   return `${CHUNK_BUCKET}/${key.split('/').map(encodeURIComponent).join('/')}`;
 }
@@ -87,7 +83,10 @@ async function fetchS3List(prefix, delimiter = null) {
   url.searchParams.set('prefix', prefix);
   url.searchParams.set('max-keys', '1000');
   if (delimiter) url.searchParams.set('delimiter', delimiter);
-  const response = await fetch(url, { headers: { 'User-Agent': 'StormLog-Radar/1.0' } });
+  const response = await fetch(url, {
+    headers: { 'User-Agent': 'StormLog-Radar/1.0' },
+    signal: AbortSignal.timeout(LIST_TIMEOUT_MS),
+  });
   if (!response.ok) throw new Error(`Unidata chunk listing HTTP ${response.status}`);
   return response.text();
 }
@@ -118,7 +117,6 @@ function rotatingBoundaryCandidates(prefixes, siteId) {
   const present = new Set(numbered.map(item => item.n));
   const maxNumber = numbered[numbered.length - 1].n;
   const boundaries = [];
-
   for (const item of numbered) {
     const next = item.n === maxNumber ? 0 : item.n + 1;
     if (!present.has(next)) boundaries.push(item.n);
@@ -127,7 +125,6 @@ function rotatingBoundaryCandidates(prefixes, siteId) {
   const selected = new Set();
   const byNumber = new Map(numbered.map(item => [item.n, item.prefix]));
   const ringSize = maxNumber + 1;
-
   for (const boundary of boundaries) {
     for (let offset = 0; offset < VOLUME_BOUNDARY_NEIGHBORS; offset += 1) {
       const n = ((boundary - offset) % ringSize + ringSize) % ringSize;
@@ -135,11 +132,9 @@ function rotatingBoundaryCandidates(prefixes, siteId) {
       if (prefix) selected.add(prefix);
     }
   }
-
-  for (const item of numbered.slice(0, VOLUME_BOUNDARY_NEIGHBORS)) selected.add(item.prefix);
-  for (const item of numbered.slice(-VOLUME_BOUNDARY_NEIGHBORS)) selected.add(item.prefix);
-
-  return [...selected];
+  for (const item of numbered.slice(0, 2)) selected.add(item.prefix);
+  for (const item of numbered.slice(-2)) selected.add(item.prefix);
+  return [...selected].slice(0, MAX_PREFIX_PROBES);
 }
 
 async function readChunkVolume(prefix, siteId) {
@@ -171,49 +166,22 @@ async function listLatestChunkVolumes(siteId) {
   if (!prefixes.length) throw new Error(`No real-time Level II volume directories listed for ${siteId}`);
 
   const candidatePrefixes = rotatingBoundaryCandidates(prefixes, siteId);
-  const volumes = [];
-  for (const prefix of candidatePrefixes) {
-    try {
-      const volume = await readChunkVolume(prefix, siteId);
-      if (volume) volumes.push(volume);
-    } catch {
-      // A rotating real-time directory can disappear while it is being listed.
-    }
-  }
-  volumes.sort((a, b) => b.timestamp - a.timestamp);
-  if (!volumes.length) throw new Error(`No usable real-time Level II chunk volumes for ${siteId}`);
-  return volumes.slice(0, MAX_CANDIDATE_VOLUMES);
-}
+  const settled = await Promise.allSettled(candidatePrefixes.map(prefix => readChunkVolume(prefix, siteId)));
+  const volumes = settled
+    .filter(item => item.status === 'fulfilled' && item.value)
+    .map(item => item.value)
+    .sort((a, b) => b.timestamp - a.timestamp);
 
-async function listLatestNomadsVolumes(siteId) {
-  const base = `${NOMADS_LEVEL2_BASE}/${siteId}`;
-  const response = await fetch(`${base}/dir.list`, {
-    headers: { Accept: 'text/plain', 'User-Agent': 'StormLog-Radar/1.0' },
-  });
-  if (!response.ok) throw new Error(`NOMADS dir.list HTTP ${response.status}`);
-  const text = await response.text();
-  const names = [...new Set([...text.matchAll(new RegExp(`(${siteId}_\\d{8}_\\d{6}\\.bz2)`, 'g'))].map(m => m[1]))]
-    .sort()
-    .reverse();
-  const volumes = names
-    .map(name => ({
-      id: name,
-      siteId,
-      timestamp: nomadsTimestampFromName(name),
-      source: 'NOAA/NCEP NOMADS NEXRAD Level II',
-      url: `${base}/${name}`,
-    }))
-    .filter(v => finite(v.timestamp));
-  if (!volumes.length) throw new Error(`No NOMADS Level II volumes listed for ${siteId}`);
+  if (!volumes.length) throw new Error(`No usable real-time Level II chunk volumes for ${siteId}`);
   return volumes.slice(0, MAX_CANDIDATE_VOLUMES);
 }
 
 async function runScanWorker(volume, site, includeDetail) {
   const encoded = Buffer.from(JSON.stringify({ volume, site, includeDetail }), 'utf8').toString('base64url');
-  const { stdout } = await execFileAsync(process.execPath, ['--max-old-space-size=220', WORKER_PATH, encoded], {
-    timeout: 75_000,
+  const { stdout } = await execFileAsync(process.execPath, ['--max-old-space-size=180', WORKER_PATH, encoded], {
+    timeout: WORKER_TIMEOUT_MS,
     maxBuffer: 8 * 1024 * 1024,
-    env: { ...process.env, NODE_OPTIONS: '' },
+    env: { ...process.env, NODE_OPTIONS: '', RADAR_ALLOW_FULL_VOLUME_DECODE: '0' },
   });
   const result = JSON.parse(stdout);
   if (!result || !Array.isArray(result.rawCouplets)) throw new Error(`${volume.id}: invalid worker result`);
@@ -256,7 +224,7 @@ function matchingTrack(c, tracks) {
   return best;
 }
 
-async function analyzeVolumeSeries(site, volumes, volumeCount) {
+async function analyzeVolumeSeries(site, volumes, volumeCount, deadline) {
   const newestTimestamp = volumes[0]?.timestamp;
   if (!finite(newestTimestamp) || Date.now() - newestTimestamp > MAX_SCAN_AGE_MS) {
     throw new Error(`${site.id}: newest Level II volume is stale`);
@@ -265,7 +233,8 @@ async function analyzeVolumeSeries(site, volumes, volumeCount) {
   const failures = [];
   let latest = null;
   let latestIndex = -1;
-  for (let i = 0; i < volumes.length; i += 1) {
+  for (let i = 0; i < volumes.length && i < MAX_CANDIDATE_VOLUMES; i += 1) {
+    if (Date.now() >= deadline) break;
     if (Date.now() - volumes[i].timestamp > MAX_SCAN_AGE_MS) continue;
     try {
       const scan = await runScanWorker(volumes[i], site, true);
@@ -279,10 +248,11 @@ async function analyzeVolumeSeries(site, volumes, volumeCount) {
       failures.push(`${volumes[i].id}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  if (!latest) throw new Error(failures.join(' | ') || `${site.id}: no fresh complete low-level Level II sweep decoded`);
+  if (!latest) throw new Error(failures.join(' | ') || `${site.id}: no fresh complete low-level Level II sweep decoded within request budget`);
 
   const trackingScans = [{ timestamp: latest.timestamp, couplets: latest.rawCouplets }];
   for (let i = latestIndex + 1; i < volumes.length && trackingScans.length < Math.max(1, volumeCount); i += 1) {
+    if (Date.now() >= deadline) break;
     try {
       const scan = await runScanWorker(volumes[i], site, false);
       if (finite(scan.timestamp) && latest.timestamp - scan.timestamp <= MAX_SCAN_AGE_MS) {
@@ -302,9 +272,7 @@ async function analyzeVolumeSeries(site, volumes, volumeCount) {
 
   const strongestRaw = [...latest.rawCouplets].sort((a, b) => b.deltaVKt - a.deltaVKt)[0] ?? null;
   const strongestTrack = matchingTrack(strongestRaw, tracks);
-  const strongestCouplet = strongestRaw
-    ? coupletPayload(strongestRaw, site, latest, strongestTrack?.scanCount ?? 1)
-    : null;
+  const strongestCouplet = strongestRaw ? coupletPayload(strongestRaw, site, latest, strongestTrack?.scanCount ?? 1) : null;
   const bestTrack = strongestTrack ?? tracks[0] ?? null;
 
   const cc = finite(latest.correlationCoefficient) ? latest.correlationCoefficient : null;
@@ -322,7 +290,7 @@ async function analyzeVolumeSeries(site, volumes, volumeCount) {
   return {
     available: true,
     stationId: site.id,
-    nearestSiteId: null,
+    nearestSiteId: site.id,
     radarDistanceKm: site.distanceKm,
     latestFrameTime: latest.timestamp,
     hasPrecipitation: latest.maxReflectivityDbz >= 5,
@@ -335,34 +303,16 @@ async function analyzeVolumeSeries(site, volumes, volumeCount) {
     scanCount: trackingScans.length,
     trend: bestTrack?.trend ?? 'UNKNOWN',
     dualPolEvidence: dualPol,
-    source: volumes[0]?.source ?? 'NEXRAD Level II',
-    sourceKind: latest.sourceKind ?? null,
+    source: 'Unidata real-time NEXRAD Level II chunks',
+    sourceKind: latest.sourceKind ?? 'chunks',
     usedChunks: latest.usedChunks,
     failedScans: failures.length,
   };
 }
 
-async function analyzeSiteRadar(site, volumeCount) {
-  const sourceFailures = [];
-
-  // Prefer complete NOAA/NCEP NOMADS volumes for the nearest site. This keeps
-  // central Ohio on KILN when Unidata's rotating chunk directory is briefly
-  // incomplete, while retaining the chunk feed as a secondary source.
-  try {
-    const nomads = await listLatestNomadsVolumes(site.id);
-    return await analyzeVolumeSeries(site, nomads, volumeCount);
-  } catch (error) {
-    sourceFailures.push(`NOMADS: ${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  try {
-    const chunks = await listLatestChunkVolumes(site.id);
-    return await analyzeVolumeSeries(site, chunks, volumeCount);
-  } catch (error) {
-    sourceFailures.push(`Unidata chunks: ${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  throw new Error(sourceFailures.join(' | ') || `${site.id}: no usable Level II source`);
+async function analyzeSiteRadar(site, volumeCount, deadline) {
+  const chunks = await listLatestChunkVolumes(site.id);
+  return analyzeVolumeSeries(site, chunks, volumeCount, deadline);
 }
 
 export async function analyzeRadar(latitude, longitude, { volumeCount = 3 } = {}) {
@@ -373,11 +323,11 @@ export async function analyzeRadar(latitude, longitude, { volumeCount = 3 } = {}
   const existing = cache.get(cacheKey);
   if (existing && Date.now() - existing.at < CACHE_MS) return existing.value;
 
+  const deadline = Date.now() + REQUEST_BUDGET_MS;
   const failures = [];
   for (const site of sites.slice(0, MAX_SITE_FALLBACKS)) {
     try {
-      const result = await analyzeSiteRadar(site, volumeCount);
-      result.nearestSiteId = sites[0].id;
+      const result = await analyzeSiteRadar(site, volumeCount, deadline);
       cache.set(cacheKey, { at: Date.now(), value: result });
       return result;
     } catch (error) {
@@ -385,7 +335,7 @@ export async function analyzeRadar(latitude, longitude, { volumeCount = 3 } = {}
     }
   }
 
-  return unavailable(sites[0].id, failures.join(' | ') || 'No fresh operational Level II radar available');
+  return unavailable(sites[0].id, failures.join(' | ') || 'Nearest Level II radar unavailable within request budget');
 }
 
 function unavailable(stationId, reason) {
@@ -422,7 +372,7 @@ export function createRadarServer({ port = Number(process.env.PORT || 8788) } = 
     if (!req.url) { res.statusCode = 400; res.end(JSON.stringify({ error: 'missing URL' })); return; }
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname === '/health') {
-      res.end(JSON.stringify({ ok: true, service: 'stormlog-radar-analysis', mode: 'nomads-primary-level2-with-chunk-fallback' }));
+      res.end(JSON.stringify({ ok: true, service: 'stormlog-radar-analysis', mode: 'bounded-nearest-level2-chunks' }));
       return;
     }
     if (url.pathname !== '/radar') { res.statusCode = 404; res.end(JSON.stringify({ error: 'not found' })); return; }
@@ -445,6 +395,7 @@ export function createRadarServer({ port = Number(process.env.PORT || 8788) } = 
       res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
     }
   });
+  server.requestTimeout = REQUEST_BUDGET_MS + 10_000;
   return new Promise(resolve => server.listen(port, () => resolve(server)));
 }
 
