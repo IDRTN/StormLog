@@ -7,6 +7,8 @@
 // temporarily fails, StormLog falls back to the existing RainViewer/NWS
 // composite path and clearly reports quantitative products as unavailable.
 
+import type { QuantitativeDualPolEvidence } from './quantitativeRadarBackend';
+
 export interface RadarVelocityPoint {
   latitude: number;
   longitude: number;
@@ -80,7 +82,7 @@ export interface RadarVelocityProvider {
 export { fetchNexradData, NexradVelocityProvider } from './nexrad';
 export type { NexradProviderResult, NexradStationInfo, NexradReflectivityResult } from './nexrad';
 export { fetchQuantitativeRadarData, parseQuantitativeRadarPayload } from './quantitativeRadarBackend';
-export type { QuantitativeRadarResponse } from './quantitativeRadarBackend';
+export type { QuantitativeRadarResponse, QuantitativeDualPolEvidence } from './quantitativeRadarBackend';
 
 export interface RadarDataResult {
   velocityPoints: RadarVelocityPoint[];
@@ -95,6 +97,7 @@ export interface RadarDataResult {
   differentialReflectivity?: number | null;
   scanCount?: number;
   trend?: string | null;
+  dualPolEvidence?: QuantitativeDualPolEvidence | null;
   source?: 'QUANTITATIVE_LEVEL2' | 'COMPOSITE_FALLBACK';
   unavailableReason?: string;
 }
@@ -125,6 +128,7 @@ export async function getRadarData(
         differentialReflectivity: quantitative.differentialReflectivity,
         scanCount: quantitative.scanCount,
         trend: quantitative.trend,
+        dualPolEvidence: quantitative.dualPolEvidence,
         source: 'QUANTITATIVE_LEVEL2',
         unavailableReason: quantitative.unavailableReason,
       };
