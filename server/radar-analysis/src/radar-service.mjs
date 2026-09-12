@@ -22,7 +22,7 @@ const CACHE_MS = 60_000;
 const MAX_CANDIDATE_VOLUMES = 8;
 const MAX_SCAN_AGE_MS = 20 * 60_000;
 const MAX_SITE_FALLBACKS = 3;
-const VOLUME_EDGE_CANDIDATES = 12;
+const VOLUME_BOUNDARY_NEIGHBORS = 8;
 const cache = new Map();
 
 function finite(v) { return typeof v === 'number' && Number.isFinite(v); }
@@ -94,6 +94,48 @@ function commonPrefixes(xml) {
     .map(m => decodeXml(m[1]));
 }
 
+function volumeNumber(prefix, siteId) {
+  const m = prefix.match(new RegExp(`^${siteId}/(\\d+)/$`));
+  return m ? Number.parseInt(m[1], 10) : null;
+}
+
+function rotatingBoundaryCandidates(prefixes, siteId) {
+  const numbered = prefixes
+    .map(prefix => ({ prefix, n: volumeNumber(prefix, siteId) }))
+    .filter(item => Number.isInteger(item.n))
+    .sort((a, b) => a.n - b.n);
+
+  if (!numbered.length) return prefixes.slice(-VOLUME_BOUNDARY_NEIGHBORS);
+
+  const present = new Set(numbered.map(item => item.n));
+  const maxNumber = numbered[numbered.length - 1].n;
+  const boundaries = [];
+
+  for (const item of numbered) {
+    const next = item.n === maxNumber ? 0 : item.n + 1;
+    if (!present.has(next)) boundaries.push(item.n);
+  }
+
+  const selected = new Set();
+  const byNumber = new Map(numbered.map(item => [item.n, item.prefix]));
+  const ringSize = maxNumber + 1;
+
+  for (const boundary of boundaries) {
+    for (let offset = 0; offset < VOLUME_BOUNDARY_NEIGHBORS; offset += 1) {
+      const n = ((boundary - offset) % ringSize + ringSize) % ringSize;
+      const prefix = byNumber.get(n);
+      if (prefix) selected.add(prefix);
+    }
+  }
+
+  // Also sample the numeric extremes as a defensive fallback if the bucket is
+  // briefly inconsistent while Unidata removes an expired directory.
+  for (const item of numbered.slice(0, VOLUME_BOUNDARY_NEIGHBORS)) selected.add(item.prefix);
+  for (const item of numbered.slice(-VOLUME_BOUNDARY_NEIGHBORS)) selected.add(item.prefix);
+
+  return [...selected];
+}
+
 async function readVolume(prefix, siteId) {
   const xml = await fetchS3List(prefix);
   const keys = objectKeys(xml)
@@ -119,18 +161,16 @@ async function readVolume(prefix, siteId) {
 async function listLatestVolumes(siteId) {
   const xml = await fetchS3List(`${siteId}/`, '/');
   const prefixes = commonPrefixes(xml)
-    .filter(prefix => prefix.startsWith(`${siteId}/`))
-    .sort((a, b) => a.localeCompare(b));
+    .filter(prefix => prefix.startsWith(`${siteId}/`));
 
   if (!prefixes.length) throw new Error(`No real-time Level II volume directories listed for ${siteId}`);
 
-  // The Unidata real-time bucket stores volumes under a rotating numeric directory.
-  // The documented access pattern is to list those directories and select the newest.
-  // Include both ends so a numeric rollover cannot strand us on an old directory.
-  const candidatePrefixes = [...new Set([
-    ...prefixes.slice(-VOLUME_EDGE_CANDIDATES),
-    ...prefixes.slice(0, VOLUME_EDGE_CANDIDATES),
-  ])];
+  // Unidata uses a rotating numeric directory for live Level-II volumes. After
+  // rollover, the newest directory can sit in the middle of a lexical sort
+  // (for example 107 while older 999 and 000 still exist). Find the numeric
+  // boundary/gap of the retained ring and inspect only the directories around
+  // that boundary, then rank those candidates by their real chunk timestamps.
+  const candidatePrefixes = rotatingBoundaryCandidates(prefixes, siteId);
 
   const volumes = [];
   for (const prefix of candidatePrefixes) {
