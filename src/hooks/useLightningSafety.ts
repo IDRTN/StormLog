@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import * as Location from 'expo-location';
 import {
+  collectLightningAutomatic,
   getLightningCoordinator,
   getLightningProviderStatus,
   getLightningUsageSnapshot,
@@ -82,11 +84,51 @@ export function useLightningSafety(): LightningSafetyHookState & { refresh: () =
   }, []);
 
   useEffect(() => {
+    let disposed = false;
     const unsubscribe = getLightningCoordinator().subscribe(() => {
       load();
     });
     load();
-    return unsubscribe;
+
+    // The safety banner previously only read coordinator/database state. On a
+    // fresh app start that meant it could remain at "Waiting for lightning
+    // data" until Daily Monitor happened to run, even though the provider was
+    // configured and quota remained. Seed one real foreground collection as
+    // soon as an accurate current location is available. The coordinator's
+    // automatic gate and UsageGuardedLightningAdapter still own cadence,
+    // backoff, and quota protection, so this does not bypass safety controls.
+    void (async () => {
+      try {
+        const providerStatus = getLightningProviderStatus();
+        if (!providerStatus.configured) return;
+        const permission = await Location.getForegroundPermissionsAsync();
+        if (disposed || permission.status !== 'granted') return;
+        const current = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+        if (disposed) return;
+        await collectLightningAutomatic({
+          location: {
+            latitude: current.coords.latitude,
+            longitude: current.coords.longitude,
+          },
+          stormEventId: null,
+        });
+      } catch (error) {
+        // Provider/location failures are represented by coordinator state when
+        // possible; keep the banner mounted and refresh its diagnostic view.
+        console.warn(
+          '[LIGHTNING-SAFETY] Initial live collection failed:',
+          error instanceof Error ? error.message : String(error),
+        );
+        if (!disposed) await load();
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      unsubscribe();
+    };
   }, [load]);
 
   return {
