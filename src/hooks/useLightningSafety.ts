@@ -38,9 +38,18 @@ export function useLightningSafety(): LightningSafetyHookState & { refresh: () =
     error: null,
   });
   const inFlightRef = useRef(false);
+  const pendingLoadRef = useRef(false);
 
   const load = useCallback(async () => {
-    if (inFlightRef.current) return;
+    if (inFlightRef.current) {
+      // Coordinator notifications can arrive while the initial database/usage
+      // read is still running. Do not drop that newer state change; queue one
+      // follow-up read so a successful collection cannot leave the UI stuck on
+      // the older "Waiting for lightning data" snapshot.
+      pendingLoadRef.current = true;
+      return;
+    }
+
     inFlightRef.current = true;
     setState((current) => ({ ...current, loading: true }));
 
@@ -80,40 +89,72 @@ export function useLightningSafety(): LightningSafetyHookState & { refresh: () =
       }));
     } finally {
       inFlightRef.current = false;
+      if (pendingLoadRef.current) {
+        pendingLoadRef.current = false;
+        // Let the current async turn finish before replaying the queued read.
+        // This guarantees the coordinator's newest state wins over the startup
+        // snapshot without creating overlapping database work.
+        setTimeout(() => {
+          void load();
+        }, 0);
+      }
     }
   }, []);
 
   useEffect(() => {
     let disposed = false;
     const unsubscribe = getLightningCoordinator().subscribe(() => {
-      load();
+      void load();
     });
-    load();
+    void load();
 
-    // The safety banner previously only read coordinator/database state. On a
-    // fresh app start that meant it could remain at "Waiting for lightning
-    // data" until Daily Monitor happened to run, even though the provider was
-    // configured and quota remained. Seed one real foreground collection as
-    // soon as an accurate current location is available. The coordinator's
-    // automatic gate and UsageGuardedLightningAdapter still own cadence,
-    // backoff, and quota protection, so this does not bypass safety controls.
+    // Seed one real foreground collection on app start. Prefer a current
+    // Balanced fix, but fall back to Android's last-known fix if GPS/network
+    // location is temporarily slow. A missing fresh fix should not leave the
+    // safety card permanently waiting when a recent OS location is available.
+    // Cadence, backoff, and quota protection still remain inside the existing
+    // coordinator/usage guard.
     void (async () => {
       try {
         const providerStatus = getLightningProviderStatus();
         if (!providerStatus.configured) return;
+
         const permission = await Location.getForegroundPermissionsAsync();
         if (disposed || permission.status !== 'granted') return;
-        const current = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
-        });
+
+        let resolved: Location.LocationObject | null = null;
+        try {
+          resolved = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.Balanced,
+          });
+        } catch (currentError) {
+          console.warn(
+            '[LIGHTNING-SAFETY] Current location unavailable; trying last-known location:',
+            currentError instanceof Error ? currentError.message : String(currentError),
+          );
+          resolved = await Location.getLastKnownPositionAsync({
+            maxAge: 15 * 60 * 1000,
+            requiredAccuracy: 10_000,
+          });
+        }
+
         if (disposed) return;
+        if (!resolved) {
+          throw new Error('No current or recent last-known location available for lightning startup refresh');
+        }
+
         await collectLightningAutomatic({
           location: {
-            latitude: current.coords.latitude,
-            longitude: current.coords.longitude,
+            latitude: resolved.coords.latitude,
+            longitude: resolved.coords.longitude,
           },
           stormEventId: null,
         });
+
+        // Explicitly request a post-collection read. If a coordinator callback
+        // already started one, load() queues this as the final read instead of
+        // discarding it, eliminating the startup race seen on-device.
+        if (!disposed) await load();
       } catch (error) {
         // Provider/location failures are represented by coordinator state when
         // possible; keep the banner mounted and refresh its diagnostic view.
@@ -127,6 +168,7 @@ export function useLightningSafety(): LightningSafetyHookState & { refresh: () =
 
     return () => {
       disposed = true;
+      pendingLoadRef.current = false;
       unsubscribe();
     };
   }, [load]);
