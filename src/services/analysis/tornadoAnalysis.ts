@@ -88,7 +88,6 @@ function calculateBearing(lat1: number, lon1: number, lat2: number, lon2: number
 }
 
 function buildStormMotion(input: AnalysisInput, stormCells: any[] | undefined): StormMotion | null {
-  // Storm motion is only valid when an actual tracked cell supplies motion.
   if (!stormCells?.length) return null;
   let closest: any = null;
   let minDistance = Infinity;
@@ -217,9 +216,27 @@ function calculateProgressiveAssessment(
   else if (evid >= levelValue('HIGH')) { score += 1.5; increasing.push('Strong tornadic indicators in radar data'); }
   else if (evid >= levelValue('MODERATE')) { score += 1; increasing.push('Moderate tornadic indicators'); }
 
-  if (str < levelValue('LOW') && !hasPrecipitation) { score = Math.min(score, 1); limiting.push('GATE: No quantitative storm signal — assessment capped at LOW'); }
-  if (!hasVelocity) { score = Math.min(score, 2.5); limiting.push('GATE: Velocity unavailable — assessment capped at MODERATE'); }
-  if (scanCount <= 1 && hasCouplet) limiting.push('Single radar scan — persistence cannot be determined');
+  if (str < levelValue('LOW') && !hasPrecipitation) {
+    score = Math.min(score, 1);
+    limiting.push('GATE: No quantitative storm signal — assessment capped at LOW');
+  }
+  if (!hasVelocity) {
+    score = Math.min(score, 2.5);
+    limiting.push('GATE: Velocity unavailable — assessment capped at MODERATE');
+  }
+  // A first-scan, sub-strong couplet is a real signal and remains visible in
+  // the rotation section, but it is not yet independent evidence of persistent
+  // tornadic rotation. Do not let environment + reflectivity + one moderate
+  // couplet promote the large overall banner to MODERATE/HIGH before a second
+  // independent scan confirms persistence. Strong-couplet evidence (MODERATE+
+  // tornadic evidence) is intentionally exempt so an unusually strong first
+  // scan is not hidden; a validated debris signature is handled above.
+  if (scanCount <= 1 && hasCouplet && !debris && evid <= levelValue('LOW')) {
+    score = Math.min(score, 2.5);
+    limiting.push('GATE: Single unconfirmed radar couplet — overall assessment capped at MARGINAL until persistence is established');
+  } else if (scanCount <= 1 && hasCouplet) {
+    limiting.push('Single radar scan — persistence cannot be determined');
+  }
 
   const level: AssessmentLevel = score >= 6 ? 'VERY_HIGH' : score >= 4.5 ? 'HIGH' : score >= 3 ? 'MODERATE' : score >= 1.5 ? 'MARGINAL' : score >= 0.5 ? 'LOW' : 'VERY_LOW';
   const text = debris
