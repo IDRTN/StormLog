@@ -5,6 +5,10 @@ const site = nearestRadarSite(40.04, -82.46);
 assert.equal(site?.id, 'KILN');
 assert.ok(site.distanceKm > 0 && site.distanceKm < 200);
 
+const easternOhioSite = nearestRadarSite(40.1599, -82.2385);
+assert.equal(easternOhioSite?.id, 'KCLE', 'eastern Licking-area coordinates should prefer KCLE by distance');
+assert.ok(easternOhioSite.distanceKm > 0 && easternOhioSite.distanceKm < 200);
+
 function assertFreshKilnPayload(result) {
   assert.equal(result.available, true, result.unavailableReason ?? 'radar unavailable');
   assert.equal(result.stationId, 'KILN', `central Ohio must use nearest operational KILN radar, got ${result.stationId}`);
