@@ -140,6 +140,49 @@ const singleScanDebrisLike = analyzeStorm({
 assert(singleScanDebrisLike.tornadicEvidence.debrisSignature === false, 'single-scan debris-like evidence must not be declared a debris signature');
 assert(singleScanDebrisLike.tornadicEvidence.level !== 'VERY_HIGH', 'single-scan debris-like evidence must not become VERY_HIGH');
 
+// Regression for live-device case: favorable surface environment + 51 dBZ +
+// a 52 kt low-level couplet on only one independent radar scan. The rotation
+// signal must remain visible, but the large overall banner must not elevate to
+// MODERATE before persistence is established because tornadic evidence is LOW.
+const singleScanModerateCouplet = analyzeStorm({
+  ...base,
+  temperature: 72,
+  humidity: 100,
+  dewPoint: 72,
+  windSpeed: 0,
+  windGust: 8,
+  cape: 1150,
+  radarData: {
+    available: true,
+    hasPrecipitation: true,
+    maxReflectivityDbz: 51,
+    velocityPoints: [
+      { latitude: 35.0, longitude: -97.0, velocity: 26, stormRelativeVelocity: 26, reflectivity: 51, altitude: 500 },
+      { latitude: 35.001, longitude: -97.001, velocity: -26, stormRelativeVelocity: -26, reflectivity: 51, altitude: 500 },
+    ],
+    couplets: [
+      { latitude: 35.0, longitude: -97.0, shear: 52, strength: 'MODERATE', distanceKm: 1, headingTowardUser: false, lowLevel: true, scanCount: 1 },
+    ],
+    stormCells: [],
+    correlationCoefficient: 0.95,
+    differentialReflectivity: 1.0,
+    scanCount: 1,
+    dualPolEvidence: {
+      available: true,
+      debrisSignature: false,
+      confidence: null,
+      cc: 0.95,
+      zdr: 1.0,
+      reflectivityDbz: 51,
+      reason: 'no validated debris signature',
+    },
+  } as any,
+});
+assert(singleScanModerateCouplet.rotation.hasCouplet === true, 'single-scan 52 kt couplet must remain visible');
+assert(singleScanModerateCouplet.tornadicEvidence.level === 'LOW', 'single-scan 52 kt couplet should remain LOW tornadic evidence');
+assert(singleScanModerateCouplet.overallAssessment === 'MARGINAL' || singleScanModerateCouplet.overallAssessment === 'LOW', 'single-scan LOW-evidence couplet must not elevate overall assessment to MODERATE');
+assert(singleScanModerateCouplet.whyExplanation.includes('Single unconfirmed radar couplet'), 'single-scan gate must be explained to the user');
+
 const warning = analyzeStorm({
   ...base,
   nwsAlerts: [{ event: 'Tornado Warning', severity: 'Extreme', headline: 'Test warning' }],
