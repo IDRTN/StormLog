@@ -116,6 +116,10 @@ export function useTornadoAnalysis() {
         if (cached && generation === generationRef.current) {
           setResult(cached.result);
           setRadarStatus(cached.status);
+          // The cached assessment is deliberately display-only while a new
+          // Level II request continues in the background. Clearing the spinner
+          // here prevents the card from hiding a still-fresh verified snapshot.
+          setLoading(false);
         }
 
         const hrrrPromise = input.advancedEnvironment
