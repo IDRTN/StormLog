@@ -10,6 +10,7 @@ export function useTornadoAnalysis() {
   const [radarStatus, setRadarStatus] = useState<string>('Not checked');
   const previousAnalysesRef = useRef<StormAnalysisResult[]>([]);
   const inFlightRef = useRef<Promise<StormAnalysisResult> | null>(null);
+  const generationRef = useRef(0);
 
   const analyze = useCallback(async (input: AnalysisInput): Promise<StormAnalysisResult> => {
     if (inFlightRef.current) {
@@ -17,20 +18,19 @@ export function useTornadoAnalysis() {
       return inFlightRef.current;
     }
 
+    const generation = ++generationRef.current;
     const promise = (async () => {
       setLoading(true);
       try {
-        const radarPromise = getRadarData(input.latitude, input.longitude)
-          .then((nexradResult) => ({ success: true as const, nexradResult }))
-          .catch((error) => ({ success: false as const, error }));
-
         const hrrrPromise = input.advancedEnvironment
-          ? Promise.resolve({ success: true as const, advancedEnvironment: input.advancedEnvironment })
+          ? null
           : fetchHrrrAdvancedEnvironment(input.latitude, input.longitude)
               .then((hrrr) => ({ success: true as const, advancedEnvironment: hrrr.environment }))
               .catch((error) => ({ success: false as const, error }));
 
-        const [radarResult, hrrrResult] = await Promise.all([radarPromise, hrrrPromise]);
+        const radarResult = await getRadarData(input.latitude, input.longitude)
+          .then((nexradResult) => ({ success: true as const, nexradResult }))
+          .catch((error) => ({ success: false as const, error }));
 
         let radarInput = input.radarData;
         if (radarResult.success) {
@@ -50,8 +50,6 @@ export function useTornadoAnalysis() {
             velocityPoints: nexradResult.velocityPoints,
             couplets: nexradResult.couplets,
             stormCells: nexradResult.cells,
-            // Tornadic evidence consumes dual-pol only when the quantitative
-            // backend has already performed colocated reflectivity/velocity QC.
             correlationCoefficient: nexradResult.correlationCoefficient,
             differentialReflectivity: nexradResult.differentialReflectivity,
             dualPolEvidence: nexradResult.dualPolEvidence,
@@ -70,27 +68,45 @@ export function useTornadoAnalysis() {
           };
         }
 
-        let advancedEnvironment = input.advancedEnvironment ?? null;
-        if (!advancedEnvironment && hrrrResult.success) {
-          advancedEnvironment = hrrrResult.advancedEnvironment;
-        } else if (!advancedEnvironment && !hrrrResult.success) {
-          console.warn('[TornadoAnalysis] HRRR upper-air fetch failed:', hrrrResult.error);
-        }
-
-        const enrichedInput: AnalysisInput = {
+        const baseInput: AnalysisInput = {
           ...input,
           radarData: radarInput,
-          advancedEnvironment,
+          advancedEnvironment: input.advancedEnvironment ?? null,
         };
-        const r = analyzeStorm(enrichedInput, previousAnalysesRef.current);
+        const baseResult = analyzeStorm(baseInput, previousAnalysesRef.current);
 
-        setResult(r);
-        previousAnalysesRef.current = [
-          ...previousAnalysesRef.current.slice(-19),
-          r,
-        ];
+        if (generation === generationRef.current) {
+          setResult(baseResult);
+          previousAnalysesRef.current = [
+            ...previousAnalysesRef.current.slice(-19),
+            baseResult,
+          ];
+        }
 
-        return r;
+        // Radar is the safety-critical gating input. Do not keep the whole card
+        // blocked on the slower HRRR request. Render the radar-backed assessment
+        // immediately, then enrich the same analysis in place if HRRR arrives.
+        if (hrrrPromise) {
+          void hrrrPromise.then((hrrrResult) => {
+            if (generation !== generationRef.current) return;
+            if (!hrrrResult.success) {
+              console.warn('[TornadoAnalysis] HRRR upper-air fetch failed:', hrrrResult.error);
+              return;
+            }
+            const enriched = analyzeStorm({
+              ...input,
+              radarData: radarInput,
+              advancedEnvironment: hrrrResult.advancedEnvironment,
+            }, previousAnalysesRef.current.slice(0, -1));
+            setResult(enriched);
+            previousAnalysesRef.current = [
+              ...previousAnalysesRef.current.slice(0, -1),
+              enriched,
+            ].slice(-20);
+          });
+        }
+
+        return baseResult;
       } finally {
         setLoading(false);
         inFlightRef.current = null;
