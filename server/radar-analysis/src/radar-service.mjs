@@ -21,11 +21,12 @@ const RADAR_SITES = [
 const CACHE_MS = 60_000;
 const MAX_CANDIDATE_VOLUMES = 4;
 const MAX_SCAN_AGE_MS = 20 * 60_000;
-const MAX_SITE_FALLBACKS = 1;
+const MAX_SITE_FALLBACKS = 2;
 const LIST_TIMEOUT_MS = 10_000;
 const PREFIX_LIST_CONCURRENCY = 8;
-const WORKER_TIMEOUT_MS = 45_000;
-const REQUEST_BUDGET_MS = 75_000;
+const WORKER_TIMEOUT_MS = 30_000;
+const REQUEST_BUDGET_MS = 70_000;
+const MIN_SITE_BUDGET_MS = 20_000;
 const MAX_TRACKED_SCANS = 3;
 const cache = new Map();
 const scanHistory = new Map();
@@ -162,10 +163,6 @@ async function readVolume(prefix, siteId) {
 
 async function listLatestChunkVolumes(siteId) {
   const prefixes = await listVolumePrefixes(siteId);
-  // Read each rotating prefix completely once. The old probe sampled only the
-  // first few lexicographic keys and could mistake a reused prefix for stale
-  // data. Full prefix inspection stays small while making newest-volume
-  // selection deterministic.
   const inspected = await mapLimit(prefixes, PREFIX_LIST_CONCURRENCY, prefix => readVolume(prefix, siteId));
   const volumes = inspected
     .filter(item => item && !item.error && finite(item.timestamp))
@@ -175,10 +172,11 @@ async function listLatestChunkVolumes(siteId) {
   return volumes;
 }
 
-async function runScanWorker(volume, site, includeDetail) {
+async function runScanWorker(volume, site, includeDetail, timeoutMs = WORKER_TIMEOUT_MS) {
+  const boundedTimeoutMs = Math.max(1_000, Math.min(WORKER_TIMEOUT_MS, Math.floor(timeoutMs)));
   const encoded = Buffer.from(JSON.stringify({ volume, site, includeDetail }), 'utf8').toString('base64url');
   const { stdout } = await execFileAsync(process.execPath, ['--max-old-space-size=128', '--max-semi-space-size=4', WORKER_PATH, encoded], {
-    timeout: WORKER_TIMEOUT_MS,
+    timeout: boundedTimeoutMs,
     maxBuffer: 8 * 1024 * 1024,
     env: { ...process.env, NODE_OPTIONS: '', RADAR_ALLOW_FULL_VOLUME_DECODE: '0' },
   });
@@ -245,10 +243,11 @@ async function analyzeVolumeSeries(site, volumes, volumeCount, deadline) {
   let latest = null;
 
   for (const volume of volumes) {
-    if (Date.now() >= deadline) break;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs < 1_000) break;
     if (!finite(volume.timestamp) || Date.now() - volume.timestamp > MAX_SCAN_AGE_MS) continue;
     try {
-      const scan = await runScanWorker(volume, site, true);
+      const scan = await runScanWorker(volume, site, true, remainingMs);
       if (!finite(scan.timestamp) || Date.now() - scan.timestamp > MAX_SCAN_AGE_MS) {
         throw new Error(`${volume.id}: decoded scan is stale`);
       }
@@ -262,7 +261,7 @@ async function analyzeVolumeSeries(site, volumes, volumeCount, deadline) {
   }
 
   if (!latest) {
-    throw new Error(failures.join(' | ') || `${site.id}: no fresh complete Level II chunk sweep decoded`);
+    throw new Error(failures.join(' | ') || `${site.id}: no fresh complete Level II chunk sweep decoded within site budget`);
   }
 
   const trackingScans = rememberScan(site.id, latest, volumeCount);
@@ -331,9 +330,23 @@ export async function analyzeRadar(latitude, longitude, { volumeCount = 3 } = {}
 
   const deadline = Date.now() + REQUEST_BUDGET_MS;
   const failures = [];
-  for (const site of sites.slice(0, MAX_SITE_FALLBACKS)) {
+  const candidates = sites.slice(0, MAX_SITE_FALLBACKS);
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const site = candidates[index];
+    const remainingTotalMs = deadline - Date.now();
+    if (remainingTotalMs < 1_000) break;
+
+    const sitesRemaining = candidates.length - index;
+    const fairShareMs = Math.floor(remainingTotalMs / sitesRemaining);
+    const siteBudgetMs = sitesRemaining > 1
+      ? Math.min(remainingTotalMs, Math.max(MIN_SITE_BUDGET_MS, fairShareMs))
+      : remainingTotalMs;
+    const siteDeadline = Math.min(deadline, Date.now() + siteBudgetMs);
+
     try {
-      const result = await analyzeSiteRadar(site, volumeCount, deadline);
+      const result = await analyzeSiteRadar(site, volumeCount, siteDeadline);
+      result.nearestSiteId = sites[0].id;
       cache.set(cacheKey, { at: Date.now(), value: result });
       return result;
     } catch (error) {
@@ -381,7 +394,7 @@ export function createRadarServer({ port = Number(process.env.PORT || 8788) } = 
     const url = new URL(req.url, 'http://localhost');
 
     if (url.pathname === '/health') {
-      res.end(JSON.stringify({ ok: true, service: 'stormlog-radar-analysis', mode: 'bounded-level2-chunks-live-history' }));
+      res.end(JSON.stringify({ ok: true, service: 'stormlog-radar-analysis', mode: 'bounded-level2-two-site-fallback' }));
       return;
     }
     if (url.pathname !== '/radar') {
