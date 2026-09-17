@@ -1,0 +1,57 @@
+name: StormLog Wear OS APK
+
+on:
+  push:
+    branches:
+      - wear-os-companion-20260916
+    paths:
+      - 'wear/**'
+      - '.github/workflows/wear-os-apk.yml'
+  workflow_dispatch:
+
+jobs:
+  build-wear-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK 35
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Compile Wear OS app
+        working-directory: wear
+        run: gradle :app:compileDebugKotlin --stacktrace
+
+      - name: Assemble Wear OS APK
+        working-directory: wear
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify Wear OS APK
+        run: |
+          test -s wear/app/build/outputs/apk/debug/app-debug.apk
+          ls -lh wear/app/build/outputs/apk/debug/app-debug.apk
+          sha256sum wear/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload Wear OS APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: StormLog-WearOS-test
+          path: wear/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
