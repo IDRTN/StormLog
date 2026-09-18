@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - wear-os-companion-20260916
+      - wear-update-companion-20260918
     paths:
       - 'wear/**'
       - '.github/workflows/wear-os-apk.yml'
