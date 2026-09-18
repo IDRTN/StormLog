@@ -4,6 +4,9 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import com.google.android.gms.wearable.Wearable
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -31,6 +34,19 @@ class StormLogSchedulerModule : Module() {
     Function("isRunning") {
       val context = requireNotNull(appContext.reactContext)
       StormLogAlarmScheduler.hasScheduledAlarm(context)
+    }
+
+    AsyncFunction("getWatchCompanionStatus") {
+      val context = requireNotNull(appContext.reactContext)
+      val nodes = Wearable.getNodeClient(context).connectedNodes.await(5, TimeUnit.SECONDS)
+      if (nodes.isEmpty()) return@AsyncFunction mapOf("connected" to false)
+
+      val node = nodes.first()
+      Wearable.getMessageClient(context)
+        .sendMessage(node.id, "/stormlog/watch/version/request", ByteArray(0))
+        .await(5, TimeUnit.SECONDS)
+
+      mapOf("connected" to true, "nodeId" to node.id, "nodeName" to node.displayName)
     }
 
     Function("hasExactAlarmPermission") {
