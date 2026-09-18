@@ -1,5 +1,6 @@
 package com.stormlog.wear
 
+import android.content.pm.PackageManager
 import com.google.android.gms.wearable.MessageEvent
 import com.google.android.gms.wearable.Wearable
 import com.google.android.gms.wearable.WearableListenerService
@@ -9,13 +10,20 @@ class StormLogWearListenerService : WearableListenerService() {
     override fun onMessageReceived(messageEvent: MessageEvent) {
         if (messageEvent.path != VERSION_REQUEST_PATH) return
 
-        val payload = JSONObject()
-            .put("packageName", packageName)
-            .put("versionCode", BuildConfig.VERSION_CODE)
-            .put("versionName", BuildConfig.VERSION_NAME)
-            .put("protocolVersion", UPDATE_PROTOCOL_VERSION)
-            .toString()
-            .toByteArray(Charsets.UTF_8)
+        val packageInfo = packageManager.getPackageInfo(packageName, 0)
+        val versionCode = if (android.os.Build.VERSION.SDK_INT >= 28) {
+            packageInfo.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.versionCode.toLong()
+        }
+
+        val payload = JSONObject().apply {
+            put("packageName", packageName)
+            put("versionCode", versionCode)
+            put("versionName", packageInfo.versionName ?: "unknown")
+            put("protocolVersion", UPDATE_PROTOCOL_VERSION)
+        }.toString().toByteArray(Charsets.UTF_8)
 
         Wearable.getMessageClient(this)
             .sendMessage(messageEvent.sourceNodeId, VERSION_RESPONSE_PATH, payload)
