@@ -14,6 +14,17 @@ on:
   push:
     branches:
       - master
+      - wear-update-companion-20260918
+    paths:
+      - 'app/**'
+      - 'src/**'
+      - 'modules/**'
+      - 'plugins/**'
+      - 'app.json'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - '.github/workflows/android-apk.yml'
 
 concurrency:
   group: stormlog-android-apk-${{ github.ref }}
