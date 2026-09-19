@@ -78,7 +78,7 @@ class StormLogSchedulerModule : Module() {
           }
         }
 
-        messageClient.addListener(listener)
+        Tasks.await(messageClient.addListener(listener), 5, TimeUnit.SECONDS)
         try {
           Tasks.await(
             messageClient.sendMessage(node.id, VERSION_REQUEST_PATH, ByteArray(0)),
@@ -88,7 +88,9 @@ class StormLogSchedulerModule : Module() {
           latch.await(5, TimeUnit.SECONDS)
           response?.let { return@AsyncFunction it }
         } finally {
-          messageClient.removeListener(listener)
+          runCatching {
+            Tasks.await(messageClient.removeListener(listener), 5, TimeUnit.SECONDS)
+          }
         }
       }
 
