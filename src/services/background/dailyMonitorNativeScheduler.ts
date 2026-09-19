@@ -1,10 +1,25 @@
 import { requireOptionalNativeModule } from 'expo-modules-core';
 
+export type WatchCompanionStatus = {
+  connected: boolean;
+  installed: boolean;
+  updateAvailable: boolean;
+  nodeId?: string;
+  nodeName?: string;
+  packageName?: string;
+  versionCode?: number;
+  versionName?: string;
+  protocolVersion?: number;
+  latestVersionCode?: number;
+  latestVersionName?: string;
+};
+
 type StormLogSchedulerNativeModule = {
   start: (intervalMinutes: number) => void;
   stop: () => void;
   isRunning: () => boolean;
   hasExactAlarmPermission: () => boolean;
+  getWatchCompanionStatus: () => Promise<WatchCompanionStatus>;
 };
 
 const nativeScheduler = requireOptionalNativeModule<StormLogSchedulerNativeModule>('StormLogScheduler');
@@ -31,4 +46,16 @@ export function isNativeDailyMonitorSchedulerRunning(): boolean {
 
 export function hasNativeDailyMonitorExactAlarmPermission(): boolean {
   return nativeScheduler?.hasExactAlarmPermission() ?? false;
+}
+
+export async function getWatchCompanionStatus(): Promise<WatchCompanionStatus> {
+  if (!nativeScheduler) {
+    return {
+      connected: false,
+      installed: false,
+      updateAvailable: false,
+    };
+  }
+
+  return nativeScheduler.getWatchCompanionStatus();
 }
