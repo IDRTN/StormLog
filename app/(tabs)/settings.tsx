@@ -20,6 +20,10 @@ import { useStormLogger } from '../../src/hooks/useStormLogger';
 import { useDailyMonitor } from '../../src/hooks/useDailyMonitor';
 import { requestNotificationPermission, sendNotification } from '../../src/services/notifications';
 import { deleteAllDailyRecords, getDailyRecordCount } from '../../src/database/dailyWeather';
+import {
+  getWatchCompanionStatus,
+  WatchCompanionStatus,
+} from '../../src/services/background/dailyMonitorNativeScheduler';
 
 const STORM_INTERVALS = [
   { value: 1, label: '1 minute' },
@@ -47,6 +51,23 @@ export default function SettingsScreen() {
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [testLoading, setTestLoading] = useState(false);
   const [notifTestResult, setNotifTestResult] = useState<string | null>(null);
+  const [watchStatus, setWatchStatus] = useState<WatchCompanionStatus | null>(null);
+  const [watchLoading, setWatchLoading] = useState(false);
+  const [watchError, setWatchError] = useState<string | null>(null);
+
+  const refreshWatchStatus = async () => {
+    if (Platform.OS !== 'android') return;
+    setWatchLoading(true);
+    setWatchError(null);
+    try {
+      setWatchStatus(await getWatchCompanionStatus());
+    } catch (error: any) {
+      setWatchStatus(null);
+      setWatchError(error?.message || 'Unable to contact the watch companion.');
+    } finally {
+      setWatchLoading(false);
+    }
+  };
 
   useEffect(() => {
     (async () => {
@@ -55,6 +76,7 @@ export default function SettingsScreen() {
       const notif = await Notifications.getPermissionsAsync();
       setNotifPermission(notif.status === 'granted');
     })();
+    void refreshWatchStatus();
   }, []);
 
   const requestLocation = async () => {
@@ -126,6 +148,41 @@ export default function SettingsScreen() {
         <StatusRow label="Last Collection" value={formatTs(daily.lastCollectionTime)} />
         <StatusRow label="Last Error" value={daily.lastError || 'None'} color={daily.lastError ? Colors.danger : Colors.secondary} />
         <StatusRow label="Interval" value={`${daily.intervalMinutes} min`} />
+      </Section>
+
+      <Section title="⌚ Watch Companion">
+        <Text style={styles.hint}>
+          StormLog checks the connected Wear OS watch directly. A connected watch is not treated as having StormLog installed until it answers the version handshake.
+        </Text>
+        <StatusRow
+          label="Watch"
+          value={watchLoading ? 'Checking...' : watchStatus?.connected ? (watchStatus.nodeName || 'Connected') : 'Not connected'}
+          color={watchStatus?.connected ? Colors.loggingActive : Colors.textSecondary}
+        />
+        <StatusRow
+          label="StormLog Watch"
+          value={watchLoading ? 'Checking...' : watchStatus?.installed ? 'Detected' : 'Not detected'}
+          color={watchStatus?.installed ? Colors.loggingActive : Colors.warning}
+        />
+        <StatusRow label="Installed Version" value={watchStatus?.versionName || '—'} />
+        <StatusRow label="Latest Version" value={watchStatus?.latestVersionName || '0.2.0'} />
+        <StatusRow
+          label="Update"
+          value={watchStatus?.updateAvailable ? 'AVAILABLE' : watchStatus?.installed ? 'UP TO DATE' : 'UNKNOWN'}
+          color={watchStatus?.updateAvailable ? Colors.warning : watchStatus?.installed ? Colors.loggingActive : Colors.textSecondary}
+        />
+        {watchError && (
+          <View style={[styles.resultBox, { backgroundColor: Colors.danger + '20' }]}>
+            <Text style={{ color: Colors.danger, fontSize: 13 }}>{watchError}</Text>
+          </View>
+        )}
+        <TouchableOpacity
+          style={[styles.toggleBtn, { backgroundColor: Colors.primary }]}
+          onPress={refreshWatchStatus}
+          disabled={watchLoading}
+        >
+          <Text style={styles.toggleBtnText}>{watchLoading ? 'Checking Watch...' : 'Refresh Watch Status'}</Text>
+        </TouchableOpacity>
       </Section>
 
       <Section title="🔔 Notifications">
