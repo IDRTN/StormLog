@@ -18,7 +18,11 @@ import androidx.wear.compose.material3.Text
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { StormLogWatchScreen(WatchPreviewSnapshot.sample) }
+        val packageInfo = packageManager.getPackageInfo(packageName, 0)
+        val installedVersion = packageInfo.versionName ?: "unknown"
+        setContent {
+            StormLogWatchScreen(WatchPreviewSnapshot.sample, installedVersion)
+        }
     }
 }
 
@@ -47,7 +51,7 @@ data class WatchPreviewSnapshot(
 }
 
 @Composable
-fun StormLogWatchScreen(snapshot: WatchPreviewSnapshot) {
+fun StormLogWatchScreen(snapshot: WatchPreviewSnapshot, installedVersion: String) {
     MaterialTheme {
         Column(
             modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 12.dp),
@@ -55,14 +59,15 @@ fun StormLogWatchScreen(snapshot: WatchPreviewSnapshot) {
             verticalArrangement = Arrangement.Center
         ) {
             Text("STORMLOG", fontWeight = FontWeight.Bold)
+            Text("v" + installedVersion)
             snapshot.nwsWarning?.let {
-                Text("NWS: $it", fontWeight = FontWeight.Bold)
+                Text("NWS: " + it, fontWeight = FontWeight.Bold)
             }
             Text(snapshot.assessment, fontWeight = FontWeight.Bold)
-            Text("Confidence ${snapshot.confidence}")
-            Text("${snapshot.station} Level II • ${snapshot.radarAgeMinutes}m")
-            Text("Rotation ${snapshot.rotation}")
-            Text(snapshot.shearKt?.let { "Shear $it kt" } ?: "Shear unavailable")
+            Text("Confidence " + snapshot.confidence)
+            Text(snapshot.station + " Level II - " + snapshot.radarAgeMinutes + "m")
+            Text("Rotation " + snapshot.rotation)
+            Text(snapshot.shearKt?.let { "Shear " + it + " kt" } ?: "Shear unavailable")
             Text(snapshot.lightning)
         }
     }
