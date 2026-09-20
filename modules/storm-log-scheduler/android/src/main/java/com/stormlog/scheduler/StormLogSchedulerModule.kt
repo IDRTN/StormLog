@@ -97,6 +97,8 @@ class StormLogSchedulerModule : Module() {
       mapOf(
         "connected" to true,
         "installed" to false,
+        "reachable" to true,
+        "status" to "CONNECTED_NO_RESPONSE",
         "nodeName" to nodes.first().displayName,
         "latestVersionCode" to LATEST_WATCH_VERSION_CODE,
         "latestVersionName" to LATEST_WATCH_VERSION_NAME,
@@ -112,7 +114,9 @@ class StormLogSchedulerModule : Module() {
   companion object {
     private const val VERSION_REQUEST_PATH = "/stormlog/watch/version/request"
     private const val VERSION_RESPONSE_PATH = "/stormlog/watch/version/response"
-    private const val LATEST_WATCH_VERSION_CODE = 2L
-    private const val LATEST_WATCH_VERSION_NAME = "0.2.0"
+    private const val LATEST_WATCH_VERSION_CODE = 3L
+    private const val LATEST_WATCH_VERSION_NAME = "0.2.1"
+    private const val HANDSHAKE_ATTEMPTS = 3
+    private const val HANDSHAKE_TIMEOUT_SECONDS = 3L
   }
 }
