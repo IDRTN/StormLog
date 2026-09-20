@@ -183,6 +183,46 @@ assert(singleScanModerateCouplet.tornadicEvidence.level === 'LOW', 'single-scan 
 assert(singleScanModerateCouplet.overallAssessment === 'MARGINAL' || singleScanModerateCouplet.overallAssessment === 'LOW', 'single-scan LOW-evidence couplet must not elevate overall assessment to MODERATE');
 assert(singleScanModerateCouplet.whyExplanation.includes('Single unconfirmed radar couplet'), 'single-scan gate must be explained to the user');
 
+const staleRadar = analyzeStorm({
+  ...base,
+  radarData: {
+    available: true,
+    latestFrameTime: Math.floor((Date.now() - 31 * 60_000) / 1000),
+    hasPrecipitation: true,
+    maxReflectivityDbz: 65,
+    velocityPoints: [
+      { latitude: 35.0, longitude: -97.0, velocity: 40, stormRelativeVelocity: 40, reflectivity: 65, altitude: 500 },
+      { latitude: 35.001, longitude: -97.001, velocity: -40, stormRelativeVelocity: -40, reflectivity: 65, altitude: 500 },
+    ],
+    couplets: [
+      { latitude: 35.0, longitude: -97.0, shear: 80, strength: 'EXTREME', distanceKm: 1, headingTowardUser: true, lowLevel: true, scanCount: 3 },
+    ],
+    stormCells: [],
+    scanCount: 3,
+  } as any,
+});
+assert(staleRadar.dataQuality.radarCoverage === 'UNAVAILABLE', 'stale radar must fail closed');
+assert(staleRadar.dataQuality.velocityData === 'UNAVAILABLE', 'stale velocity must not be trusted');
+assert(staleRadar.dataQuality.limitations.some(x => x.includes('stale radar is not trusted')), 'stale radar limitation must be explicit');
+assert(staleRadar.overallAssessment !== 'HIGH' && staleRadar.overallAssessment !== 'VERY_HIGH', 'stale radar must not drive a high assessment');
+
+const missingTimestampRadar = analyzeStorm({
+  ...base,
+  radarData: {
+    available: true,
+    hasPrecipitation: true,
+    maxReflectivityDbz: 65,
+    velocityPoints: [
+      { latitude: 35.0, longitude: -97.0, velocity: 40, stormRelativeVelocity: 40, reflectivity: 65, altitude: 500 },
+      { latitude: 35.001, longitude: -97.001, velocity: -40, stormRelativeVelocity: -40, reflectivity: 65, altitude: 500 },
+    ],
+    couplets: [],
+    stormCells: [],
+  } as any,
+});
+assert(missingTimestampRadar.dataQuality.radarCoverage === 'UNAVAILABLE', 'untimestamped radar must fail closed');
+assert(missingTimestampRadar.dataQuality.limitations.some(x => x.includes('timestamp unavailable')), 'missing radar timestamp must be explicit');
+
 const warning = analyzeStorm({
   ...base,
   nwsAlerts: [{ event: 'Tornado Warning', severity: 'Extreme', headline: 'Test warning' }],
