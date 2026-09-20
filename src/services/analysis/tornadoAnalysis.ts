@@ -335,7 +335,12 @@ export function analyzeStorm(input: AnalysisInput, previousAnalyses?: StormAnaly
   const rotation = analyzeRotation(input, previousRotation);
   const tornadicEvidence = analyzeTornadicEvidence(input, rotation);
 
-  const hasRadar = input.radarData?.available === true;
+  const radarTime = input.radarData?.latestFrameTime;
+  const radarAgeMinutes = radarTime != null && Number.isFinite(radarTime)
+    ? Math.max(0, (Date.now() - radarTime * 1000) / 60000)
+    : null;
+  const radarFresh = radarAgeMinutes != null && radarAgeMinutes <= 20;
+  const hasRadar = input.radarData?.available === true && radarFresh;
   const hasVelocity = hasRadar && (input.radarData?.velocityPoints?.length ?? 0) > 0;
   const hasPrecipitation = hasRadar && input.radarData?.hasPrecipitation === true;
   const debrisSignature = tornadicEvidence.debrisSignature;
@@ -346,11 +351,15 @@ export function analyzeStorm(input: AnalysisInput, previousAnalyses?: StormAnaly
   // may establish radar persistence.
   const scanCount = hasVelocity ? Math.max(0, rotation.verticalContinuity) : 0;
 
+  const effectiveStructureLevel = hasRadar ? stormStructure.level : 'UNKNOWN';
+  const effectiveRotationLevel = hasVelocity ? rotation.level : 'UNKNOWN';
+  const effectiveEvidenceLevel = hasVelocity ? tornadicEvidence.level : 'UNKNOWN';
+
   const overall = calculateProgressiveAssessment(
     environment.level,
-    stormStructure.level,
-    rotation.level,
-    tornadicEvidence.level,
+    effectiveStructureLevel,
+    effectiveRotationLevel,
+    effectiveEvidenceLevel,
     hasVelocity,
     hasPrecipitation,
     debrisSignature,
@@ -360,7 +369,18 @@ export function analyzeStorm(input: AnalysisInput, previousAnalyses?: StormAnaly
 
   const nwsStatus = buildNwsStatus(input);
   const stormMotion = buildStormMotion(input, input.radarData?.stormCells);
-  const dataQuality = assessDataQuality(input, hasVelocity, scanCount);
+  const qualityInput = hasRadar ? input : {
+    ...input,
+    radarData: input.radarData ? { ...input.radarData, available: false } : input.radarData,
+  };
+  const dataQuality = assessDataQuality(qualityInput, hasVelocity, scanCount);
+  if (input.radarData?.available === true && !radarFresh) {
+    dataQuality.limitations.unshift(
+      radarAgeMinutes == null
+        ? 'Radar timestamp unavailable — quantitative radar is not trusted for tornado assessment'
+        : `Radar data is ${Math.round(radarAgeMinutes)} minutes old — stale radar is not trusted for tornado assessment`,
+    );
+  }
   const surfaceEnvironment = buildSurfaceEnvironment(input, environment);
   const atmosphericEnvironment = buildAtmosphericEnvironment(input);
 
