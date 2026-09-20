@@ -110,18 +110,19 @@ class StormLogSchedulerModule : Module() {
         )
 
         try {
-          repeat(HANDSHAKE_ATTEMPTS) {
+          var attempt = 0
+          while (attempt < HANDSHAKE_ATTEMPTS && response == null) {
+            attempt += 1
             Tasks.await(
               messageClient.sendMessage(node.id, VERSION_REQUEST_PATH, ByteArray(0)),
               MESSAGE_SEND_TIMEOUT_SECONDS,
               TimeUnit.SECONDS,
             )
 
-            if (latch.await(HANDSHAKE_RESPONSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-              response?.let { return@AsyncFunction it }
-              break
-            }
+            latch.await(HANDSHAKE_RESPONSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
           }
+
+          response?.let { return@AsyncFunction it }
         } finally {
           runCatching {
             Tasks.await(
