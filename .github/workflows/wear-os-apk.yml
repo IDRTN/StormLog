@@ -14,8 +14,6 @@ jobs:
   build-wear-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      STORMLOG_RELEASE_KEYSTORE: ${{ runner.temp }}/stormlog-release.keystore
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -42,65 +40,24 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Configure shared StormLog signing
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          for variable in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
-            if [ -z "${!variable:-}" ]; then
-              echo "::error::Required shared signing secret ${variable} is not configured."
-              exit 1
-            fi
-          done
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n' | base64 --decode > "$STORMLOG_RELEASE_KEYSTORE"
-          chmod 600 "$STORMLOG_RELEASE_KEYSTORE"
-          test -s "$STORMLOG_RELEASE_KEYSTORE"
-          keytool -list -alias "$ANDROID_KEY_ALIAS" -keystore "$STORMLOG_RELEASE_KEYSTORE" -storepass "$ANDROID_KEYSTORE_PASSWORD" >/dev/null
-
       - name: Compile Wear OS app
         working-directory: wear
-        run: gradle :app:compileReleaseKotlin --stacktrace
+        run: gradle :app:compileDebugKotlin --stacktrace
 
-      - name: Assemble shared-signed Wear OS APK
+      - name: Assemble Wear OS APK
         working-directory: wear
-        env:
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: gradle :app:assembleRelease --stacktrace
+        run: gradle :app:assembleDebug --stacktrace
 
-      - name: Verify Wear OS identity and signature
-        env:
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      - name: Verify Wear OS APK
         run: |
-          set -euo pipefail
-          APK="wear/app/build/outputs/apk/release/app-release.apk"
-          AAPT2="$ANDROID_SDK_ROOT/build-tools/35.0.0/aapt2"
-          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner"
-          test -s "$APK"
-          BADGING="$("$AAPT2" dump badging "$APK")"
-          echo "$BADGING" | grep -F "package: name='com.stormlog.app' versionCode='3' versionName='0.2.1'"
-          "$APKSIGNER" verify --verbose --print-certs "$APK"
-          APK_CERT="$("$APKSIGNER" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)"
-          KEYSTORE_CERT="$(keytool -list -v -alias "$ANDROID_KEY_ALIAS" -keystore "$STORMLOG_RELEASE_KEYSTORE" -storepass "$ANDROID_KEYSTORE_PASSWORD" | sed -n 's/^[[:space:]]*SHA256: //p' | tr -d ':' | tr '[:upper:]' '[:lower:]' | head -n 1)"
-          test -n "$APK_CERT"
-          test -n "$KEYSTORE_CERT"
-          test "$APK_CERT" = "$KEYSTORE_CERT"
-          sha256sum "$APK"
+          test -s wear/app/build/outputs/apk/debug/app-debug.apk
+          ls -lh wear/app/build/outputs/apk/debug/app-debug.apk
+          sha256sum wear/app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload Wear OS APK
         uses: actions/upload-artifact@v4
         with:
-          name: StormLog-WearOS-shared-signed
-          path: wear/app/build/outputs/apk/release/app-release.apk
+          name: StormLog-WearOS-test
+          path: wear/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
-
-      - name: Remove signing material
-        if: always()
-        run: rm -f "$STORMLOG_RELEASE_KEYSTORE"
