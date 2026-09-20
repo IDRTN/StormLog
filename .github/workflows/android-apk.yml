@@ -46,6 +46,7 @@ env:
   ANDROID_BUILD_TOOLS_VERSION: "36.0.0"
   ANDROID_NDK_VERSION: "27.1.12297006"
   CMAKE_VERSION: "3.22.1"
+  EXPO_PUBLIC_STORMLOG_RADAR_API_URL: "https://stormlog-radar-analysis-v3.onrender.com"
 
 jobs:
   build-apk:
@@ -256,6 +257,45 @@ jobs:
       - name: Run TypeScript validation
         id: typecheck
         run: npm run typecheck
+
+      - name: Validate live Level II radar contract
+        id: validate-level2
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${EXPO_PUBLIC_STORMLOG_RADAR_API_URL:-}"
+          case "${EXPO_PUBLIC_STORMLOG_RADAR_API_URL}" in
+            https://*) ;;
+            *) echo "::error::Level II radar endpoint must use HTTPS"; exit 1 ;;
+          esac
+
+          curl --retry 2 --retry-delay 2 --retry-all-errors --max-time 30 -fsS             "${EXPO_PUBLIC_STORMLOG_RADAR_API_URL%/}/health" > /tmp/stormlog-radar-health.json
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("/tmp/stormlog-radar-health.json","utf8"));if(p?.ok!==true)throw new Error("Level II radar health endpoint not ready")'
+
+          curl --retry 1 --retry-delay 2 --retry-all-errors --max-time 150 -fsS             "${EXPO_PUBLIC_STORMLOG_RADAR_API_URL%/}/radar?lat=40.039&lon=-82.461" > /tmp/stormlog-radar-live.json
+          node <<'NODE'
+          const fs = require('fs');
+          const p = JSON.parse(fs.readFileSync('/tmp/stormlog-radar-live.json', 'utf8'));
+          if (p?.available !== true) throw new Error(`Level II unavailable: ${p?.unavailableReason ?? 'unknown'}`);
+          if (!Number.isFinite(Number(p?.maxReflectivityDbz))) throw new Error('quantitative dBZ missing');
+          if (!Array.isArray(p?.velocityPoints) || p.velocityPoints.length === 0) throw new Error('Doppler velocity missing');
+          if (!Number.isInteger(p?.scanCount) || p.scanCount < 1) throw new Error('scanCount invalid');
+          if (!('correlationCoefficient' in p) || !('differentialReflectivity' in p)) throw new Error('dual-pol fields missing');
+          if (!p?.dualPolEvidence || typeof p.dualPolEvidence !== 'object') throw new Error('dual-pol evidence missing');
+          if (p.dualPolEvidence.debrisSignature === true && p.dualPolEvidence.scanCount < 2) throw new Error('single-scan debris signature forbidden');
+          console.log('LIVE_LEVEL2_CONTRACT_PASS');
+          NODE
+
+      - name: Validate tornado engine integration
+        id: validate-tornado-engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/stormlog-radar-integration
+          npx tsc --ignoreConfig             src/services/analysis/quantitativeRadarBackend.ts             src/services/analysis/tornadoAnalysis.ts             src/services/analysis/__tests__/quantitativeRadarIntegration.runtime.test.ts             --module commonjs --target ES2022 --moduleResolution node --types node             --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck             --outDir /tmp/stormlog-radar-integration
+          TEST_FILE="$(find /tmp/stormlog-radar-integration -type f -name 'quantitativeRadarIntegration.runtime.test.js' -print -quit)"
+          test -n "${TEST_FILE}"
+          node "${TEST_FILE}"
 
       - name: Snapshot application source hashes
         id: snapshot-source
