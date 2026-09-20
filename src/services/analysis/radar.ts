@@ -111,6 +111,8 @@ export async function getRadarData(
   latitude: number,
   longitude: number
 ): Promise<RadarDataResult> {
+  let quantitativeFailureReason: string | undefined;
+
   try {
     const { fetchQuantitativeRadarData } = await import('./quantitativeRadarBackend');
     const quantitative = await fetchQuantitativeRadarData(latitude, longitude);
@@ -133,7 +135,11 @@ export async function getRadarData(
         unavailableReason: quantitative.unavailableReason,
       };
     }
+
+    quantitativeFailureReason = quantitative?.unavailableReason
+      ?? (quantitative ? 'Level II backend returned no usable Doppler velocity data' : 'Level II backend is not configured in this build');
   } catch (error) {
+    quantitativeFailureReason = `Level II backend failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
     console.warn('[Radar] Quantitative backend unavailable, using composite fallback:', error);
   }
 
@@ -151,7 +157,9 @@ export async function getRadarData(
       hasPrecipitation: result.reflectivity?.hasPrecipitation,
       maxReflectivityDbz: result.reflectivity?.maxReflectivityDbz ?? null,
       source: 'COMPOSITE_FALLBACK',
-      unavailableReason: result.unavailableReason,
+      unavailableReason: quantitativeFailureReason
+        ? `${quantitativeFailureReason}; composite fallback active${result.unavailableReason ? `: ${result.unavailableReason}` : ''}`
+        : result.unavailableReason,
     };
   } catch (error) {
     console.warn('[Radar] Failed to fetch radar data:', error);
