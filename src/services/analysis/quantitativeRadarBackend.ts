@@ -129,6 +129,22 @@ export async function fetchQuantitativeRadarData(
 
   const url = `${configured.replace(/\/$/, '')}/radar?lat=${encodeURIComponent(latitude)}&lon=${encodeURIComponent(longitude)}`;
   const response = await fetch(url, { headers: { Accept: 'application/json' } });
-  if (!response.ok) throw new Error(`Quantitative radar backend HTTP ${response.status}`);
-  return parseQuantitativeRadarPayload(await response.json());
+  let payload: any = null;
+  try {
+    payload = await response.json();
+  } catch {
+    if (!response.ok) throw new Error(`Quantitative radar backend HTTP ${response.status}: invalid JSON response`);
+    throw new Error('Quantitative radar backend returned invalid JSON');
+  }
+
+  if (!response.ok) {
+    const reason = typeof payload?.unavailableReason === 'string' && payload.unavailableReason.trim()
+      ? payload.unavailableReason.trim()
+      : typeof payload?.error === 'string' && payload.error.trim()
+        ? payload.error.trim()
+        : null;
+    throw new Error(`Quantitative radar backend HTTP ${response.status}${reason ? `: ${reason}` : ''}`);
+  }
+
+  return parseQuantitativeRadarPayload(payload);
 }
