@@ -16,6 +16,21 @@ android {
         versionName = "0.2.1"
     }
 
+    signingConfigs {
+        create("stormlogRelease") {
+            storeFile = file(System.getenv("STORMLOG_RELEASE_KEYSTORE") ?: "missing-release-keystore")
+            storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+            keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            signingConfig = signingConfigs.getByName("stormlogRelease")
+        }
+    }
+
     buildFeatures {
         compose = true
     }
