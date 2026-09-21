@@ -254,10 +254,13 @@ export function createStormLogWeatherProvider(
                     weatherData.observedDailyPrecipitationPartialHours = undefined;
                     weatherData.precipitationIsComplete = true;
                   } else {
-                    const partial = selectPartialMrmsAccumulation(mrmsResult, referenceTimeMs, utcOffsetSeconds);
-                    weatherData.observedDailyPrecipitation = partial?.value ?? null;
+                    // Rolling MRMS 1/3/6/12/24-hour QPE products are NOT a
+                    // local-midnight-to-now accumulation. Never put one in the
+                    // daily precipitation field: doing so can make yesterday's
+                    // rain look like today's total just after midnight.
+                    weatherData.observedDailyPrecipitation = null;
                     weatherData.observedDailyPrecipitationIsComplete = false;
-                    weatherData.observedDailyPrecipitationPartialHours = partial?.hours;
+                    weatherData.observedDailyPrecipitationPartialHours = undefined;
                     weatherData.precipitationIsComplete = false;
                   }
 
