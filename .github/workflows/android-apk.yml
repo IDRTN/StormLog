@@ -297,6 +297,14 @@ jobs:
           test -n "${TEST_FILE}"
           node "${TEST_FILE}"
 
+      - name: Validate weather precipitation semantics
+        id: validate-weather-precipitation
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tsx src/services/weather/__tests__/precipitation.test.ts
+          npx tsx src/services/weather/__tests__/weatherProvider.runtime.test.ts
+
       - name: Snapshot application source hashes
         id: snapshot-source
         run: |
