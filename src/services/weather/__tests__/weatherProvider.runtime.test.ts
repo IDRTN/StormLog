@@ -77,7 +77,7 @@ async function optionalProviderFailuresDoNotEraseOpenMeteo() {
   assert(result.data.weatherCondition === 'Slight rain', 'Expected Open-Meteo current conditions');
 }
 
-async function incompleteMrmsRollingAccumulationRemainsVisible() {
+async function incompleteMrmsRollingAccumulationNeverMasqueradesAsToday() {
   const fetchJson = (async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.startsWith('https://api.open-meteo.com')) return jsonResponse(200, openMeteoBody());
@@ -125,9 +125,11 @@ async function incompleteMrmsRollingAccumulationRemainsVisible() {
   const result = await provider.getCurrentWeather(40.0593, -82.4606, reference);
   assert(result.success, `MRMS partial precipitation should remain usable: ${!result.success ? result.error : ''}`);
   if (!result.success) return;
-  assert(result.data.observedDailyPrecipitationIsComplete === false, 'Partial MRMS accumulation must remain marked incomplete');
-  assert(result.data.observedDailyPrecipitationPartialHours === 1, `Expected 1h partial coverage, got ${result.data.observedDailyPrecipitationPartialHours}`);
-  assert(Math.abs((result.data.observedDailyPrecipitation ?? 0) - 0.22) < 0.0001, `Expected visible 0.22in partial accumulation, got ${result.data.observedDailyPrecipitation}`);
+  assert(result.data.observedDailyPrecipitationIsComplete === false, 'Unavailable daily accumulation must remain incomplete');
+  assert(result.data.observedDailyPrecipitationPartialHours == null, 'Rolling MRMS duration must not be relabeled as partial daily coverage');
+  assert(result.data.observedDailyPrecipitation == null, `Rolling MRMS must never populate today's precipitation, got ${result.data.observedDailyPrecipitation}`);
+  assert(Math.abs((result.data.radarPrecipitation1h ?? 0) - 0.22) < 0.0001, 'The real MRMS 1h value must remain available in its correctly named field');
+  assert(Math.abs((result.data.radarPrecipitation24h ?? 0) - 1.12) < 0.0001, 'The real MRMS 24h value must remain available in its correctly named field');
 }
 
 (async () => {
@@ -135,6 +137,6 @@ async function incompleteMrmsRollingAccumulationRemainsVisible() {
   console.log('PASS: Open-Meteo malformed JSON falls back to mobile NWS station discovery');
   await optionalProviderFailuresDoNotEraseOpenMeteo();
   console.log('PASS: NWS/MRMS failures do not erase Open-Meteo weather data');
-  await incompleteMrmsRollingAccumulationRemainsVisible();
-  console.log('PASS: incomplete MRMS rolling accumulation remains visible and explicitly partial');
+  await incompleteMrmsRollingAccumulationNeverMasqueradesAsToday();
+  console.log('PASS: rolling MRMS accumulations stay in duration-specific fields and never masquerade as today');
 })();
