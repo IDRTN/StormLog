@@ -272,7 +272,12 @@ export function calculateObservedDailyPrecip(
   
   const expectedHours = weatherLocalHour + 1;
   const uniqueHours = new Set(hourlyValuesUsed.map((entry) => entry.time.substring(0, 13)));
-  const isComplete = uniqueHours.size === expectedHours && foundCurrentHour && nullValuesSkipped.length === 0;
+  // Require every local clock hour from midnight through the reference hour.
+  // A simple count could otherwise accept duplicate or out-of-range timestamps.
+  const hasEveryHour = Array.from({ length: expectedHours }, (_, hour) =>
+    uniqueHours.has(`${weatherLocalDate}T${String(hour).padStart(2, '0')}`)
+  ).every(Boolean);
+  const isComplete = hasEveryHour && foundCurrentHour && nullValuesSkipped.length === 0;
 
   console.log(
     `[PRECIP] Weather-local date=${weatherLocalDate}, hour=${weatherLocalHour}\n` +
