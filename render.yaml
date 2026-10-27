@@ -9,4 +9,4 @@ services:
     autoDeploy: false
     envVars:
       - key: NODE_VERSION
-        value: 24.20.0
+        value: 24.22.1
