@@ -177,7 +177,8 @@ export async function fetchOpenMeteoSnapshot(
       let observedDailyPartialHours = 0;
       if (hourlyTimes.length > 0 && hourlyPrecip.length > 0) {
         const result = calculateObservedDailyPrecip(hourlyTimes, hourlyPrecip, utcOffsetSeconds, referenceTimeMs);
-        observedDailyPrecip = result.total;
+        // Do not present a partial hourly sum as a verified day-to-date rainfall total.
+        observedDailyPrecip = result.isComplete ? result.total : null;
         observedDailyComplete = result.isComplete;
         observedDailyPartialHours = result.nullValuesSkipped.length;
       }
@@ -258,7 +259,7 @@ export function calculateObservedDailyPrecip(
     if (datePart === weatherLocalDate && hourPart <= weatherLocalHour) {
       const precipVal = hourlyPrecip[i];
 
-      if (precipVal != null && typeof precipVal === 'number') {
+      if (typeof precipVal === 'number' && Number.isFinite(precipVal) && precipVal >= 0) {
         total += precipVal;
         hourlyValuesUsed.push({ time: timeStr, value: precipVal });
       } else {
@@ -270,7 +271,8 @@ export function calculateObservedDailyPrecip(
   }
   
   const expectedHours = weatherLocalHour + 1;
-  const isComplete = hourlyValuesUsed.length >= expectedHours && foundCurrentHour;
+  const uniqueHours = new Set(hourlyValuesUsed.map((entry) => entry.time.substring(0, 13)));
+  const isComplete = uniqueHours.size === expectedHours && foundCurrentHour && nullValuesSkipped.length === 0;
 
   console.log(
     `[PRECIP] Weather-local date=${weatherLocalDate}, hour=${weatherLocalHour}\n` +
